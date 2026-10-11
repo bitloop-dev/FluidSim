@@ -79,43 +79,37 @@ struct FluidGrid
 
     void advect(double dt)
     {
-        for (int y = 0; y < height; y++)
+        const double step = dt / cell_size;
+
+        Thread::forEachBatch(next_u, [&](int i0, int i1)
         {
-            for (int x = 0; x <= width; x++)
+            for (int i = i0; i < i1; ++i)
             {
-                DVec2 pos{
-                    origin.x + x * cell_size,
-                    origin.y + (y + 0.5) * cell_size
-                };
+                const int x = i % (width + 1);
+                const int y = i / (width + 1);
 
-                DVec2 vel = sampleVelocity(pos);
-                DVec2 prev{
-                    pos.x - vel.x * dt,
-                    pos.y - vel.y * dt
-                };
+                const double ux = u[i];
+                const double vy = sampleScalar(v, width, height + 1, x - 0.5, y + 0.5);
 
-                next_u[uIndex(x, y)] = sampleVelocity(prev).x;
+                // Backtrace in this component's staggered grid coordinates.
+                next_u[i] = sampleScalar(u, width + 1, height, x - ux * step, y - vy * step);
             }
-        }
+        });
 
-        for (int y = 0; y <= height; y++)
+        Thread::forEachBatch(next_v, [&](int i0, int i1)
         {
-            for (int x = 0; x < width; x++)
+            for (int i = i0; i < i1; ++i)
             {
-                DVec2 pos{
-                    origin.x + (x + 0.5) * cell_size,
-                    origin.y + y * cell_size
-                };
+                const int x = i % width;
+                const int y = i / width;
 
-                DVec2 vel = sampleVelocity(pos);
-                DVec2 prev{
-                    pos.x - vel.x * dt,
-                    pos.y - vel.y * dt
-                };
+                const double ux = sampleScalar(u, width + 1, height, x + 0.5, y - 0.5);
+                const double vy = v[i];
 
-                next_v[vIndex(x, y)] = sampleVelocity(prev).y;
+                // Backtrace in this component's staggered grid coordinates.
+                next_v[i] = sampleScalar(v, width, height + 1, x - ux * step, y - vy * step);
             }
-        }
+        });
 
         u.swap(next_u);
         v.swap(next_v);
@@ -123,10 +117,12 @@ struct FluidGrid
 
     void advectDye(double dt)
     {
-        for (int y = 0; y < height; ++y)
+        Thread::forEachBatch(next_dye, [&](int i0, int i1)
         {
-            for (int x = 0; x < width; x++)
+            for (int i = i0; i < i1; ++i)
             {
+                const int x = i % width;
+                const int y = i / width;
                 DVec2 pos{
                     origin.x + (x + 0.5) * cell_size,
                     origin.y + (y + 0.5) * cell_size
@@ -142,7 +138,7 @@ struct FluidGrid
                     dye, width, height, sample_x, sample_y
                 );
             }
-        }
+        });
 
         dye.swap(next_dye);
     }
@@ -222,7 +218,6 @@ struct FluidGrid
         std::vector<double> divergence(width * height, 0.0);
         std::vector<double> pressure(width * height, 0.0);
 
-        double h = cell_size;
 
         // prevent flow through the outer boundaries
         for (int y = 0; y < height; ++y) {
@@ -243,7 +238,7 @@ struct FluidGrid
                 double du = u[uIndex(x + 1, y)] - u[uIndex(x, y)];
                 double dv = v[vIndex(x, y + 1)] - v[vIndex(x, y)];
 
-                divergence[i] = (du + dv) / h;
+                divergence[i] = (du + dv) / cell_size;
             }
         }
 
@@ -278,7 +273,7 @@ struct FluidGrid
 
                     if (neighbours > 0) {
                         double target = (
-                            sum - h * h * divergence[i] / dt
+                            sum - cell_size * cell_size * divergence[i] / dt
                             ) / neighbours;
 
                         double omega = 1.8;
@@ -292,10 +287,12 @@ struct FluidGrid
         // correct horizontal velocities
         for (int y = 0; y < height; ++y) {
             for (int x = 1; x < width; ++x) {
+                // if the cell on the right has higher pressure than the cell on the left, 
+                // increases velocity across that boundary towards the left
                 double gradient = (
                     pressure[index(x, y)] -
                     pressure[index(x - 1, y)]
-                    ) / h;
+                    ) / cell_size;
 
                 u[uIndex(x, y)] -= gradient * dt;
             }
@@ -304,10 +301,12 @@ struct FluidGrid
         // correct vertical velocities
         for (int y = 1; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
+                // if the cell on the bottom has higher pressure than the cell on the top, 
+                // increases velocity across that boundary towards the top
                 double gradient = (
                     pressure[index(x, y)] -
                     pressure[index(x, y - 1)]
-                    ) / h;
+                    ) / cell_size;
 
                 v[vIndex(x, y)] -= gradient * dt;
             }
