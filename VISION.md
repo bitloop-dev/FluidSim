@@ -61,7 +61,7 @@ For a `width × height` grid of cells:
 
 - `u`: horizontal face velocities, `(width + 1) × height` scalars.
 - `v`: vertical face velocities, `width × (height + 1)` scalars.
-- Future `pressure`: one value at each cell centre, `width × height` scalars.
+- `pressure`: one value at each cell centre, `width × height` scalars.
 - Future `water_fraction`: one volume fraction at each cell centre.
 - Future `solid`/obstacle representation: cells and/or solid face fractions, ultimately with correct obstacle boundary conditions.
 
@@ -120,7 +120,7 @@ Defines:
   - `sampleVelocity(DVec2 pos)`;
   - `advect(double dt)`;
   - `addVortex(DVec2 center, double radius, double strength)`;
-  - `project(double dt, int iterations = 200)`;
+  - `project(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6)`, returning `ProjectionResult`;
   - `maxDivergence()`.
 - `Particle` with `DVec2 pos`.
 - `FluidSim_Scene` derived from `Scene<FluidSim_Scene>`; camera, navigator, fluid and particle storage.
@@ -169,12 +169,17 @@ for (auto& particle : particles) {
 **Pressure projection:**
 
 1. Set *outer* normal face velocities to zero (closed, solid walls).
-2. Compute discrete cell divergence from face-velocity differences.
-3. Allocate and zero `divergence` and `pressure` vectors, each `width*height`, on **every call**.
-4. Solve a constant-density pressure Poisson problem with **200 in-place Gauss–Seidel/SOR sweeps**, relaxation `omega = 1.8`.
-5. Correct interior `u` and `v` by subtracting a timestep-scaled pressure gradient.
+2. Compute negative, scaled divergence as the pressure equation's right-hand side.
+3. Solve with **single-threaded, matrix-free preconditioned conjugate gradient (PCG)** and diagonal preconditioning. Pressure, its previous value, and five working buffers are reused across calls. The last two pressures predict the initial guess; the residual is always rebuilt using the current density coefficients and velocities.
+4. Remove the constant pressure mode by working in the mean-zero subspace. The right-hand side is made compatible with the closed walls; diagonal preconditioning projects both its input and output into that subspace.
+5. Stop at the requested maximum-divergence tolerance, or the iteration cap. Recompute the true equation residual before accepting iterative convergence.
+6. Correct interior `u` and `v` using the same inverse-density face weights as the pressure operator, then measure actual final divergence.
 
-Pressure isn't retained across frames, there is no internal obstacle handling yet, and only the outer rectangular computational domain is currently treated as solid.
+`ProjectionResult` reports `iterations`, `max_divergence` (inverse seconds), and `converged`. The default 200 is a maximum work budget, not a convergence guarantee; callers can increase it or choose a different absolute divergence tolerance. Invalid parameters return an unconverged result with infinite reported divergence. There is no internal obstacle handling yet, and only the outer rectangular computational domain is currently treated as solid.
+
+`applyPressureOperator` sums centre-minus-neighbour pressure differences weighted by shared inverse-density face coefficients. The inverse diagonal is cached once per projection. `applyPreconditioner` accepts the residual mean and returns the residual/correction dot product, combining that reduction with mean removal. It remains the replacement point for a future multigrid cycle. Ordinary PCG requires a fixed symmetric positive preconditioner on the mean-zero subspace; future multigrid smoothing and transfers must preserve this property. Obstacles and adaptive interfaces will require revising the operator and preconditioner consistently. Disconnected closed fluid regions would each need their own constant-mode handling.
+
+The pressure stencil runs serially because small thread-pool batches were slower on the current grid. PCG combines pressure/residual updates with residual statistics and uses standard reductions that allow reassociation. Scene updates divide each capped frame interval into equal substeps, avoiding nearly zero remainder steps that disrupt pressure prediction. The requested divergence tolerance and true-residual verification are retained.
 
 **Diagnostics:** `maxDivergence()` scans every cell for the maximum absolute finite-difference divergence.
 
@@ -182,7 +187,7 @@ Pressure isn't retained across frames, there is no internal obstacle handling ye
 
 The user reports the simulation is producing **nice visual results**, although it is somewhat slow. They supplied long diagnostics showing substantial divergence reductions: commonly pre-projection ~15–25 and post-projection declining from ~4 toward ~0.5 as the simulation evolved. This demonstrates that projection is having a useful effect, **not** that incompressibility has converged fully or that every numerical issue is solved. Earlier suggestions included trying more pressure iterations, using SOR and measuring pressure residuals.
 
-The 128×128×200 setup performs **3,276,800 pressure-cell visits per simulation step**, not counting advection, interpolation, tracers or rendering. That makes the pressure solve a likely performance bottleneck, but it should be **profiled** rather than assumed to be the only one.
+The previous 128×128×200 SOR setup performed **3,276,800 pressure-cell visits per simulation step**, not counting advection, interpolation, tracers or rendering. PCG has several array passes per iteration, so compare elapsed time at the same final divergence rather than comparing iteration counts.
 
 ---
 
@@ -211,11 +216,11 @@ This matters to *all* velocity sampling, particle movement and advection. Rechec
 
 ### Other immediate improvements
 
-- `project()` allocates and clears new pressure/divergence vectors every frame. Reuse member buffers; eventually consider pressure warm-start where appropriate.
+- `project()` reuses pressure and PCG working buffers, predicts pressure from the previous two solves, and resets that history when the pool is initialized or no pressure correction is needed.
 - Logging divergence with `blPrint()` **every frame** may noticeably impair performance. Log less often or expose counters in ImGui.
 - Divergence is measured **before** `project()` enforces solid outer-wall velocities, but *after* projection with those walls already applied. For a fair diagnostic, explicitly enforce the same boundary conditions **before** the “before” measurement. Keep clear which errors are due to advection, wall correction or projection.
 - Benchmark separately: `advect`, `project`, particle updates, and `viewportDraw`. Only then optimise what matters.
-- `project()` uses 200 SOR iterations with `omega = 1.8`; this is a simple educational solver, not guaranteed optimum. Compare iteration counts or eventually monitor a pressure-equation residual and use multigrid/another solver.
+- `project()` now uses diagonal PCG with a divergence tolerance and iteration cap. Diagonal preconditioning is a baseline; multigrid preconditioning remains the intended stronger accelerator.
 - `sceneStart()` loops use `y <= grid_w` and `x <= grid_h` rather than `y <= grid_h` and `x <= grid_w`. Both dimensions happen to be 128, so there is no effect now; fix before supporting nonsquare grids.
 - Random vortex radius is drawn from a range that includes zero. Clamp to a small positive minimum or guard `radius > 0` to prevent division by zero if that edge case occurs.
 - Tracers have no wall-collision or boundary-wrapping logic; clamped velocity sampling outside the grid is **not** a physical boundary condition for particles.
@@ -271,7 +276,7 @@ $$
 
 **Legend:** `p` is pressure in normalised units; `∇` (“nabla”/“del”) is the spatial derivative operator; `∇p` is the pressure gradient (2D vector of pressure-change rates); `∇²p` is the Laplacian (sum of spatial second derivatives); `d` is divergence; `Δt` is elapsed time; **bold** `v_old` and `v_new` are velocity vectors before/after correction. For physical density `ρ`, the full constant-density form is `∇²p = (ρ/Δt)d` and the correction is `v_new = v_old − (Δt/ρ)∇p`.
 
-The current SOR loop numerically approximates this pressure equation by repeatedly updating pressure using its adjacent cell values. Normal-velocity zero at solid boundaries supplies the wall condition. The all-solid, Neumann-boundary pressure equation has an arbitrary additive constant; only pressure differences matter.
+The current matrix-free PCG solver approximates this pressure equation using the same adjacent-cell differences. Normal-velocity zero at solid boundaries supplies the wall condition. The all-solid, Neumann-boundary pressure equation has an arbitrary additive constant; only pressure differences matter. PCG explicitly removes this constant mode.
 
 ### D. Vortex initialisation
 
@@ -311,7 +316,7 @@ Use this later for spatially/temporally coherent refinement detail that respects
 ### Near term — continue learning, CPU only
 
 1. **Fix and validate the bilinear sampler** (see bug above). Verify particles move smoothly and divergence behaviour changes as expected.
-2. **Make profiling/diagnostics inexpensive and reliable**: reuse pressure buffers; enforce boundaries before comparison; measure advection, projection, particles and rendering independently; test SOR iteration counts, convergence and timestep stability.
+2. **Make profiling/diagnostics inexpensive and reliable**: pressure buffers are now reused; enforce boundaries before comparison; measure advection, projection, particles and rendering independently; test PCG tolerances, iteration limits, convergence and timestep stability.
 3. **Interactive force injection:** mouse-drag forces in world space, adding impulses to MAC faces using a distance-based kernel; project afterwards; separate velocity impulses from sustained acceleration (units/timestep matter).
 4. **Visual debugging:** toggleable velocity arrows, pressure/ divergence heatmaps, solid-boundary display, and particles. Keep this optional and simple.
 5. **Introduce interior solid obstacles:** initially axis-aligned cell masks with no-penetration face velocities; modify divergence/pressure-neighbour handling appropriately. Later use fractional/cut faces for smoother obstacles and moving boundaries.

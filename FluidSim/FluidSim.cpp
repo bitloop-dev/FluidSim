@@ -33,15 +33,15 @@ void FluidSim_Scene::UI::sidebar()
 
 }
 
-void FluidSim_Scene::uploadDyeTexture() const
+void FluidSim_Scene::uploadWaterTexture() const
 {
-    // convert dye concentrations to display bytes
-    dye_pixels.resize(fluid.dye.size());
+    // Convert water fractions to display bytes without changing the simulation state.
+    water_pixels.resize(fluid.water_fraction.size());
 
-    for (size_t i = 0; i < fluid.dye.size(); ++i)
+    for (size_t i = 0; i < fluid.water_fraction.size(); ++i)
     {
-        double value = std::clamp(fluid.dye[i], 0.0, 1.0);
-        dye_pixels[i] = static_cast<unsigned char>(value * 255.0 + 0.5);
+        double value = std::clamp(fluid.water_fraction[i], 0.0, 1.0);
+        water_pixels[i] = static_cast<unsigned char>(value * 255.0 + 0.5);
     }
 
     // restore previous GL state on exit and allow tightly packed single-channel rows
@@ -49,11 +49,11 @@ void FluidSim_Scene::uploadDyeTexture() const
     glActiveTexture(GL_TEXTURE0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
-    if (dye_texture == 0)
+    if (water_texture == 0)
     {
         // create the texture on first use
-        glGenTextures(1, &dye_texture);
-        glBindTexture(GL_TEXTURE_2D, dye_texture);
+        glGenTextures(1, &water_texture);
+        glBindTexture(GL_TEXTURE_2D, water_texture);
 
         // blend neighbouring cell values and prevent sampling across opposite edges
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -69,14 +69,14 @@ void FluidSim_Scene::uploadDyeTexture() const
     }
     else
     {
-        glBindTexture(GL_TEXTURE_2D, dye_texture);
+        glBindTexture(GL_TEXTURE_2D, water_texture);
     }
 
-    // replace the texture contents with the current dye values without reallocating
+    // Replace the texture contents with the current water fractions without reallocating.
     glTexSubImage2D(
         GL_TEXTURE_2D, 0, 0, 0,
         fluid.width, fluid.height,
-        GL_RED, GL_UNSIGNED_BYTE, dye_pixels.data());
+        GL_RED, GL_UNSIGNED_BYTE, water_pixels.data());
 }
 
 void FluidSim_Scene::sceneStart()
@@ -97,22 +97,6 @@ void FluidSim_Scene::sceneStart()
         }
     }
     
-    bool clockwise = false;
-    for (int i = 0; i < 20; i++)
-    {
-        double vortex_x = this->random(0.0, world_w);
-        double vortex_y = this->random(0.0, world_h);
-        double vortex_radius = random(0.1, 0.3) * world_hypot;
-        double vortex_strength = (clockwise ? 1.0 : -1.0) * 0.2;// random(0.1, 1.0);
-
-        fluid.addVortex(
-            DVec2{ vortex_x, vortex_y },
-            vortex_radius,
-            vortex_strength
-        );
-        clockwise = !clockwise;
-    }
-
     surface.setFragmentSource(fluid_shader_src);
 }
 
@@ -139,13 +123,16 @@ void FluidSim_Scene::sceneDestroy()
 {
     renderThreadQueue().post([this]()
     {
-        if (dye_texture)
+        if (water_texture)
         {
-            glDeleteTextures(1, &dye_texture);
-            dye_texture = 0;
+            glDeleteTextures(1, &water_texture);
+            water_texture = 0;
         }
 
         surface.destroy();
+#ifdef BITLOOP_DEV_MODE
+        snapshot_preprocessor.destroyGL();
+#endif
     });
 }
 
@@ -159,37 +146,56 @@ void FluidSim_Scene::sceneProcess(
 
 void FluidSim_Scene::viewportProcess(
     [[maybe_unused]] Viewport* ctx,
-    [[maybe_unused]] double dt)
+    double dt)
 {
-    fluid.advect(dt);
+    if (simulation_failed || dt <= 0.0)
+        return;
 
-    //double before = fluid.maxDivergence();
-    fluid.project(dt);
-    //double after = fluid.maxDivergence();
+    // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
+    const double frame_time = std::min(dt, 0.05);
+    const int step_count = int(std::ceil(frame_time * 120.0));
+    const double step = frame_time / step_count;
 
-    fluid.advectDye(dt);
-
-    //blPrint() << "divergance before: " << before << "  after: " << after;
-    if (show_particles)
+    for (int substep = 0; substep < step_count; ++substep) 
     {
-        for (auto& particle : particles)
+        fluid.advect(step);
+        fluid.applyGravity(step);
+
+        const auto result = fluid.project(step, 2000, 1e-8);
+
+        if (!result.converged) 
         {
-            DVec2 velocity = fluid.sampleVelocity(particle.pos);
-            particle.pos += velocity * dt;
+            blPrint() << "Projection failed; max divergence: "
+                << result.max_divergence;
+
+            simulation_failed = true;
+            return;
+        }
+
+        // Move material only with the velocity that has passed projection.
+        fluid.advectWaterFraction(step);
+
+        if (show_particles) {
+            for (auto& particle : particles)
+                particle.pos += fluid.sampleVelocity(particle.pos) * step;
         }
     }
+}
+
+void FluidSim_Scene::renderFluidSurface() const
+{
+    uploadWaterTexture();
+    surface.render(fluid.width, fluid.height, [&](const ShaderSurface& shader)
+    {
+        shader.bindTexture2D("u_water", water_texture);
+    });
 }
 
 void FluidSim_Scene::viewportDraw(Viewport* ctx) const
 {
     /// Draw the Scene on this viewport without modifying simulation state.
     ctx->transform(camera);
-
-    uploadDyeTexture();
-    surface.render(512, 512, [&](const ShaderSurface& shader)
-    {
-        shader.bindTexture2D("u_dye", dye_texture);
-    });
+    renderFluidSurface();
 
     DQuad bounds{
         fluid.origin.x,
@@ -225,5 +231,36 @@ void FluidSim_Scene::onEvent(Event e)
 // void FluidSim_Scene::onKeyDown(KeyEvent e) {}
 // void FluidSim_Scene::onKeyUp(KeyEvent e) {}
 
+#ifdef BITLOOP_DEV_MODE
+void FluidSim_Scene::traceFrame([[maybe_unused]] SimTraceFrame& frame) const
+{
+}
+
+bool FluidSim_Scene::captureTraceSnapshot(std::string_view route, SimSnapshotImage& image) const
+{
+    if (route != "grid")
+        return false;
+
+    renderFluidSurface();
+    image.resolution = IVec2(fluid.width, fluid.height);
+    CapturePreprocessParams params;
+    params.src_resolution = params.dst_resolution = image.resolution;
+    // texture row zero already represents the top grid row
+    params.flip_y = false;
+    return snapshot_preprocessor.preprocessToFrame(surface.texture(), params, image.pixels);
+}
+
+bool FluidSim_Scene::saveCheckpoint(SimCheckpointWriter& writer) const
+{
+    (void)writer;
+    return false;
+}
+
+bool FluidSim_Scene::loadCheckpoint(const SimCheckpointReader& reader)
+{
+    (void)reader;
+    return false;
+}
+#endif
 
 SIM_END;
