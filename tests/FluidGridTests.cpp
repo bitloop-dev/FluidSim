@@ -60,6 +60,35 @@ void samplesStaggeredVelocityInWorldSpace()
     }
 }
 
+void stateTransferPreservesCPUBehaviour()
+{
+    FluidGrid direct(32, 24, 4), uploaded(32, 24, 4);
+    FluidGrid::State initial;
+    initial.water_fraction.resize(32 * 24);
+    for (int y = 0; y < 24; ++y)
+    for (int x = 0; x < 32; ++x)
+        direct.water_fraction[y * 32 + x] = initial.water_fraction[y * 32 + x] = std::clamp(y + 1.0 - (x + 12.0), 0.0, 1.0);
+    uploaded.upload(initial);
+    // uploading the same initial fields must preserve the original CPU trajectory exactly
+    for (int tick = 0; tick < 120; ++tick)
+    {
+        require(direct.step(1.0 / 120, 2000, 1e-8).converged, "direct CPU initialization failed");
+        require(uploaded.step(1.0 / 120, 2000, 1e-8).converged, "uploaded CPU initialization failed");
+        require(direct.u == uploaded.u && direct.v == uploaded.v && direct.water_fraction == uploaded.water_fraction && direct.pressure == uploaded.pressure,
+                "state upload changed the CPU trajectory");
+    }
+    const auto state = uploaded.download();
+    require(state.u == uploaded.u && state.v == uploaded.v && state.water_fraction == uploaded.water_fraction && state.pressure == uploaded.pressure,
+            "CPU download omitted authoritative fields");
+    uploaded.upload(initial);
+    FluidGrid restarted(32, 24, 4);
+    restarted.upload(initial);
+    require(uploaded.step(1.0 / 120, 2000, 1e-8).converged && restarted.step(1.0 / 120, 2000, 1e-8).converged,
+            "CPU reinitialization failed");
+    require(uploaded.pressure == restarted.pressure && uploaded.u == restarted.u && uploaded.v == restarted.v,
+            "CPU reinitialization retained stale pressure history");
+}
+
 void pressureBalancesGravity()
 {
     FluidGrid grid(12, 10, 2.0);
@@ -200,18 +229,111 @@ void zeroTimeAndFailedProjectionAreHandled()
         "zero-iteration projection unexpectedly converged");
 }
 
+void multigridPreservesPCGContract()
+{
+    for (const auto size : {bl::IVec2{1, 1}, {1, 129}, {131, 1}, {2, 67}, {13, 9}, {64, 64}, {65, 37}, {512, 512}})
+    {
+        const int w = size.x, h = size.y, count = w * h;
+        fluid::PressureMultigrid multigrid(w, h);
+        std::vector<double> horizontal((w + 1) * h), vertical(w * (h + 1));
+        auto density = [](int x, int y) { return (x / 3 + y / 4) % 2 == 0 ? 0.1 : 100.0; };
+        for (int y = 0; y < h; ++y)
+            for (int x = 1; x < w; ++x)
+                horizontal[y * (w + 1) + x] = 2.0 / (density(x - 1, y) + density(x, y));
+        for (int y = 1; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                vertical[y * w + x] = 2.0 / (density(x, y - 1) + density(x, y));
+        require(multigrid.rebuild(horizontal, vertical), "multigrid coarse factorization failed");
+        std::vector<double> a(count), b(count), combined(count), ma, mb, mc, repeat;
+        for (int i = 0; i < count; ++i)
+        {
+            a[i] = std::sin(i * 0.31) + std::cos(i * 0.073);
+            b[i] = std::cos(i * 0.17) - std::sin(i * 0.019);
+        }
+        auto projectMean = [](std::vector<double>& values)
+        {
+            const double mean = std::accumulate(values.begin(), values.end(), 0.0) / values.size();
+            for (double& value : values) value -= mean;
+        };
+        projectMean(a);
+        projectMean(b);
+        for (int i = 0; i < count; ++i) combined[i] = 1.3 * a[i] - 0.7 * b[i];
+        multigrid.apply(a, ma, 0.0);
+        multigrid.apply(b, mb, 0.0);
+        multigrid.apply(combined, mc, 0.0);
+        multigrid.apply(a, repeat, 0.0);
+        require(ma == repeat, "multigrid retained a previous correction");
+        projectMean(ma); projectMean(mb); projectMean(mc);
+        double error = 0.0, scale = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            error = std::max(error, std::abs(mc[i] - (1.3 * ma[i] - 0.7 * mb[i])));
+            scale = std::max(scale, std::abs(mc[i]));
+        }
+        require(error <= 1e-10 * std::max(1.0, scale), "multigrid is not a linear preconditioner");
+        const double a_mb = std::inner_product(a.begin(), a.end(), mb.begin(), 0.0);
+        const double b_ma = std::inner_product(b.begin(), b.end(), ma.begin(), 0.0);
+        const double energy_a = std::inner_product(a.begin(), a.end(), ma.begin(), 0.0);
+        const double energy_b = std::inner_product(b.begin(), b.end(), mb.begin(), 0.0);
+        require(std::abs(a_mb - b_ma) <= 1e-10 * std::max(1.0, std::sqrt(energy_a * energy_b)), "multigrid is not symmetric");
+        require(count == 1 ? energy_a == 0.0 : energy_a > 0.0 && energy_b > 0.0, "multigrid is not positive on mean-zero residuals");
+        std::fill(a.begin(), a.end(), 7.0);
+        multigrid.apply(a, ma, 7.0);
+        require(std::all_of(ma.begin(), ma.end(), [](double value) { return value == 0.0; }), "multigrid did not remove the constant nullspace");
+    }
+}
+
+void multigridMatchesDiagonalProjection()
+{
+    for (const auto size : {bl::IVec2{1, 129}, {131, 1}, {2, 67}, {65, 47}, {128, 128}})
+    {
+        FluidGrid multigrid(size.x, size.y, 4.0);
+        for (int y = 0; y < size.y; ++y)
+            for (int x = 0; x < size.x; ++x)
+                multigrid.water_fraction[y * size.x + x] = std::clamp(y + 1.0 - (0.35 * x + 0.2 * size.y), 0.0, 1.0);
+        for (size_t i = 0; i < multigrid.u.size(); ++i) multigrid.u[i] = 3.0 * std::sin(i * 0.07);
+        for (size_t i = 0; i < multigrid.v.size(); ++i) multigrid.v[i] = 4.0 * std::cos(i * 0.11);
+        FluidGrid diagonal = multigrid;
+        diagonal.pressure_preconditioner = FluidGrid::PressurePreconditioner::Diagonal;
+        const auto mg_result = multigrid.project(1.0 / 120.0, 4000, 1e-8);
+        const auto diagonal_result = diagonal.project(1.0 / 120.0, 4000, 1e-8);
+        require(mg_result.converged && diagonal_result.converged, "preconditioner comparison did not converge");
+        for (size_t i = 0; i < multigrid.u.size(); ++i)
+            require(std::abs(multigrid.u[i] - diagonal.u[i]) < 2e-6, "multigrid changed the horizontal pressure solution");
+        for (size_t i = 0; i < multigrid.v.size(); ++i)
+            require(std::abs(multigrid.v[i] - diagonal.v[i]) < 2e-6, "multigrid changed the vertical pressure solution");
+    }
+}
+
+void largeMixedPressureConvergesWithinDefaultBudget()
+{
+    FluidGrid grid(512, 512, 4.0);
+    for (int y = 0; y < grid.height; ++y)
+        for (int x = 0; x < grid.width; ++x)
+            grid.water_fraction[y * grid.width + x] = std::clamp(y + 1.0 - (0.35 * x + 0.2 * grid.height), 0.0, 1.0);
+    for (size_t i = 0; i < grid.u.size(); ++i) grid.u[i] = 3.0 * std::sin(i * 0.07);
+    for (size_t i = 0; i < grid.v.size(); ++i) grid.v[i] = 4.0 * std::cos(i * 0.11);
+    // Protect large-grid convergence without making the regression suite replay a whole wave.
+    const auto result = grid.project(1.0 / 120.0);
+    require(result.converged && result.max_divergence <= 1e-6, "512x512 mixed-density pressure exhausted the default iteration budget");
+}
+
 }
 
 int main()
 {
     const struct { const char* name; void (*run)(); } tests[] = {
         {"staggered world-space sampling", samplesStaggeredVelocityInWorldSpace},
+        {"state transfer and CPU initialization equivalence", stateTransferPreservesCPUBehaviour},
         {"hydrostatic equilibrium", pressureBalancesGravity},
         {"conservative material transport", transportConservesWaterAndMovesItsCentroid},
         {"sharp straight-interface transport", transportKeepsStraightInterfacesSharp},
         {"repeated closed-pool motion", closedPoolRemainsValidOverRepeatedMotion},
         {"uniform motion across density changes", transportPreservesUniformMotionAcrossDensityChanges},
-        {"zero timestep and projection failure", zeroTimeAndFailedProjectionAreHandled}
+        {"zero timestep and projection failure", zeroTimeAndFailedProjectionAreHandled},
+        {"multigrid linearity, symmetry and positivity", multigridPreservesPCGContract},
+        {"multigrid and diagonal pressure agreement", multigridMatchesDiagonalProjection},
+        {"large mixed-density pressure convergence", largeMixedPressureConvergesWithinDefaultBudget}
     };
     int failures = 0;
     for (const auto& test : tests)

@@ -12,18 +12,24 @@ file(GLOB_RECURSE SIM_SOURCES CONFIGURE_DEPENDS
     "${SRC_DIR}/*.h"
     "${SRC_DIR}/*.hpp"
 )
-list(REMOVE_ITEM SIM_SOURCES "${SRC_DIR}/FluidGrid.cpp")
+list(REMOVE_ITEM SIM_SOURCES "${SRC_DIR}/FluidGrid.cpp" "${SRC_DIR}/PressureMultigrid.cpp" "${SRC_DIR}/FluidGridGPU.cpp" "${SRC_DIR}/PressureMultigridGPU.cpp")
 
 bitloop_new_project(FluidSim ${SIM_SOURCES})
 
 bitloop_finalize()
 
 if(NOT BITLOOP_DISCOVERY)
-    add_library(FluidSimEngine STATIC "${SRC_DIR}/FluidGrid.cpp")
+    add_library(FluidSimEngine STATIC "${SRC_DIR}/FluidGrid.cpp" "${SRC_DIR}/PressureMultigrid.cpp")
     target_include_directories(FluidSimEngine PUBLIC "${SRC_DIR}")
     target_compile_features(FluidSimEngine PUBLIC cxx_std_23)
     target_link_libraries(FluidSimEngine PUBLIC bitloop::bitloop)
     target_link_libraries(FluidSim PRIVATE FluidSimEngine)
+
+    add_library(FluidSimEngineGPU STATIC "${SRC_DIR}/FluidGridGPU.cpp" "${SRC_DIR}/PressureMultigridGPU.cpp")
+    target_include_directories(FluidSimEngineGPU PUBLIC "${SRC_DIR}")
+    target_compile_features(FluidSimEngineGPU PUBLIC cxx_std_23)
+    target_link_libraries(FluidSimEngineGPU PUBLIC bitloop::bitloop)
+    target_link_libraries(FluidSim PRIVATE FluidSimEngineGPU)
 
     option(FLUIDSIM_BUILD_TESTS "Build the fluid engine regression tests" OFF)
     if(FLUIDSIM_BUILD_TESTS)
@@ -31,6 +37,11 @@ if(NOT BITLOOP_DISCOVERY)
         add_executable(FluidSimTests tests/FluidGridTests.cpp)
         target_link_libraries(FluidSimTests PRIVATE FluidSimEngine)
         add_test(NAME FluidGridTests COMMAND FluidSimTests)
+        if(NOT EMSCRIPTEN)
+            add_executable(FluidSimGPUTests tests/FluidGridGPUTests.cpp "${SRC_DIR}/FluidGridDisplay.cpp")
+            target_link_libraries(FluidSimGPUTests PRIVATE FluidSimEngine FluidSimEngineGPU)
+            add_test(NAME FluidGridGPUTests COMMAND FluidSimGPUTests)
+        endif()
     endif()
 endif()
 

@@ -1,13 +1,18 @@
 #pragma once
+#include "FluidGridTypes.h"
+#include "PressureMultigrid.h"
 #include <bitloop/core/types.h>
-#include <limits>
-#include <vector>
 
 namespace fluid
 {
 
 struct FluidGrid
 {
+    using Scalar = double;
+    using State = FluidGridState<Scalar>;
+    using ProjectionResult = FluidProjectionResult;
+    static constexpr bool requires_render_thread = false;
+
     int width = 0;
     int height = 0;
     double cell_size = 1.0;
@@ -16,6 +21,9 @@ struct FluidGrid
     double air_density = 0.1;
     double water_density = 100.0;
     double gravity_y = 100.0;
+
+    enum class PressurePreconditioner { Diagonal, Multigrid };
+    PressurePreconditioner pressure_preconditioner = PressurePreconditioner::Multigrid;
 
     // staggered face velocities and the evolving velocities during transport
     std::vector<double> u;
@@ -34,12 +42,11 @@ struct FluidGrid
 
     FluidGrid(int width, int height, double cell_size);
 
-    struct ProjectionResult
-    {
-        int iterations = 0;
-        double max_divergence = std::numeric_limits<double>::infinity();
-        bool converged = false;
-    };
+    void upload(const State& state);
+    State download() const;
+
+    // CPU storage is released by the destructor; there are no device resources to destroy
+    void destroy() {}
 
     // one physics substep: transport material and momentum, apply forces, then project
     ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6);
@@ -61,6 +68,7 @@ struct FluidGrid
     void addVortex(bl::DVec2 center, double radius, double strength);
 
 private:
+    PressureMultigrid pressure_multigrid;
     std::vector<double> previous_pressure;
     std::vector<double> pressure_rhs;
     std::vector<double> pressure_residual;
@@ -112,7 +120,7 @@ private:
     };
 
     ResidualStats updatePressureAndResidual(double alpha);
-    double applyPreconditioner(const std::vector<double>& residual, std::vector<double>& correction, double residual_mean) const;
+    double applyPreconditioner(const std::vector<double>& residual, std::vector<double>& correction, double residual_mean);
     int solvePressure(int max_iterations, double residual_tolerance);
 };
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <stdexcept>
 
 namespace fluid
 {
@@ -142,6 +143,7 @@ FluidGrid::FluidGrid(int w, int h, double cell_size) :
     inv_density_u((w + 1)* h, 0.0),
     inv_density_v(w* (h + 1), 0.0),
     inv_pressure_diagonal(w* h, 0.0),
+    pressure_multigrid(w, h),
     interface_normals(w* h),
     interface_offsets(w* h, 0.0), 
     split_weights(w* h, 0),
@@ -152,6 +154,28 @@ FluidGrid::FluidGrid(int w, int h, double cell_size) :
     momentum_u((w + 1)* h, 0.0),
     momentum_v(w* (h + 1), 0.0)
 {
+}
+
+void FluidGrid::upload(const State& state)
+{
+    auto assign = [](std::vector<double>& field, const std::vector<double>& values, size_t count)
+    {
+        if (values.empty()) { field.assign(count, 0.0); return; }
+        // imported arrays must match the fixed grid to keep later stencil accesses in bounds
+        if (values.size() != count)
+            throw std::invalid_argument("FluidGrid upload dimensions do not match the grid");
+        field = values;
+    };
+    assign(water_fraction, state.water_fraction, size_t(width) * height);
+    assign(u, state.u, size_t(width + 1) * height);
+    assign(v, state.v, size_t(width) * (height + 1));
+    assign(pressure, state.pressure, size_t(width) * height);
+    previous_pressure = pressure;
+}
+
+FluidGrid::State FluidGrid::download() const
+{
+    return { water_fraction, u, v, pressure };
 }
 
 FluidGrid::ProjectionResult FluidGrid::step(
@@ -767,6 +791,10 @@ FluidGrid::ProjectionResult FluidGrid::project(double dt, int max_iterations, do
 
     rebuildPressureCoefficients();
 
+    // The hierarchy follows the current density field, but stays fixed during this PCG solve.
+    if (pressure_preconditioner == PressurePreconditioner::Multigrid && !pressure_multigrid.rebuild(inv_density_u, inv_density_v))
+        return {};
+
     // prevent flow through the outer boundaries
     for (int y = 0; y < height; ++y) {
         u[uIndex(0, y)] = 0.0;
@@ -1062,23 +1090,31 @@ void FluidGrid::applyPressureOperator(
         return;
     }
 
-    // Keep the small pressure stencil on this thread; worker dispatch costs more here.
     const int stride = width;
-    for (int y = 1; y < height - 1; ++y) {
-        const double* row = input.data() + y * stride;
-        const double* above = row - stride;
-        const double* below = row + stride;
-        const double* horizontal = inv_density_u.data() + y * (stride + 1);
-        const double* up = inv_density_v.data() + y * stride;
-        const double* down = up + stride;
-        double* result = output.data() + y * stride;
-        for (int x = 1; x < stride - 1; ++x) {
-            const double center = row[x];
-            result[x] =
-                (horizontal[x] * (center - row[x - 1]) + horizontal[x + 1] * (center - row[x + 1])) +
-                (up[x] * (center - above[x]) + down[x] * (center - below[x]));
+    auto applyRows = [&](int first_row, int last_row)
+    {
+        for (int y = first_row + 1; y < last_row + 1; ++y) {
+            const double* row = input.data() + y * stride;
+            const double* above = row - stride;
+            const double* below = row + stride;
+            const double* horizontal = inv_density_u.data() + y * (stride + 1);
+            const double* up = inv_density_v.data() + y * stride;
+            const double* down = up + stride;
+            double* result = output.data() + y * stride;
+            for (int x = 1; x < stride - 1; ++x) {
+                const double center = row[x];
+                result[x] =
+                    (horizontal[x] * (center - row[x - 1]) + horizontal[x + 1] * (center - row[x + 1])) +
+                    (up[x] * (center - above[x]) + down[x] * (center - below[x]));
+            }
         }
-    }
+    };
+    // Large stencils amortize worker dispatch; small grids stay on the calling thread.
+    const int workers = std::min(width * height >= 1048576 ? 8 : 4, int(Thread::threadCount()));
+    if (width * height >= 262144 && workers > 1)
+        Thread::forEachBatch(height - 2, applyRows, workers);
+    else
+        applyRows(0, height - 2);
 
     // Top and bottom, including corners.
     for (int x = 0; x < width; ++x)
@@ -1130,11 +1166,14 @@ FluidGrid::ResidualStats FluidGrid::updatePressureAndResidual(double alpha)
     return stats;
 }
 
-double FluidGrid::applyPreconditioner(const std::vector<double>& residual, std::vector<double>& correction, double residual_mean) const
+double FluidGrid::applyPreconditioner(const std::vector<double>& residual, std::vector<double>& correction, double residual_mean)
 {
-    // Project before and after diagonal scaling to preserve PCG symmetry.
-    for (size_t i = 0; i < residual.size(); ++i)
-        correction[i] = (residual[i] - residual_mean) * inv_pressure_diagonal[i];
+    // Project before and after preconditioning to preserve symmetry on mean-zero pressures.
+    if (pressure_preconditioner == PressurePreconditioner::Multigrid)
+        pressure_multigrid.apply(residual, correction, residual_mean);
+    else
+        for (size_t i = 0; i < residual.size(); ++i)
+            correction[i] = (residual[i] - residual_mean) * inv_pressure_diagonal[i];
     const double mean = std::reduce(correction.begin(), correction.end(), 0.0) / double(correction.size());
 
     // Accumulate residual dot correction while removing the correction's mean.

@@ -1,11 +1,16 @@
 #pragma once
 #include <bitloop.h>
 #include "FluidGrid.h"
+#include "FluidGridGPU.h"
+#include "FluidGridDisplay.h"
+#include <utility>
 
 SIM_BEG;
 
 using namespace bl;
 using fluid::FluidGrid;
+using fluid::FluidGridGPU;
+using fluid::FluidGridDisplay;
 
 struct FluidSim_Scene : public Scene<FluidSim_Scene>
 {
@@ -13,17 +18,17 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     CameraNavigator  navigator;
 
     /// ─────── Variables ───────
-    int grid_w = 128;
-    int grid_h = 128;
+    int grid_w = 1024;
+    int grid_h = 1024;
 
-    double cell_size = 4.0;
+    double cell_size = 1.0;
 
     bool simulation_failed = false;
 
     double world_w = double(grid_w) * cell_size;
     double world_h = double(grid_h) * cell_size;
 
-    FluidGrid fluid;
+    FluidGridGPU fluid;
 
     const char* fluid_shader_src = R"(
         #version 300 es
@@ -46,11 +51,19 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     )";
 
     ShaderSurface surface;
-    mutable GLuint water_texture = 0;
-    mutable std::vector<unsigned char> water_pixels;
+    FluidGridDisplay fluid_display;
     void initializePool(double amplitude = 0.04);
-    void uploadWaterTexture() const;
     void renderFluidSurface() const;
+
+    // GPU work belongs to the render owner; CPU physics stays on the simulation worker
+    template<typename Operation>
+    void withFluidContext(Operation&& operation)
+    {
+        if constexpr (decltype(fluid)::requires_render_thread)
+            renderThreadQueue().invokeBlocking(std::forward<Operation>(operation));
+        else
+            operation();
+    }
 #ifdef BITLOOP_DEV_MODE
     mutable CapturePreprocessor snapshot_preprocessor;
 #endif

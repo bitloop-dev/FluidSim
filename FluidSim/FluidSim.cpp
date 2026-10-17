@@ -33,55 +33,11 @@ void FluidSim_Scene::UI::sidebar()
 
 }
 
-void FluidSim_Scene::uploadWaterTexture() const
-{
-    // Convert water fractions to display bytes without changing the simulation state.
-    water_pixels.resize(fluid.water_fraction.size());
-
-    for (size_t i = 0; i < fluid.water_fraction.size(); ++i)
-    {
-        double value = std::clamp(fluid.water_fraction[i], 0.0, 1.0);
-        water_pixels[i] = static_cast<unsigned char>(value * 255.0 + 0.5);
-    }
-
-    // restore previous GL state on exit and allow tightly packed single-channel rows
-    GLStateGuard guard;
-    glActiveTexture(GL_TEXTURE0);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-    if (water_texture == 0)
-    {
-        // create the texture on first use
-        glGenTextures(1, &water_texture);
-        glBindTexture(GL_TEXTURE_2D, water_texture);
-
-        // blend neighbouring cell values and prevent sampling across opposite edges
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        // allocate one normalized byte per cell for the fixed-size fluid grid
-        glTexImage2D(
-            GL_TEXTURE_2D, 0, GL_R8,
-            fluid.width, fluid.height, 0,
-            GL_RED, GL_UNSIGNED_BYTE, nullptr);
-    }
-    else
-    {
-        glBindTexture(GL_TEXTURE_2D, water_texture);
-    }
-
-    // Replace the texture contents with the current water fractions without reallocating.
-    glTexSubImage2D(
-        GL_TEXTURE_2D, 0, 0, 0,
-        fluid.width, fluid.height,
-        GL_RED, GL_UNSIGNED_BYTE, water_pixels.data());
-}
-
 void FluidSim_Scene::initializePool(double amplitude)
 {
     constexpr double pi = 3.14159265358979323846;
+    decltype(fluid)::State initial;
+    initial.water_fraction.resize(size_t(fluid.width) * fluid.height);
 
     for (int y = 0; y < fluid.height; ++y)
     {
@@ -92,10 +48,11 @@ void FluidSim_Scene::initializePool(double amplitude)
                 x + fluid.height * (0.5 + amplitude * std::cos(pi * (x*3 + 0.5) / fluid.width));
 
             // measure how much of this cell lies below the water surface
-            fluid.water_fraction[y * fluid.width + x] =
-                std::clamp(y + 1.0 - surface, 0.0, 1.0);
+            initial.water_fraction[y * fluid.width + x] =
+                decltype(fluid)::Scalar(std::clamp(y + 1.0 - surface, 0.0, 1.0));
         }
     }
+    withFluidContext([&]() { fluid.upload(initial); });
 }
 
 void FluidSim_Scene::sceneStart()
@@ -127,12 +84,8 @@ void FluidSim_Scene::sceneDestroy()
 {
     renderThreadQueue().post([this]()
     {
-        if (water_texture)
-        {
-            glDeleteTextures(1, &water_texture);
-            water_texture = 0;
-        }
-
+        fluid.destroy();
+        fluid_display.destroy();
         surface.destroy();
 #ifdef BITLOOP_DEV_MODE
         snapshot_preprocessor.destroyGL();
@@ -160,27 +113,30 @@ void FluidSim_Scene::viewportProcess(
     const int step_count = int(std::ceil(frame_time * 120.0));
     const double step = frame_time / step_count;
 
-    for (int substep = 0; substep < step_count; ++substep) 
+    withFluidContext([&]()
     {
-        const auto result = fluid.step(step, 2000, 1e-8);
-
-        if (!result.converged) 
+        for (int substep = 0; substep < step_count; ++substep)
         {
-            blPrint() << "Projection failed; max divergence: "
-                << result.max_divergence;
+            // use one float-compatible tolerance for backend comparisons
+            const auto result = fluid.step(step, 2000, 1e-3);
 
-            simulation_failed = true;
-            return;
+            if (!result.converged)
+            {
+                blPrint() << "Projection failed; max divergence: "
+                    << result.max_divergence;
+
+                simulation_failed = true;
+                return;
+            }
         }
-    }
+    });
 }
 
 void FluidSim_Scene::renderFluidSurface() const
 {
-    uploadWaterTexture();
     surface.render(fluid.width, fluid.height, [&](const ShaderSurface& shader)
     {
-        shader.bindTexture2D("u_water", water_texture);
+        shader.bindTexture2D("u_water", fluid_display.texture(fluid));
     });
 }
 
