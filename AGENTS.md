@@ -9,3 +9,10 @@ This is a learning project. Keep implementations, tutorials, and example code fo
 - A mathematical precondition alone does not justify runtime validation. Briefly state an assumption when useful instead of adding checks for almost impossible cases.
 - Do not automatically replace unnecessary runtime guards with assertions, exceptions, or other validation boilerplate.
 - When a non-obvious guard is warranted, explain the concrete risk with a short comment.
+
+## Incremental development
+
+- Follow [DEVELOPMENT.md](DEVELOPMENT.md) for the current engine boundary, optimisation map and small regression set. Future milestones are discussion, not permission to implement them.
+- Take one agreed conceptual step at a time. Keep cleanup, new physics and performance changes separate; explain what an optimisation does and which algorithm it preserves.
+- Keep experiment setup, frame timing and rendering in the scene, and the ordered physics substep in the engine. Stay strictly 2D; a Mandelbrot slope experiment means an in-plane force field, not a shallow-water model.
+- Make physical modelling choices explicit. Automatic optimisation may choose how to execute a selected model, but must not silently replace simulated gas or trapped bubbles with ambient pressure.

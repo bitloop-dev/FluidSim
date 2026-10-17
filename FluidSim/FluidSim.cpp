@@ -79,24 +79,28 @@ void FluidSim_Scene::uploadWaterTexture() const
         GL_RED, GL_UNSIGNED_BYTE, water_pixels.data());
 }
 
-void FluidSim_Scene::sceneStart()
+void FluidSim_Scene::initializePool(double amplitude)
 {
-    if (show_particles)
-    {
-        for (int y = 0; y < particles_y; y++)
-        {
-            for (int x = 0; x < particles_x; x++)
-            {
-                double tx = double(x) / double(particles_x);
-                double ty = double(y) / double(particles_y);
-                double px = std::lerp(0.0, world_w, tx);
-                double py = std::lerp(0.0, world_h, ty);
+    constexpr double pi = 3.14159265358979323846;
 
-                particles.push_back(Particle{px, py});
-            }
+    for (int y = 0; y < fluid.height; ++y)
+    {
+        for (int x = 0; x < fluid.width; ++x)
+        {
+            // the experiment starts with a sloped, rippled surface
+            const double surface =
+                x + fluid.height * (0.5 + amplitude * std::cos(pi * (x*3 + 0.5) / fluid.width));
+
+            // measure how much of this cell lies below the water surface
+            fluid.water_fraction[y * fluid.width + x] =
+                std::clamp(y + 1.0 - surface, 0.0, 1.0);
         }
     }
-    
+}
+
+void FluidSim_Scene::sceneStart()
+{
+    initializePool();
     surface.setFragmentSource(fluid_shader_src);
 }
 
@@ -152,16 +156,13 @@ void FluidSim_Scene::viewportProcess(
         return;
 
     // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
-    const double frame_time = std::min(dt, 0.05);
+    const double frame_time = 0.05;// std::min(dt, 0.05);
     const int step_count = int(std::ceil(frame_time * 120.0));
     const double step = frame_time / step_count;
 
     for (int substep = 0; substep < step_count; ++substep) 
     {
-        fluid.advect(step);
-        fluid.applyGravity(step);
-
-        const auto result = fluid.project(step, 2000, 1e-8);
+        const auto result = fluid.step(step, 2000, 1e-8);
 
         if (!result.converged) 
         {
@@ -170,14 +171,6 @@ void FluidSim_Scene::viewportProcess(
 
             simulation_failed = true;
             return;
-        }
-
-        // Move material only with the velocity that has passed projection.
-        fluid.advectWaterFraction(step);
-
-        if (show_particles) {
-            for (auto& particle : particles)
-                particle.pos += fluid.sampleVelocity(particle.pos) * step;
         }
     }
 }
@@ -207,15 +200,6 @@ void FluidSim_Scene::viewportDraw(Viewport* ctx) const
     ctx->worldMode();
     ctx->drawShaderSurface(surface, bounds);
     ctx->drawWorldAxis();
-
-    if (show_particles)
-    {
-        ctx->worldHudMode();
-        for (auto& particle : particles)
-        {
-            ctx->fillEllipse(particle.pos, 0.5, Color::white);
-        }
-    }
 }
 
 void FluidSim_Scene::onEvent(Event e)
