@@ -27,9 +27,22 @@ using namespace gpu_detail;
 struct FluidGridGPU::Impl
 {
     const int width, height;
-    float cell_size = 1, air_density = 0.1f, water_density = 100, gravity_y = 100, tolerance = 0;
+    float cell_size = 1, gravity_y = 100, tolerance = 0;
     PassRunner runner;
-    Texture u, v, next_u, next_v, water_fraction, next_water_fraction, density;
+    Texture u, v, next_u, next_v, liquid_fraction, next_liquid_fraction;
+    // RG holds liquid mass / cell volume and gas mass / cell volume separately.
+    Texture density, next_density;
+    Texture color, next_color;
+    // Each RGBA group holds four ingredients, liquid first and then gas.
+    struct ComponentGroup
+    {
+        Texture mass, next_mass, correction;
+        std::array<float, 4> liquid_mask = {}, gas_mask = {};
+        ComponentGroup(int w, int h) : mass(w, h, 4), next_mass(w, h, 4), correction(w, h, 4) {}
+    };
+    std::vector<ComponentGroup> components;
+    size_t liquid_count = 0, gas_count = 0;
+    bool density_valid = false;
     Texture momentum_u, momentum_v, next_momentum_u, next_momentum_v;
     Texture interfaces, split_weights, transfers_u, transfers_v;
     Texture pressure, next_pressure, previous_pressure, pressure_base, pressure_rhs, pressure_residual, next_residual;
@@ -43,17 +56,17 @@ struct FluidGridGPU::Impl
     float cached_outflow = 0;
     bool velocity_stats_valid = false;
 
-    Program fill, density_pass, pressure_coefficient, divergence, pressure_operator;
+    Program fill, density_pass, color_pass, pressure_coefficient, divergence, pressure_operator;
+    Program transport_components_x, transport_components_y, transport_single_x, transport_single_y;
     Program predict_pressure, add_pressure, subtract_mean, residual, reduce_pass, precondition, coefficients, direction, update_pressure;
     Program correct_velocity, gravity, velocity_stats;
-    Program reconstruct, freeze_weights, transfers, transport_momentum, transport_water, momentum;
+    Program reconstruct, freeze_weights, transfers, transport_momentum, transport_liquid, momentum;
 
     Impl(int w, int h);
     void configure(const FluidGridGPU& grid)
     {
+        if (cell_size != float(grid.cell_size)) density_valid = false;
         cell_size = float(grid.cell_size);
-        air_density = float(grid.air_density);
-        water_density = float(grid.water_density);
         gravity_y = float(grid.gravity_y);
         use_multigrid = grid.pressure_preconditioner == FluidGridGPU::PressurePreconditioner::Multigrid;
     }
@@ -64,8 +77,6 @@ struct FluidGridGPU::Impl
         runner.bind(program, outputs, inputs);
         glUniform2i(program.location("grid_size"), width, height);
         program.scalar("cell_size", cell_size);
-        program.scalar("air_density", air_density);
-        program.scalar("water_density", water_density);
         program.scalar("time_step", dt);
         program.scalar("tolerance", tolerance);
         program.integer("mode", mode);
@@ -97,7 +108,11 @@ struct FluidGridGPU::Impl
         run(subtract_mean, { &scratch }, { {"source", &field}, {"stats", &residual_stats} });
         field.swap(scratch);
     }
-    void rebuildDensity() { run(density_pass, { &density }, { {"water", &water_fraction} }); }
+    void uploadComponents(const FluidGridGPU& grid, const State& state);
+    void rebuildDensity();
+    void rebuildColor(const FluidGridGPU& grid);
+    void sumGroups(Program& program, Texture& result, Texture& scratch, size_t first);
+    void advectComponents(double dt, int direction);
     void rebuildPressureCoefficients();
     void applyPressureOperator(const Texture& input);
     void rebuildResidual();
@@ -120,9 +135,10 @@ struct FluidGridGPU::Impl
 FluidGridGPU::Impl::Impl(int w, int h) :
     width(w), height(h),
     u(w + 1, h), v(w, h + 1), next_u(w + 1, h), next_v(w, h + 1),
-    water_fraction(w, h), next_water_fraction(w, h), density(w, h),
+    liquid_fraction(w, h), next_liquid_fraction(w, h), density(w, h, 2), next_density(w, h, 2),
+    color(w, h, 4), next_color(w, h, 4),
     momentum_u(w + 1, h), momentum_v(w, h + 1), next_momentum_u(w + 1, h), next_momentum_v(w, h + 1),
-    interfaces(w, h, 4), split_weights(w, h), transfers_u(w + 1, h, 2), transfers_v(w, h + 1, 2),
+    interfaces(w, h, 4), split_weights(w, h, 2), transfers_u(w + 1, h, 2), transfers_v(w, h + 1, 2),
     pressure(w, h), next_pressure(w, h), previous_pressure(w, h), pressure_base(w, h), pressure_rhs(w, h),
     pressure_residual(w, h), next_residual(w, h), pressure_correction(w, h),
     pressure_direction(w, h), next_direction(w, h), pressure_product(w, h),
@@ -133,7 +149,7 @@ FluidGridGPU::Impl::Impl(int w, int h) :
     for (int rw = (w + 3) / 4, rh = (h + 3) / 4; rw > 1 || rh > 1; rw = (rw + 3) / 4, rh = (rh + 3) / 4)
         reduction_levels.emplace_back(rw, rh, 4);
     // float textures must be renderable, not merely sampleable
-    for (const Texture* texture : { &u, &transfers_u, &interfaces })
+    for (const Texture* texture : { &u, &density, &interfaces })
     {
         runner.target({ texture });
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -141,21 +157,55 @@ FluidGridGPU::Impl::Impl(int w, int h) :
     }
     auto build = [&](Program& p, const char* name, const char* body) { runner.build(p, name, common, body); };
     build(fill, "fill", R"(
-        void main() { output0 = vec4(time_step); }
+        void main() { output0 = mode == 1 ? vec4(0, 0, 0, 1) : vec4(time_step); }
     )");
     build(density_pass, "rebuildDensity", R"(
-        uniform sampler2D water;
-        void main() { output0 = vec4(densityOf(at(water, cell()))); }
+        uniform sampler2D masses0, masses1, masses2, masses3, previous;
+        uniform vec4 liquid_masks[4], gas_masks[4];
+        uniform int group_count;
+        vec2 phases(sampler2D field, int group)
+        {
+            vec4 mass = texelFetch(field, cell(), 0) / (cell_size * cell_size);
+            return vec2(dot(mass, liquid_masks[group]), dot(mass, gas_masks[group]));
+        }
+        void main()
+        {
+            vec2 sum = phases(masses0, 0);
+            if (group_count > 1) sum += phases(masses1, 1);
+            if (group_count > 2) sum += phases(masses2, 2);
+            if (group_count > 3) sum += phases(masses3, 3);
+            if (mode != 0) sum += texelFetch(previous, cell(), 0).rg;
+            output0 = vec4(sum, 0, 0);
+        }
+    )");
+    build(color_pass, "catalogue colors", R"(
+        uniform sampler2D masses0, masses1, masses2, masses3, previous;
+        uniform vec4 red[4], green[4], blue[4];
+        uniform int group_count;
+        vec3 color(sampler2D field, int group)
+        {
+            vec4 mass = texelFetch(field, cell(), 0);
+            return vec3(dot(mass, red[group]), dot(mass, green[group]), dot(mass, blue[group]));
+        }
+        void main()
+        {
+            vec3 sum = color(masses0, 0);
+            if (group_count > 1) sum += color(masses1, 1);
+            if (group_count > 2) sum += color(masses2, 2);
+            if (group_count > 3) sum += color(masses3, 3);
+            if (mode != 0) sum += texelFetch(previous, cell(), 0).rgb;
+            output0 = vec4(sum, 1);
+        }
     )");
     build(pressure_coefficient, "pressure face weights", R"(
-        uniform sampler2D water;
+        uniform sampler2D density;
         void main()
         {
             ivec2 p = cell();
-            float center = densityOf(at(water, p));
+            float center = densityAt(density, p);
             vec4 neighbors = vec4(
-                densityOf(at(water, max(p - ivec2(1, 0), ivec2(0)))), densityOf(at(water, min(p + ivec2(1, 0), grid_size - 1))),
-                densityOf(at(water, max(p - ivec2(0, 1), ivec2(0)))), densityOf(at(water, min(p + ivec2(0, 1), grid_size - 1))));
+                densityAt(density, max(p - ivec2(1, 0), ivec2(0))), densityAt(density, min(p + ivec2(1, 0), grid_size - 1)),
+                densityAt(density, max(p - ivec2(0, 1), ivec2(0))), densityAt(density, min(p + ivec2(0, 1), grid_size - 1)));
             // RGBA stores left/right/up/down weights, with zero pressure flux through walls.
             vec4 weights = 2.0 / (vec4(center) + neighbors);
             if (p.x == 0) weights.x = 0.0;
@@ -333,7 +383,8 @@ FluidGridGPU::Impl::Impl(int w, int h) :
 
 void FluidGridGPU::Impl::rebuildPressureCoefficients()
 {
-    run(pressure_coefficient, { &pressure_coefficients }, { {"water", &water_fraction} });
+    rebuildDensity();
+    run(pressure_coefficient, { &pressure_coefficients }, { {"density", &density} });
     if (use_multigrid) multigrid.rebuild(pressure_coefficients);
 }
 
@@ -476,7 +527,112 @@ void FluidGridGPU::Impl::applyGravity(double dt)
 FluidGridGPU::FluidGridGPU(int width, int height, double cell_size) : width(width), height(height), cell_size(cell_size) {}
 FluidGridGPU::~FluidGridGPU() = default;
 void FluidGridGPU::destroy() { gpu.reset(); }
-std::uint32_t FluidGridGPU::waterTexture() const { return gpu->water_fraction.id; }
+std::uint32_t FluidGridGPU::liquidFractionTexture() const { return gpu->liquid_fraction.id; }
+std::uint32_t FluidGridGPU::colorTexture() const
+{
+    ComputeState guard;
+    gpu->configure(*this);
+    gpu->rebuildColor(*this);
+    return gpu->color.id;
+}
+
+void FluidGridGPU::Impl::uploadComponents(const FluidGridGPU& grid, const State& state)
+{
+    liquid_count = grid.liquid_mixture.components.size();
+    gas_count = grid.gas_mixture.components.size();
+    const size_t cell_count = size_t(width) * height;
+    auto validate = [&](const auto& fields, size_t count)
+    {
+        if (!fields.empty() && fields.size() != count)
+            throw std::invalid_argument("FluidGridGPU upload component count does not match the mixture");
+        for (const auto& field : fields)
+            if (!field.empty() && field.size() != cell_count)
+                throw std::invalid_argument("FluidGridGPU upload component dimensions do not match the grid");
+    };
+    validate(state.liquid_mass, liquid_count);
+    validate(state.gas_mass, gas_count);
+    const size_t group_count = (liquid_count + gas_count + 3) / 4;
+    while (components.size() > group_count) components.pop_back();
+    while (components.size() < group_count) components.emplace_back(width, height);
+    std::vector<float> packed(cell_count * 4);
+    for (size_t group = 0; group < group_count; ++group)
+    {
+        auto& component = components[group];
+        component.liquid_mask = component.gas_mask = {};
+        std::fill(packed.begin(), packed.end(), 0.0f);
+        for (size_t lane = 0; lane < 4; ++lane)
+        {
+            const size_t index = group * 4 + lane;
+            if (index >= liquid_count + gas_count) break;
+            const bool liquid = index < liquid_count;
+            (liquid ? component.liquid_mask : component.gas_mask)[lane] = 1;
+            const auto& fields = liquid ? state.liquid_mass : state.gas_mass;
+            const size_t k = liquid ? index : index - liquid_count;
+            if (fields.empty() || fields[k].empty()) continue;
+            for (size_t i = 0; i < cell_count; ++i) packed[4 * i + lane] = fields[k][i];
+        }
+        glBindTexture(GL_TEXTURE_2D, component.mass.id);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, packed.data());
+    }
+    density_valid = false;
+}
+
+void FluidGridGPU::Impl::rebuildDensity()
+{
+    if (density_valid) return;
+    if (components.empty()) run(fill, { &density });
+    for (size_t first = 0; first < components.size(); first += 4)
+    {
+        std::array<std::array<float, 4>, 4> liquid_masks = {}, gas_masks = {};
+        for (size_t j = 0; j < 4 && first + j < components.size(); ++j)
+        {
+            liquid_masks[j] = components[first + j].liquid_mask;
+            gas_masks[j] = components[first + j].gas_mask;
+        }
+        glUseProgram(density_pass.id);
+        glUniform4fv(density_pass.location("liquid_masks"), 4, liquid_masks[0].data());
+        glUniform4fv(density_pass.location("gas_masks"), 4, gas_masks[0].data());
+        sumGroups(density_pass, density, next_density, first);
+    }
+    density_valid = true;
+}
+
+void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid)
+{
+    if (components.empty()) run(fill, { &color }, {}, 0, 1);
+    for (size_t first = 0; first < components.size(); first += 4)
+    {
+        std::array<std::array<float, 4>, 4> channels[3] = {};
+        for (size_t group = 0; group < 4 && first + group < components.size(); ++group)
+        for (size_t lane = 0; lane < 4; ++lane)
+        {
+            const size_t index = (first + group) * 4 + lane;
+            if (index >= liquid_count + gas_count) break;
+            const auto& component = index < liquid_count ? grid.liquid_mixture.components[index]
+                : grid.gas_mixture.components[index - liquid_count];
+            const auto& rgb = grid.elements[component.element].color;
+            for (size_t c = 0; c < 3; ++c)
+                channels[c][group][lane] = float(rgb[c] / (component.density * grid.cell_size * grid.cell_size));
+        }
+        glUseProgram(color_pass.id);
+        glUniform4fv(color_pass.location("red"), 4, channels[0][0].data());
+        glUniform4fv(color_pass.location("green"), 4, channels[1][0].data());
+        glUniform4fv(color_pass.location("blue"), 4, channels[2][0].data());
+        sumGroups(color_pass, color, next_color, first);
+    }
+}
+
+void FluidGridGPU::Impl::sumGroups(Program& program, Texture& result, Texture& scratch, size_t first)
+{
+    // Four RGBA inputs cover sixteen ingredients per draw without exceeding sampler limits.
+    const size_t count = std::min(size_t(4), components.size() - first);
+    const Texture* inputs[4];
+    for (size_t j = 0; j < 4; ++j) inputs[j] = &components[first + std::min(j, count - 1)].mass;
+    program.integer("group_count", int(count));
+    run(program, { &scratch }, { {"masses0", inputs[0]}, {"masses1", inputs[1]},
+        {"masses2", inputs[2]}, {"masses3", inputs[3]}, {"previous", &result} }, 0, first != 0);
+    result.swap(scratch);
+}
 
 void FluidGridGPU::upload(const State& state)
 {
@@ -502,11 +658,12 @@ void FluidGridGPU::upload(const State& state)
         glBindTexture(GL_TEXTURE_2D, field.id);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, field.width, field.height, GL_RED, GL_FLOAT, values.data());
     };
-    upload(gpu->water_fraction, state.water_fraction);
+    upload(gpu->liquid_fraction, state.liquid_fraction);
     upload(gpu->u, state.u);
     upload(gpu->v, state.v);
     upload(gpu->pressure, state.pressure);
     upload(gpu->previous_pressure, state.pressure);
+    gpu->uploadComponents(*this, state);
     gpu->previous_solve_iterations = 7;
     gpu->cached_outflow = 0;
     gpu->velocity_stats_valid = state.u.empty() && state.v.empty();
@@ -530,7 +687,22 @@ FluidGridGPU::State FluidGridGPU::download() const
 #endif
         return values;
     };
-    return { read(gpu->water_fraction), read(gpu->u), read(gpu->v), read(gpu->pressure) };
+    State state{ read(gpu->liquid_fraction), read(gpu->u), read(gpu->v), read(gpu->pressure) };
+    const size_t cell_count = size_t(width) * height;
+    state.liquid_mass.assign(gpu->liquid_count, std::vector<float>(cell_count));
+    state.gas_mass.assign(gpu->gas_count, std::vector<float>(cell_count));
+    for (size_t group = 0; group < gpu->components.size(); ++group)
+    {
+        const auto packed = gpu->runner.read(gpu->components[group].mass);
+        for (size_t lane = 0; lane < 4; ++lane)
+        {
+            const size_t index = group * 4 + lane;
+            if (index >= gpu->liquid_count + gpu->gas_count) break;
+            auto& mass = index < gpu->liquid_count ? state.liquid_mass[index] : state.gas_mass[index - gpu->liquid_count];
+            for (size_t i = 0; i < cell_count; ++i) mass[i] = packed[4 * i + lane];
+        }
+    }
+    return state;
 }
 
 FluidGridGPU::ProjectionResult FluidGridGPU::step(double dt, int max_iterations, double divergence_tolerance)
@@ -576,11 +748,11 @@ double FluidGridGPU::maxDivergence() const
 void FluidGridGPU::Impl::buildTransportPrograms()
 {
     const std::string geometry = common + R"(
-        float waterArea(vec2 normal, float offset, vec2 rect_min, vec2 rect_max)
+        float liquidArea(vec2 normal, float offset, vec2 rect_min, vec2 rect_max)
         {
             vec2 size = rect_max - rect_min;
             float area = size.x * size.y;
-            // measure the line from the rectangle's furthest water-side corner
+            // measure the line from the rectangle's furthest liquid-side corner
             float min_projection =
                 normal.x * (normal.x >= 0.0 ? rect_min.x : rect_max.x) +
                 normal.y * (normal.y >= 0.0 ? rect_min.y : rect_max.y);
@@ -611,29 +783,52 @@ void FluidGridGPU::Impl::buildTransportPrograms()
                 cut = small_span + large_span - sqrt(2.0 * small_span * large_span * (1.0 - fraction));
             return min_projection + cut;
         }
-        vec2 interfaceNormal(sampler2D water, ivec2 p)
+        vec2 interfaceNormal(sampler2D liquid, ivec2 p)
         {
-            // point from water towards air using the same four neighbouring fractions
-            vec2 normal = vec2(
-                at(water, max(p - ivec2(1, 0), ivec2(0))) - at(water, min(p + ivec2(1, 0), grid_size - 1)),
-                at(water, max(p - ivec2(0, 1), ivec2(0))) - at(water, min(p + ivec2(0, 1), grid_size - 1)));
+            // Use the nearest boundary cell when a neighbour lies outside the grid.
+            ivec2 lo = max(p - ivec2(1), ivec2(0)), hi = min(p + ivec2(1), grid_size - 1);
+            float top_left = at(liquid, lo), top = at(liquid, ivec2(p.x, lo.y)), top_right = at(liquid, ivec2(hi.x, lo.y));
+            float left = at(liquid, ivec2(lo.x, p.y)), right = at(liquid, ivec2(hi.x, p.y));
+            float bottom_left = at(liquid, ivec2(lo.x, hi.y)), bottom = at(liquid, ivec2(p.x, hi.y)), bottom_right = at(liquid, hi);
+
+            // Column/row totals measure surface height rather than one cell's abrupt fraction jump.
+            float left_sum = top_left + left + bottom_left, right_sum = top_right + right + bottom_right;
+            float top_sum = top_left + top + top_right, bottom_sum = bottom_left + bottom + bottom_right;
+            vec2 centered = 0.5 * vec2(left_sum - right_sum, top_sum - bottom_sum);
+
+            // Youngs' weighted gradient supplies the alternative near corners and thin features.
+            vec2 youngs = vec2(left_sum + left - right_sum - right, top_sum + top - bottom_sum - bottom);
+            vec2 normal = centered;
+            if (centered.x == 0.0 && centered.y == 0.0)
+                normal = youngs;
+            // MYC chooses the dominant height direction, then the steeper slope estimate.
+            else if (abs(centered.x) <= abs(centered.y))
+            {
+                normal.y = centered.y > 0.0 ? 1.0 : -1.0;
+                if (abs(youngs.x) > abs(centered.x * youngs.y)) normal = youngs;
+            }
+            else
+            {
+                normal.x = centered.x > 0.0 ? 1.0 : -1.0;
+                if (abs(youngs.y) > abs(centered.y * youngs.x)) normal = youngs;
+            }
             // scaling the normal leaves the interface unchanged and keeps float geometry well scaled
             float scale = max(abs(normal.x), abs(normal.y));
             return scale == 0.0 ? vec2(1, 0) : normal / scale;
         }
     )";
     runner.build(reconstruct, "rebuildInterfaces", geometry, R"(
-        uniform sampler2D water;
+        uniform sampler2D liquid;
         void main()
         {
-            float fraction = at(water, cell());
+            float fraction = at(liquid, cell());
             if (fraction <= 0.0 || fraction >= 1.0) { output0 = vec4(0); return; }
-            vec2 normal = interfaceNormal(water, cell());
+            vec2 normal = interfaceNormal(liquid, cell());
             output0 = vec4(normal, interfaceOffset(normal, fraction), 0);
         }
     )");
     runner.build(transfers, "rebuildTransfersX/Y", geometry, R"(
-        uniform sampler2D water, interfaces, flow;
+        uniform sampler2D liquid, interfaces, flow, density;
         void main()
         {
             ivec2 p = cell(), axis = mode == 0 ? ivec2(1, 0) : ivec2(0, 1);
@@ -641,26 +836,104 @@ void FluidGridGPU::Impl::buildTransportPrograms()
             if (coordinate == 0 || coordinate == extent) { output0 = vec4(0); return; }
             float fluid = at(flow, p) * time_step / cell_size;
             ivec2 donor = fluid > 0.0 ? p - axis : p;
-            float fraction = at(water, donor), water_amount = 0.0;
-            if (fraction >= 1.0) water_amount = abs(fluid);
+            float fraction = at(liquid, donor), liquid_amount = 0.0;
+            if (fraction >= 1.0) liquid_amount = abs(fluid);
             else if (fraction > 0.0 && fluid != 0.0)
             {
-                // intersect the reconstructed water with the outgoing edge strip
+                // intersect the reconstructed liquid with the outgoing edge strip
                 vec2 rect_min = vec2(0), rect_max = vec2(1);
                 if (fluid > 0.0) rect_min = vec2(axis) * (1.0 - abs(fluid));
                 else rect_max -= vec2(axis) * (1.0 - abs(fluid));
                 vec3 geometry = texelFetch(interfaces, donor, 0).rgb;
-                water_amount = waterArea(geometry.xy, geometry.z, rect_min, rect_max);
+                liquid_amount = liquidArea(geometry.xy, geometry.z, rect_min, rect_max);
             }
-            water_amount *= sign(fluid);
-            float mass = water_density * water_amount + air_density * (fluid - water_amount);
-            output0 = vec4(water_amount, mass, 0, 0);
+            // Float geometry can overestimate a vanishing sliver; an intersection cannot
+            // exceed either the donor's phase volume or the outgoing strip's volume.
+            float donor_liquid = clamp(fraction, 0.0, 1.0), strip = abs(fluid);
+            liquid_amount = clamp(liquid_amount, max(0.0, strip - (1.0 - donor_liquid)), min(strip, donor_liquid));
+            liquid_amount *= sign(fluid);
+            // Sum the same donor ratios used by every ingredient, once for momentum.
+            vec2 phases = texelFetch(density, donor, 0).rg;
+            vec2 ratios = vec2(fraction > 0.0 ? liquid_amount / fraction : 0.0,
+                fraction < 1.0 ? (fluid - liquid_amount) / (1.0 - fraction) : 0.0);
+            float mass = dot(phases, ratios);
+            output0 = vec4(liquid_amount, mass, 0, 0);
         }
     )");
     runner.build(freeze_weights, "split weights", common, R"(
-        uniform sampler2D water;
-        void main() { output0 = vec4(at(water, cell()) > 0.5 ? 1.0 : 0.0); }
+        uniform sampler2D liquid, density;
+        void main()
+        {
+            float f = at(liquid, cell());
+            vec2 phases = texelFetch(density, cell(), 0).rg;
+            bool selected = f > 0.5;
+            output0 = vec4(selected ? 1.0 : 0.0, selected ? phases.r / f : phases.g / (1.0 - f), 0, 0);
+        }
     )");
+    const char* component_transport = R"(
+        uniform sampler2D liquid, masses, corrections, transfers, flow, weights;
+        uniform vec4 liquid_mask, gas_mask;
+#ifdef HORIZONTAL
+        OUT1 vec4 output1;
+#endif
+#ifdef SINGLE_GROUP
+    #ifdef HORIZONTAL
+        OUT2 vec4 output2;
+        OUT3 vec4 output3;
+    #else
+        OUT1 vec4 output1;
+        OUT2 vec4 output2;
+    #endif
+#endif
+        vec4 transfer(ivec2 p, ivec2 axis)
+        {
+            int coordinate = mode == 0 ? p.x : p.y;
+            int extent = mode == 0 ? grid_size.x : grid_size.y;
+            if (coordinate == 0 || coordinate == extent) return vec4(0);
+            float volume = at(flow, p) * time_step / cell_size;
+            ivec2 donor = volume > 0.0 ? p - axis : p;
+            float f = at(liquid, donor), liquid_volume = at(transfers, p);
+            vec4 ratio = liquid_mask * (f > 0.0 ? liquid_volume / f : 0.0) +
+                gas_mask * (f < 1.0 ? (volume - liquid_volume) / (1.0 - f) : 0.0);
+            return texelFetch(masses, donor, 0) * ratio;
+        }
+        void main()
+        {
+            ivec2 p = cell(), axis = mode == 0 ? ivec2(1, 0) : ivec2(0, 1);
+            float f = at(liquid, p);
+#ifdef HORIZONTAL
+            // Capture the unsplit correction while this cell's original mass is in registers.
+            vec4 selected = f > 0.5 ? liquid_mask : gas_mask;
+            vec4 weight = texelFetch(masses, p, 0) * selected / (f > 0.5 ? f : 1.0 - f);
+            output1 = weight;
+#else
+            vec4 weight = texelFetch(corrections, p, 0);
+#endif
+            // Pair each split correction with its face flux to preserve a pure uniform phase.
+            vec4 before = transfer(p, axis) - weight * (at(flow, p) * time_step / cell_size);
+            vec4 after = transfer(p + axis, axis) - weight * (at(flow, p + axis) * time_step / cell_size);
+            output0 = texelFetch(masses, p, 0) + (before - after);
+#ifdef SINGLE_GROUP
+            // One packed group contains the whole mixture: emit density and geometry together.
+            vec2 phases = vec2(dot(output0, liquid_mask), dot(output0, gas_mask)) / (cell_size * cell_size);
+            float split = at(weights, p);
+            float before_volume = at(transfers, p) - split * (at(flow, p) * time_step / cell_size);
+            float after_volume = at(transfers, p + axis) - split * (at(flow, p + axis) * time_step / cell_size);
+            float fraction = f + (before_volume - after_volume);
+    #ifdef HORIZONTAL
+            output2 = vec4(phases, 0, 0);
+            output3 = vec4(fraction);
+    #else
+            output1 = vec4(phases, 0, 0);
+            output2 = vec4(fraction);
+    #endif
+#endif
+        }
+    )";
+    runner.build(transport_components_x, "advect components X", common + "\n#define HORIZONTAL\n", component_transport);
+    runner.build(transport_components_y, "advect components Y", common, component_transport);
+    runner.build(transport_single_x, "advect single group X", common + "\n#define HORIZONTAL\n#define SINGLE_GROUP\n", component_transport);
+    runner.build(transport_single_y, "advect single group Y", common + "\n#define SINGLE_GROUP\n", component_transport);
     runner.build(momentum, "momentum and velocity", common, R"(
         OUT1 vec4 output1;
         uniform sampler2D density, source;
@@ -672,7 +945,7 @@ void FluidGridGPU::Impl::buildTransportPrograms()
             int coordinate = horizontal ? p.x : p.y, extent = horizontal ? grid_size.x : grid_size.y;
             if (coordinate == 0 || coordinate == extent) { output0 = vec4(0); return; }
             // a face's momentum region contains half of each adjacent cell
-            float face_density = 0.5 * (at(density, p - axis) + at(density, p));
+            float face_density = 0.5 * (densityAt(density, p - axis) + densityAt(density, p));
             float value = at(source, p);
             output0 = vec4(mode < 2 ? face_density * value : value / face_density);
         }
@@ -682,7 +955,7 @@ void FluidGridGPU::Impl::buildTransportPrograms()
         float mass(ivec2 p) { return texelFetch(transfers, p, 0).g; }
         float massCorrection(ivec2 p, ivec2 axis)
         {
-            float weight = at(weights, p) != 0.0 ? water_density : air_density;
+            float weight = texelFetch(weights, p, 0).g;
             return weight * (time_step / cell_size) * (at(flow, p + axis) - at(flow, p));
         }
         float momentumTransfer(float amount, float before, float after)
@@ -715,16 +988,16 @@ void FluidGridGPU::Impl::buildTransportPrograms()
             output0 = vec4(at(momentum, p) + before - after + at(original_velocity, p) * correction);
         }
     )");
-    runner.build(transport_water, "transport water", common, R"(
-        uniform sampler2D water, transfers, flow, weights;
+    runner.build(transport_liquid, "transport liquid", common, R"(
+        uniform sampler2D liquid, transfers, flow, weights;
         void main()
         {
             ivec2 p = cell(), axis = mode == 0 ? ivec2(1, 0) : ivec2(0, 1);
             float weight = at(weights, p);
-            // Subtract the split correction at each face, so pure water's equal fluxes cancel exactly.
+            // Subtract the split correction at each face, so pure liquid's equal fluxes cancel exactly.
             float before = at(transfers, p) - weight * (at(flow, p) * time_step / cell_size);
             float after = at(transfers, p + axis) - weight * (at(flow, p + axis) * time_step / cell_size);
-            output0 = vec4(at(water, p) + (before - after));
+            output0 = vec4(at(liquid, p) + (before - after));
         }
     )");
 
@@ -732,17 +1005,48 @@ void FluidGridGPU::Impl::buildTransportPrograms()
 
 void FluidGridGPU::Impl::rebuildInterfaces()
 {
-    run(reconstruct, { &interfaces }, { {"water", &water_fraction} });
+    run(reconstruct, { &interfaces }, { {"liquid", &liquid_fraction} });
 }
 
 void FluidGridGPU::Impl::rebuildTransfersX(double dt)
 {
-    run(transfers, { &transfers_u }, { {"water", &water_fraction}, {"interfaces", &interfaces}, {"flow", &u} }, float(dt));
+    run(transfers, { &transfers_u }, { {"liquid", &liquid_fraction}, {"interfaces", &interfaces}, {"flow", &u}, {"density", &density} }, float(dt));
 }
 
 void FluidGridGPU::Impl::rebuildTransfersY(double dt)
 {
-    run(transfers, { &transfers_v }, { {"water", &water_fraction}, {"interfaces", &interfaces}, {"flow", &v} }, float(dt), 1);
+    run(transfers, { &transfers_v }, { {"liquid", &liquid_fraction}, {"interfaces", &interfaces}, {"flow", &v}, {"density", &density} }, float(dt), 1);
+}
+
+void FluidGridGPU::Impl::advectComponents(double dt, int direction)
+{
+    const bool single_group = components.size() == 1;
+    Program& program = single_group ? (direction == 0 ? transport_single_x : transport_single_y)
+        : (direction == 0 ? transport_components_x : transport_components_y);
+    for (auto& component : components)
+    {
+        glUseProgram(program.id);
+        program.vector("liquid_mask", component.liquid_mask);
+        program.vector("gas_mask", component.gas_mask);
+        const std::initializer_list<Input> inputs = {
+            {"liquid", &liquid_fraction}, {"masses", &component.mass}, {"corrections", direction == 0 ? &component.mass : &component.correction},
+            {"transfers", direction == 0 ? &transfers_u : &transfers_v}, {"flow", direction == 0 ? &u : &v}, {"weights", &split_weights} };
+        if (single_group && direction == 0)
+            run(program, { &component.next_mass, &component.correction, &next_density, &next_liquid_fraction }, inputs, float(dt), direction);
+        else if (single_group)
+            run(program, { &component.next_mass, &next_density, &next_liquid_fraction }, inputs, float(dt), direction);
+        else if (direction == 0)
+            run(program, { &component.next_mass, &component.correction }, inputs, float(dt), direction);
+        else
+            run(program, { &component.next_mass }, inputs, float(dt), direction);
+        component.mass.swap(component.next_mass);
+    }
+    if (single_group) density.swap(next_density);
+    else run(transport_liquid, { &next_liquid_fraction }, {
+        {"liquid", &liquid_fraction}, {"transfers", direction == 0 ? &transfers_u : &transfers_v},
+        {"flow", direction == 0 ? &u : &v}, {"weights", &split_weights} }, float(dt), direction);
+    liquid_fraction.swap(next_liquid_fraction);
+    density_valid = single_group;
 }
 
 void FluidGridGPU::Impl::rebuildMomentum()
@@ -796,21 +1100,17 @@ void FluidGridGPU::Impl::advect(double dt)
     for (double remaining = dt; remaining > 0.0;)
     {
         const double step = std::min(remaining, max_step);
-        run(freeze_weights, { &split_weights }, { {"water", &water_fraction} });
+        run(freeze_weights, { &split_weights }, { {"liquid", &liquid_fraction}, {"density", &density} });
         rebuildInterfaces();
         rebuildTransfersX(step);
         advectMomentumX(step);
-        run(transport_water, { &next_water_fraction }, {
-            {"water", &water_fraction}, {"transfers", &transfers_u}, {"flow", &u}, {"weights", &split_weights} }, float(step));
-        water_fraction.swap(next_water_fraction);
+        advectComponents(step, 0);
         recoverVelocity();
 
         rebuildInterfaces();
         rebuildTransfersY(step);
         advectMomentumY(step);
-        run(transport_water, { &next_water_fraction }, {
-            {"water", &water_fraction}, {"transfers", &transfers_v}, {"flow", &v}, {"weights", &split_weights} }, float(step), 1);
-        water_fraction.swap(next_water_fraction);
+        advectComponents(step, 1);
         recoverVelocity();
         remaining -= step;
     }

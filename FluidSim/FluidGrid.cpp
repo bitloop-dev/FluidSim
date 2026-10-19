@@ -43,7 +43,7 @@ double sampleScalar(
 }
 }
 
-double waterArea(
+double liquidArea(
     DVec2 normal,
     double offset,
     DVec2 rect_min,
@@ -53,7 +53,7 @@ double waterArea(
     const double height = rect_max.y - rect_min.y;
     const double area = width * height;
 
-    // measure the line from the rectangle's furthest water-side corner
+    // measure the line from the rectangle's furthest liquid-side corner
     const double min_projection =
         normal.x * (normal.x >= 0.0 ? rect_min.x : rect_max.x) +
         normal.y * (normal.y >= 0.0 ? rect_min.y : rect_max.y);
@@ -76,11 +76,11 @@ double waterArea(
     if (small_span == 0.0)
         return area * cut / large_span;
 
-    // the water occupies a triangle near the water-side corner
+    // the liquid occupies a triangle near the liquid-side corner
     if (cut < small_span)
         return area * cut * cut / (2.0 * small_span * large_span);
 
-    // after reaching one edge, the water region becomes a trapezoid
+    // after reaching one edge, the liquid region becomes a trapezoid
     if (cut < large_span)
         return area * (cut - 0.5 * small_span) / large_span;
 
@@ -102,7 +102,7 @@ double interfaceOffset(DVec2 normal, double fraction)
     const double small_span = std::min(span_x, span_y);
     const double large_span = std::max(span_x, span_y);
 
-    // water fraction where the water triangle first becomes a trapezoid
+    // liquid fraction where the liquid triangle first becomes a trapezoid
     const double triangle_fraction =
         0.5 * small_span / large_span;
 
@@ -110,7 +110,7 @@ double interfaceOffset(DVec2 normal, double fraction)
 
     if (fraction < triangle_fraction)
     {
-        // reverse the water-triangle area formula
+        // reverse the liquid-triangle area formula
         cut = std::sqrt(
             2.0 * small_span * large_span * fraction);
     }
@@ -137,8 +137,8 @@ FluidGrid::FluidGrid(int w, int h, double cell_size) :
     v(w* (h + 1), 0.0),
     next_u((w + 1)* h, 0.0),
     next_v(w* (h + 1), 0.0),
-    water_fraction(w* h, 0.0),
-    next_water_fraction(w* h, 0.0),
+    liquid_fraction(w* h, 0.0),
+    next_liquid_fraction(w* h, 0.0),
     density(w* h, 0.0),
     inv_density_u((w + 1)* h, 0.0),
     inv_density_v(w* (h + 1), 0.0),
@@ -147,17 +147,21 @@ FluidGrid::FluidGrid(int w, int h, double cell_size) :
     interface_normals(w* h),
     interface_offsets(w* h, 0.0), 
     split_weights(w* h, 0),
-    water_transfer_u((w + 1)* h, 0.0),
-    water_transfer_v(w* (h + 1), 0.0),
+    mass_correction_weights(w* h, 0.0),
+    liquid_transfer_u((w + 1)* h, 0.0),
+    liquid_transfer_v(w* (h + 1), 0.0),
     mass_transfer_u((w + 1)* h, 0.0),
     mass_transfer_v(w* (h + 1), 0.0),
     momentum_u((w + 1)* h, 0.0),
-    momentum_v(w* (h + 1), 0.0)
+    momentum_v(w* (h + 1), 0.0),
+    component_transfer(std::max(u.size(), v.size()), 0.0)
 {
 }
 
 void FluidGrid::upload(const State& state)
 {
+    const size_t cell_count = size_t(width) * height;
+
     auto assign = [](std::vector<double>& field, const std::vector<double>& values, size_t count)
     {
         if (values.empty()) { field.assign(count, 0.0); return; }
@@ -166,16 +170,48 @@ void FluidGrid::upload(const State& state)
             throw std::invalid_argument("FluidGrid upload dimensions do not match the grid");
         field = values;
     };
-    assign(water_fraction, state.water_fraction, size_t(width) * height);
+
+    assign(liquid_fraction, state.liquid_fraction, size_t(width) * height);
     assign(u, state.u, size_t(width + 1) * height);
     assign(v, state.v, size_t(width) * (height + 1));
     assign(pressure, state.pressure, size_t(width) * height);
+
+    auto assign_components = [&](auto& fields, const auto& values, size_t component_count)
+    {
+        if (values.empty())
+        {
+            fields.assign(component_count, std::vector<Scalar>(cell_count, 0.0));
+            return;
+        }
+
+        // Imported component arrays must match the configured mixture.
+        if (values.size() != component_count)
+            throw std::invalid_argument("FluidGrid upload component count does not match the mixture");
+
+        fields.resize(component_count);
+
+        for (size_t k = 0; k < component_count; ++k)
+            assign(fields[k], values[k], cell_count);
+    };
+
+    assign_components(liquid_mass, state.liquid_mass, liquid_mixture.components.size());
+    assign_components(gas_mass, state.gas_mass, gas_mixture.components.size());
+
+    liquid_correction_weights.assign(
+        liquid_mass.size(), std::vector<Scalar>(cell_count, 0.0));
+
+    gas_correction_weights.assign(
+        gas_mass.size(), std::vector<Scalar>(cell_count, 0.0));
+
     previous_pressure = pressure;
 }
 
 FluidGrid::State FluidGrid::download() const
 {
-    return { water_fraction, u, v, pressure };
+    return {
+        liquid_fraction, u, v, pressure,
+        liquid_mass, gas_mass
+    };
 }
 
 FluidGrid::ProjectionResult FluidGrid::step(
@@ -230,14 +266,17 @@ void FluidGrid::advect(double dt)
 
         // keep the same correction weights throughout both directional passes
         for (int i = 0; i < count; ++i)
-            split_weights[i] = water_fraction[i] > 0.5 ? 1 : 0;
+            split_weights[i] = liquid_fraction[i] > 0.5 ? 1 : 0;
+
+        freezeComponentCorrections();
 
         // reconstruct the current interface before horizontal transport
         rebuildInterfaces();
         rebuildTransfersX(step);
+        advectComponents(step, true);
         advectMomentumX(step, u);
 
-        Thread::forEachBatch(next_water_fraction, [&](int i0, int i1)
+        Thread::forEachBatch(next_liquid_fraction, [&](int i0, int i1)
         {
             for (int i = i0; i < i1; ++i)
             {
@@ -246,10 +285,10 @@ void FluidGrid::advect(double dt)
 
                 const int left_face = uIndex(x, y);
 
-                // signed water leaving through the right face minus the left face
-                const double net_water_transfer =
-                    water_transfer_u[left_face + 1] -
-                    water_transfer_u[left_face];
+                // signed liquid leaving through the right face minus the left face
+                const double net_liquid_transfer =
+                    liquid_transfer_u[left_face + 1] -
+                    liquid_transfer_u[left_face];
 
                 // total fluid leaving minus entering during this directional pass
                 const double net_fluid_transfer = scale * (
@@ -257,41 +296,42 @@ void FluidGrid::advect(double dt)
                     u[uIndex(x, y)]);
 
                 // account for the temporary expansion or compression of an X-only pass
-                next_water_fraction[i] =
-                    water_fraction[i] - net_water_transfer +
+                next_liquid_fraction[i] =
+                    liquid_fraction[i] - net_liquid_transfer +
                     split_weights[i] * net_fluid_transfer;
             }
         });
 
-        water_fraction.swap(next_water_fraction);
+        liquid_fraction.swap(next_liquid_fraction);
         recoverVelocity();
 
         // horizontal transport changed the fractions, so reconstruct before vertical transport
         rebuildInterfaces();
         rebuildTransfersY(step);
+        advectComponents(step, false);
         advectMomentumY(step, v);
 
-        Thread::forEachBatch(next_water_fraction, [&](int i0, int i1)
+        Thread::forEachBatch(next_liquid_fraction, [&](int i0, int i1)
         {
             for (int i = i0; i < i1; ++i)
             {
-                // signed water leaving through the bottom face minus the top face
-                const double net_water_transfer =
-                    water_transfer_v[i + width] -
-                    water_transfer_v[i];
+                // signed liquid leaving through the bottom face minus the top face
+                const double net_liquid_transfer =
+                    liquid_transfer_v[i + width] -
+                    liquid_transfer_v[i];
 
                 const double net_fluid_transfer = scale * (
                     v[i + width] -
                     v[i]);
 
                 // reuse the weights chosen before either pass changed the fractions
-                next_water_fraction[i] =
-                    water_fraction[i] - net_water_transfer +
+                next_liquid_fraction[i] =
+                    liquid_fraction[i] - net_liquid_transfer +
                     split_weights[i] * net_fluid_transfer;
             }
         });
 
-        water_fraction.swap(next_water_fraction);
+        liquid_fraction.swap(next_liquid_fraction);
         recoverVelocity();
 
         remaining -= step;
@@ -315,34 +355,54 @@ DVec2 FluidGrid::sampleVelocity(DVec2 pos) const
 DVec2 FluidGrid::interfaceNormal(int x, int y) const
 {
     // use the nearest boundary cell when a neighbour lies outside the grid
-    auto fraction = [&](int sx, int sy)
+    const int left_x = std::max(x - 1, 0), right_x = std::min(x + 1, width - 1);
+    const double* above = liquid_fraction.data() + std::max(y - 1, 0) * width;
+    const double* row = liquid_fraction.data() + y * width;
+    const double* below = liquid_fraction.data() + std::min(y + 1, height - 1) * width;
+    const double top_left = above[left_x], top = above[x], top_right = above[right_x];
+    const double left = row[left_x], right = row[right_x];
+    const double bottom_left = below[left_x], bottom = below[x], bottom_right = below[right_x];
+
+    // Column/row totals measure surface height rather than one cell's abrupt fraction jump.
+    const double left_sum = top_left + left + bottom_left;
+    const double right_sum = top_right + right + bottom_right;
+    const double top_sum = top_left + top + top_right;
+    const double bottom_sum = bottom_left + bottom + bottom_right;
+    DVec2 centered{0.5 * (left_sum - right_sum), 0.5 * (top_sum - bottom_sum)};
+
+    // Youngs' weighted gradient supplies the alternative estimate near corners and thin features.
+    const DVec2 youngs{
+        left_sum + left - right_sum - right,
+        top_sum + top - bottom_sum - bottom
+    };
+
+    // A symmetric neighbourhood (such as an isolated cell) has no unique interface direction.
+    if (centered.x == 0.0 && centered.y == 0.0)
+        return youngs.x == 0.0 && youngs.y == 0.0 ? DVec2{1.0, 0.0} : youngs;
+
+    // MYC chooses the dominant height direction, then the steeper of its two slope estimates.
+    if (std::abs(centered.x) <= std::abs(centered.y))
     {
-        sx = std::clamp(sx, 0, width - 1);
-        sy = std::clamp(sy, 0, height - 1);
-
-        return water_fraction[sy * width + sx];
-    };
-
-    // point towards decreasing water fraction: from water towards air
-    DVec2 normal{
-        fraction(x - 1, y) - fraction(x + 1, y),
-        fraction(x, y - 1) - fraction(x, y + 1)
-    };
-
-    // equal neighbouring fractions provide no direction, so choose a vertical interface
-    if (normal.x == 0.0 && normal.y == 0.0)
-        return { 1.0, 0.0 };
-
-    return normal;
+        centered.y = std::copysign(1.0, centered.y);
+        if (std::abs(youngs.x) > std::abs(centered.x * youngs.y))
+            return youngs;
+    }
+    else
+    {
+        centered.x = std::copysign(1.0, centered.x);
+        if (std::abs(youngs.y) > std::abs(centered.y * youngs.x))
+            return youngs;
+    }
+    return centered;
 }
 
 void FluidGrid::rebuildInterfaces()
 {
     for (int i = 0; i < width * height; ++i)
     {
-        const double fraction = water_fraction[i];
+        const double fraction = liquid_fraction[i];
 
-        // entirely air or entirely water needs no internal dividing line
+        // entirely gas or entirely liquid needs no internal dividing line
         if (fraction <= 0.0 || fraction >= 1.0)
             continue;
 
@@ -358,14 +418,17 @@ void FluidGrid::rebuildInterfaces()
     }
 }
 
-double FluidGrid::massTransfer(double fluid_transfer, double water_transfer) const
+double FluidGrid::componentMassTransfer(
+    double volume_transfer,
+    double donor_fraction,
+    double donor_mass)
 {
-    const double air_transfer = fluid_transfer - water_transfer;
+    // A cell containing none of this mixture cannot supply its ingredients.
+    if (donor_fraction <= 0.0)
+        return 0.0;
 
-    // combine the masses carried by the water and air portions
-    return 
-        water_density * water_transfer +
-        air_density * air_transfer;
+    // Transfer the same proportion of each ingredient as of its mixture.
+    return donor_mass * (volume_transfer / donor_fraction);
 }
 
 double FluidGrid::momentumTransfer(
@@ -392,8 +455,7 @@ void FluidGrid::advectMomentumX(
         const int left_face = uIndex(x, y);
 
         // use the density counterpart of the frozen material correction
-        const double weight =
-            split_weights[cell] ? water_density : air_density;
+        const double weight = mass_correction_weights[cell];
 
         return weight * scale * (
             flow_u[left_face + 1] - flow_u[left_face]);
@@ -498,8 +560,7 @@ void FluidGrid::advectMomentumY(
         const int top_face = vIndex(x, y);
 
         // reuse the correction weights chosen before either pass
-        const double weight =
-            split_weights[cell] ? water_density : air_density;
+        const double weight = mass_correction_weights[cell];
 
         return weight * scale * (
             flow_v[top_face + width] - flow_v[top_face]);
@@ -636,7 +697,7 @@ void FluidGrid::recoverVelocity()
     });
 }
 
-double FluidGrid::waterTransferX(int x, int y, double step) const
+double FluidGrid::liquidTransferX(int x, int y, double step) const
 {
     if (x == 0 || x == width)
         return 0.0;
@@ -647,7 +708,7 @@ double FluidGrid::waterTransferX(int x, int y, double step) const
 
     // positive speed draws from the left cell; negative speed draws from the right
     const int donor = y * width + (speed > 0.0 ? x - 1 : x);
-    const double fraction = water_fraction[donor];
+    const double fraction = liquid_fraction[donor];
 
     if (fraction <= 0.0)
         return 0.0;
@@ -655,7 +716,7 @@ double FluidGrid::waterTransferX(int x, int y, double step) const
     // convert distance travelled into a fraction of one cell's width
     const double strip_width = std::abs(speed) * step / cell_size;
 
-    // a full-water cell supplies water across the entire outgoing strip
+    // a full-liquid cell supplies liquid across the entire outgoing strip
     if (fraction >= 1.0)
         return speed * step / cell_size;
 
@@ -663,17 +724,17 @@ double FluidGrid::waterTransferX(int x, int y, double step) const
     const DVec2 rect_min{ (speed > 0.0 ? 1.0 - strip_width : 0.0), 0.0 };
     const DVec2 rect_max{ (speed > 0.0 ? 1.0 : strip_width),       1.0 };
 
-    const double area = waterArea(
+    const double area = liquidArea(
         interface_normals[donor],
         interface_offsets[donor],
         rect_min,
         rect_max);
 
-    // positive transfer moves water right; negative transfer moves it left
+    // positive transfer moves liquid right; negative transfer moves it left
     return speed > 0.0 ? area : -area;
 }
 
-double FluidGrid::waterTransferY(int x, int y, double step) const
+double FluidGrid::liquidTransferY(int x, int y, double step) const
 {
     if (y == 0 || y == height)
         return 0.0;
@@ -684,7 +745,7 @@ double FluidGrid::waterTransferY(int x, int y, double step) const
 
     // positive speed draws from above; negative speed draws from below
     const int donor = (speed > 0.0 ? y - 1 : y) * width + x;
-    const double fraction = water_fraction[donor];
+    const double fraction = liquid_fraction[donor];
 
     if (fraction <= 0.0)
         return 0.0;
@@ -692,7 +753,7 @@ double FluidGrid::waterTransferY(int x, int y, double step) const
     // convert distance travelled into a fraction of one cell's height
     const double strip_height = std::abs(speed) * step / cell_size;
 
-    // a full-water cell supplies water across the entire outgoing strip
+    // a full-liquid cell supplies liquid across the entire outgoing strip
     if (fraction >= 1.0)
         return speed * step / cell_size;
 
@@ -706,13 +767,13 @@ double FluidGrid::waterTransferY(int x, int y, double step) const
         speed > 0.0 ? 1.0 : strip_height
     };
 
-    const double area = waterArea(
+    const double area = liquidArea(
         interface_normals[donor],
         interface_offsets[donor],
         rect_min,
         rect_max);
 
-    // positive transfer moves water down; negative transfer moves it up
+    // positive transfer moves liquid down; negative transfer moves it up
     return speed > 0.0 ? area : -area;
 }
 
@@ -881,14 +942,7 @@ double FluidGrid::maxDivergence() const
 
 void FluidGrid::rebuildPressureCoefficients()
 {
-    // Convert the material fraction into a cell-averaged density.
-    for (size_t i = 0; i < water_fraction.size(); ++i)
-    {
-        const double fraction = std::clamp(water_fraction[i], 0.0, 1.0);
-        density[i] =
-            fraction * water_density +
-            (1.0 - fraction) * air_density;
-    }
+    rebuildDensity();
 
     // Zero wall weights exclude pressure corrections through the tank boundary.
     std::fill(inv_density_u.begin(), inv_density_u.end(), 0.0);
@@ -929,73 +983,241 @@ void FluidGrid::rebuildPressureCoefficients()
 
 void FluidGrid::rebuildTransfersX(double step)
 {
-    const double scale = step / cell_size;
-
-    Thread::forEachBatch(water_transfer_u, [&](int i0, int i1)
+    Thread::forEachBatch(liquid_transfer_u, [&](int i0, int i1)
     {
         for (int face = i0; face < i1; ++face)
         {
             const int x = face % (width + 1);
             const int y = face / (width + 1);
 
-            // closed walls transfer neither water nor air
-            if (x == 0 || x == width)
-            {
-                water_transfer_u[face] = 0.0;
-                mass_transfer_u[face] = 0.0;
-                continue;
-            }
-
-            // geometry determines the water portion of the transferred fluid
-            const double water = waterTransferX(x, y, step);
-            const double fluid = u[face] * scale;
-
-            water_transfer_u[face] = water;
-            mass_transfer_u[face] = massTransfer(fluid, water);
+            liquid_transfer_u[face] = liquidTransferX(x, y, step);
         }
     });
 }
 
 void FluidGrid::rebuildTransfersY(double step)
 {
-    const double scale = step / cell_size;
-
-    Thread::forEachBatch(water_transfer_v, [&](int i0, int i1)
+    Thread::forEachBatch(liquid_transfer_v, [&](int i0, int i1)
     {
         for (int face = i0; face < i1; ++face)
         {
             const int x = face % width;
             const int y = face / width;
 
-            // the top and bottom walls transfer neither water nor air
-            if (y == 0 || y == height)
-            {
-                water_transfer_v[face] = 0.0;
-                mass_transfer_v[face] = 0.0;
-                continue;
-            }
-
-            // geometry determines the water portion of the transferred fluid
-            const double water = waterTransferY(x, y, step);
-            const double fluid = v[face] * scale;
-
-            water_transfer_v[face] = water;
-            mass_transfer_v[face] = massTransfer(fluid, water);
+            liquid_transfer_v[face] = liquidTransferY(x, y, step);
         }
     });
 }
 
+void FluidGrid::rebuildComponentTransfersX(
+    double step, const std::vector<Scalar>& mass, bool is_liquid)
+{
+    const double scale = step / cell_size;
+    const double inverse_cell_volume =
+        1.0 / (cell_size * cell_size);
+
+    Thread::forEachBatch(u, [&](int i0, int i1)
+    {
+        for (int face = i0; face < i1; ++face)
+        {
+            const int x = face % (width + 1);
+            const int y = face / (width + 1);
+
+            // Closed walls cannot transfer any ingredient.
+            if (x == 0 || x == width)
+            {
+                component_transfer[face] = 0.0;
+                continue;
+            }
+
+            // Positive flow takes material from the left; negative from the right.
+            const int donor =
+                y * width + (u[face] > 0.0 ? x - 1 : x);
+
+            const double total = u[face] * scale;
+            const double liquid = liquid_transfer_u[face];
+            const double fraction = liquid_fraction[donor];
+
+            // Gas uses the volume left over after accounting for liquid.
+            component_transfer[face] = componentMassTransfer(
+                is_liquid ? liquid : total - liquid,
+                is_liquid ? fraction : 1.0 - fraction,
+                mass[donor]);
+
+            // Momentum uses transferred mass divided by cell volume.
+            mass_transfer_u[face] +=
+                component_transfer[face] * inverse_cell_volume;
+        }
+    });
+}
+
+void FluidGrid::rebuildComponentTransfersY(
+    double step, const std::vector<Scalar>& mass, bool is_liquid)
+{
+    const double scale = step / cell_size;
+    const double inverse_cell_volume =
+        1.0 / (cell_size * cell_size);
+
+    Thread::forEachBatch(v, [&](int i0, int i1)
+    {
+        for (int face = i0; face < i1; ++face)
+        {
+            const int y = face / width;
+
+            // Closed walls cannot transfer any ingredient.
+            if (y == 0 || y == height)
+            {
+                component_transfer[face] = 0.0;
+                continue;
+            }
+
+            // A v-face shares its index with the cell below it.
+            const int donor =
+                v[face] > 0.0 ? face - width : face;
+
+            const double total = v[face] * scale;
+            const double liquid = liquid_transfer_v[face];
+            const double fraction = liquid_fraction[donor];
+
+            // Gas uses the volume left over after accounting for liquid.
+            component_transfer[face] = componentMassTransfer(
+                is_liquid ? liquid : total - liquid,
+                is_liquid ? fraction : 1.0 - fraction,
+                mass[donor]);
+
+            // Momentum uses transferred mass divided by cell volume.
+            mass_transfer_v[face] +=
+                component_transfer[face] * inverse_cell_volume;
+        }
+    });
+}
+
+void FluidGrid::freezeComponentCorrections()
+{
+    const double inverse_cell_volume =
+        1.0 / (cell_size * cell_size);
+
+    std::fill(
+        mass_correction_weights.begin(),
+        mass_correction_weights.end(),
+        0.0);
+
+    auto freeze = [&]<bool IsLiquid>(const auto& fields, auto& corrections)
+    {
+        for (size_t k = 0; k < fields.size(); ++k)
+        {
+            const auto& mass = fields[k];
+            auto& weights = corrections[k];
+
+            Thread::forEachBatch(weights, [&](int i0, int i1)
+            {
+                for (int i = i0; i < i1; ++i)
+                {
+                    if constexpr (IsLiquid)
+                    {
+                        const bool selected = split_weights[i];
+                        const double fraction = liquid_fraction[i];
+
+                        // The selected mixture occupies at least half the cell.
+                        weights[i] = selected ? mass[i] / fraction : 0.0;
+                    }
+                    else
+                    {
+                        const bool selected = split_weights[i] == 0;
+                        const double fraction = 1.0 - liquid_fraction[i];
+
+                        // The selected mixture occupies at least half the cell.
+                        weights[i] = selected ? mass[i] / fraction : 0.0;
+                    }
+
+                    // Combine ingredient corrections in the momentum solver's units.
+                    mass_correction_weights[i] += weights[i] * inverse_cell_volume;
+                }
+            });
+        }
+    };
+
+    freeze.operator()<true>(liquid_mass, liquid_correction_weights);
+    freeze.operator()<false>(gas_mass, gas_correction_weights);
+}
+
+void FluidGrid::advectComponents(double step, bool horizontal)
+{
+    const double scale = step / cell_size;
+    const auto& flow = horizontal ? u : v;
+    const int face_offset = horizontal ? 1 : width;
+
+    auto& total_mass_transfer =
+        horizontal ? mass_transfer_u : mass_transfer_v;
+
+    std::fill(
+        total_mass_transfer.begin(),
+        total_mass_transfer.end(),
+        0.0);
+
+    auto advect_mixture = [&](auto& fields, const auto& corrections,
+        bool is_liquid)
+    {
+        for (size_t k = 0; k < fields.size(); ++k)
+        {
+            auto& mass = fields[k];
+            const auto& weights = corrections[k];
+
+            // Finish all neighbour reads before changing any cell masses.
+            if (horizontal)
+                rebuildComponentTransfersX(step, mass, is_liquid);
+            else
+                rebuildComponentTransfersY(step, mass, is_liquid);
+
+            Thread::forEachBatch(mass, [&](int i0, int i1)
+            {
+                for (int i = i0; i < i1; ++i)
+                {
+                    // Before/after means left/right for X, or top/bottom for Y.
+                    const int before = horizontal
+                        ? uIndex(i % width, i / width)
+                        : i;
+
+                    const int after = before + face_offset;
+
+                    const double net_fluid_transfer =
+                        scale * (flow[after] - flow[before]);
+
+                    // Reuse the coefficient frozen before either direction.
+                    mass[i] +=
+                        component_transfer[before] -
+                        component_transfer[after] +
+                        weights[i] * net_fluid_transfer;
+                }
+            });
+        }
+    };
+
+    advect_mixture(liquid_mass, liquid_correction_weights, true);
+    advect_mixture(gas_mass, gas_correction_weights, false);
+}
+
 void FluidGrid::rebuildDensity()
 {
-    for (size_t i = 0; i < water_fraction.size(); ++i)
-    {
-        const double fraction = std::clamp(water_fraction[i], 0.0, 1.0);
+    const double inverse_cell_volume =
+        1.0 / (cell_size * cell_size);
 
-        // combine the densities according to the cell's material proportions
-        density[i] =
-            fraction * water_density +
-            (1.0 - fraction) * air_density;
-    }
+    Thread::forEachBatch(density, [&](int i0, int i1)
+    {
+        for (int i = i0; i < i1; ++i)
+        {
+            double total_mass = 0.0;
+
+            for (const auto& mass : liquid_mass)
+                total_mass += mass[i];
+
+            for (const auto& mass : gas_mass)
+                total_mass += mass[i];
+
+            // Cell density includes every ingredient in both mixtures.
+            density[i] = total_mass * inverse_cell_volume;
+        }
+    });
 }
 
 void FluidGrid::rebuildMomentum()

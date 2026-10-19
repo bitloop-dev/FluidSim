@@ -1,4 +1,5 @@
 #include "FluidGrid.h"
+#include "FluidTestSetup.h"
 #include "FluidGridGPU.h"
 #include "FluidGridDisplay.h"
 #include "PressureMultigridGPU.h"
@@ -17,6 +18,8 @@ namespace
 {
 using fluid::FluidGrid;
 using fluid::FluidGridGPU;
+using fluid::test::initializeTestMaterials;
+using fluid::test::uploadTestMaterials;
 
 void require(bool condition, const char* message)
 {
@@ -53,12 +56,12 @@ struct Context
 FluidGridGPU::State pool(int width, int height)
 {
     FluidGridGPU::State state;
-    state.water_fraction.resize(size_t(width) * height);
+    state.liquid_fraction.resize(size_t(width) * height);
     for (int y = 0; y < height; ++y)
     for (int x = 0; x < width; ++x)
     {
         const double surface = x + height * (0.5 + 0.04 * std::cos(3.14159265358979323846 * (x * 3 + 0.5) / width));
-        state.water_fraction[y * width + x] = float(std::clamp(y + 1.0 - surface, 0.0, 1.0));
+        state.liquid_fraction[y * width + x] = float(std::clamp(y + 1.0 - surface, 0.0, 1.0));
     }
     return state;
 }
@@ -69,8 +72,8 @@ void pressureBalancesGravity()
     {
         FluidGridGPU grid(w, h, 4);
         FluidGridGPU::State state;
-        state.water_fraction.assign(w * h, 1);
-        grid.upload(state);
+        state.liquid_fraction.assign(w * h, 1);
+        uploadTestMaterials(grid, state);
         grid.applyGravity(1.0 / 120);
         auto result = grid.project(1.0 / 120, 2000, 1e-4);
         std::cout << "hydrostatic " << w << 'x' << h << " iterations=" << result.iterations << " divergence=" << result.max_divergence << '\n';
@@ -86,7 +89,8 @@ void projectionMatchesCPU()
     {
         FluidGrid cpu(w, h, 4);
         auto state = pool(w, h);
-        cpu.water_fraction.assign(state.water_fraction.begin(), state.water_fraction.end());
+        cpu.liquid_fraction.assign(state.liquid_fraction.begin(), state.liquid_fraction.end());
+        initializeTestMaterials(cpu);
         cpu.applyGravity(1.0 / 120);
         const auto reference = cpu.project(1.0 / 120, 2000, 1e-8);
         require(reference.converged, "CPU projection reference failed");
@@ -94,7 +98,7 @@ void projectionMatchesCPU()
         {
             FluidGridGPU gpu(w, h, 4);
             gpu.pressure_preconditioner = preconditioner;
-            gpu.upload(state);
+            uploadTestMaterials(gpu, state);
             gpu.applyGravity(1.0 / 120);
             const auto result = gpu.project(1.0 / 120, 2000, 1e-4);
             const auto output = gpu.download();
@@ -112,11 +116,11 @@ void projectionMatchesCPU()
 void zeroTimeAndFailedProjectionAreHandled()
 {
     FluidGridGPU grid(8, 8, 1);
-    grid.upload(pool(8, 8));
+    uploadTestMaterials(grid, pool(8, 8));
     const auto before = grid.download();
     require(!grid.step(0).converged, "zero-time step unexpectedly advanced");
     const auto after = grid.download();
-    require(before.water_fraction == after.water_fraction && before.u == after.u && before.v == after.v, "zero-time step changed state");
+    require(before.liquid_fraction == after.liquid_fraction && before.u == after.u && before.v == after.v, "zero-time step changed state");
     grid.applyGravity(0.01);
     require(!grid.project(0.01, 0).converged, "zero-iteration projection unexpectedly converged");
 }
@@ -197,11 +201,11 @@ void largeMixedPressureConvergesWithinDefaultBudget()
 {
     FluidGridGPU grid(512, 512, 4);
     auto state = pool(512, 512);
-    grid.upload(state);
+    uploadTestMaterials(grid, state);
     grid.applyGravity(1.0 / 120);
     const auto result = grid.project(1.0 / 120);
     require(result.converged, "512x512 GPU multigrid exhausted the default pressure budget");
-    grid.upload(state);
+    uploadTestMaterials(grid, state);
     grid.applyGravity(1.0 / 120);
     const auto limited = grid.project(1.0 / 120, 1, 1e-6);
     require(!limited.converged && limited.iterations == 1, "GPU pressure exceeded or misreported a one-iteration budget");
@@ -211,8 +215,8 @@ void cachedVelocityStatsRemainCurrent()
 {
     FluidGridGPU cached(48, 32, 4), refreshed(48, 32, 4);
     const auto initial = pool(48, 32);
-    cached.upload(initial);
-    refreshed.upload(initial);
+    uploadTestMaterials(cached, initial);
+    uploadTestMaterials(refreshed, initial);
     for (int tick = 0; tick < 20; ++tick)
     {
         // A zero force leaves velocities unchanged while forcing the uncached CFL path.
@@ -220,17 +224,17 @@ void cachedVelocityStatsRemainCurrent()
         const double dt = tick < 10 ? 1.0 / 120.0 : 0.25;
         require(cached.step(dt, 2000, 1e-3).converged && refreshed.step(dt, 2000, 1e-3).converged, "CFL cache comparison failed to converge");
         const auto a = cached.download(), b = refreshed.download();
-        require(a.water_fraction == b.water_fraction && a.u == b.u && a.v == b.v && a.pressure == b.pressure,
+        require(a.liquid_fraction == b.liquid_fraction && a.u == b.u && a.v == b.v && a.pressure == b.pressure,
                 "cached velocity statistics changed transport or pressure");
     }
     const auto restart = cached.download();
-    cached.upload(restart);
-    refreshed.upload(restart);
+    uploadTestMaterials(cached, restart);
+    uploadTestMaterials(refreshed, restart);
     refreshed.applyGravity(0.0);
     cached.advect(0.1);
     refreshed.advect(0.1);
     const auto a = cached.download(), b = refreshed.download();
-    require(a.water_fraction == b.water_fraction && a.u == b.u && a.v == b.v, "upload retained stale velocity statistics");
+    require(a.liquid_fraction == b.liquid_fraction && a.u == b.u && a.v == b.v, "upload retained stale velocity statistics");
 }
 
 template<typename Grid>
@@ -238,11 +242,11 @@ void commonInterfaceAndDisplay()
 {
     Grid grid(9, 7, 2.5);
     typename Grid::State initial;
-    initial.water_fraction.resize(9 * 7);
-    initial.water_fraction[2 * 9 + 3] = typename Grid::Scalar(0.375);
-    grid.upload(initial);
+    initial.liquid_fraction.resize(9 * 7);
+    initial.liquid_fraction[2 * 9 + 3] = typename Grid::Scalar(0.375);
+    uploadTestMaterials(grid, initial);
     const auto before = grid.download();
-    require(before.water_fraction == initial.water_fraction && before.u.size() == 10 * 7 && before.v.size() == 9 * 8 && before.pressure.size() == 9 * 7,
+    require(before.liquid_fraction == initial.liquid_fraction && before.u.size() == 10 * 7 && before.v.size() == 9 * 8 && before.pressure.size() == 9 * 7,
             "common state transfer has incorrect field sizes or contents");
 
     fluid::FluidGridDisplay display;
@@ -257,17 +261,23 @@ void commonInterfaceAndDisplay()
         require(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "common display texture is incomplete");
         float pixel[4];
         glReadPixels(3, 2, 1, 1, GL_RGBA, GL_FLOAT, pixel);
-        require(pixel[0] == expected, "common display returned stale or incorrect water fractions");
+        require(pixel[0] == 0.0f && pixel[1] == 0.0f && pixel[2] == expected && pixel[3] == 1.0f, "display returned stale or incorrect component colours");
     };
     checkTexture(0.375f);
-    require(before.water_fraction == grid.download().water_fraction, "display mutated the material state");
+    require(before.liquid_fraction == grid.download().liquid_fraction, "display mutated the material state");
     require(grid.step(1.0 / 120, 2000, 1e-3).converged, "common physics call failed");
     grid.destroy();
     grid.upload({});
     checkTexture(0.0f);
     const auto reset = grid.download();
-    for (const auto* field : { &reset.water_fraction, &reset.u, &reset.v, &reset.pressure })
+    for (const auto* field : { &reset.liquid_fraction, &reset.u, &reset.v, &reset.pressure })
         for (auto value : *field) require(value == 0, "empty upload failed to reset a field");
+    for (const auto* phase : { &reset.liquid_mass, &reset.gas_mass })
+        for (const auto& field : *phase) for (auto value : field) require(value == 0, "empty upload failed to reset component masses");
+    grid.liquid_mixture.components.clear();
+    grid.gas_mixture.components.clear();
+    grid.upload({});
+    checkTexture(0.0f);
     display.destroy();
     grid.destroy();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -294,10 +304,10 @@ void graphicsStateIsPreserved()
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     {
         FluidGridGPU gpu(8, 8, 1);
-        gpu.upload(pool(8, 8));
+        uploadTestMaterials(gpu, pool(8, 8));
         require(gpu.step(1.0 / 120, 2000, 1e-3).converged, "graphics state changed the numerical passes");
         const auto state = gpu.download();
-        require(state.water_fraction[7 * 8] > 0.9f, "pixel buffers or color mask corrupted GPU state");
+        require(state.liquid_fraction[7 * 8] > 0.9f, "pixel buffers or color mask corrupted GPU state");
         GLint value, viewport[4];
         GLboolean mask[4];
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &value);
@@ -344,35 +354,36 @@ void transportMatchesCPU()
         FluidGrid cpu(48, 48, 1);
         FluidGridGPU gpu(48, 48, 1);
         FluidGridGPU::State state;
-        state.water_fraction.resize(48 * 48);
+        state.liquid_fraction.resize(48 * 48);
         state.u.assign(49 * 48, float(velocity.x));
         state.v.assign(48 * 49, float(velocity.y));
         for (int y = 18; y < 30; ++y)
         for (int x = 18; x < 30; ++x)
-            state.water_fraction[y * 48 + x] = float(std::clamp(6.0 - std::hypot(x - 23.5, y - 23.5), 0.0, 1.0));
-        cpu.water_fraction.assign(state.water_fraction.begin(), state.water_fraction.end());
+            state.liquid_fraction[y * 48 + x] = float(std::clamp(6.0 - std::hypot(x - 23.5, y - 23.5), 0.0, 1.0));
+        cpu.liquid_fraction.assign(state.liquid_fraction.begin(), state.liquid_fraction.end());
         cpu.u.assign(state.u.begin(), state.u.end());
         cpu.v.assign(state.v.begin(), state.v.end());
-        const double initial = std::accumulate(state.water_fraction.begin(), state.water_fraction.end(), 0.0);
-        gpu.upload(state);
+        initializeTestMaterials(cpu);
+        const double initial = std::accumulate(state.liquid_fraction.begin(), state.liquid_fraction.end(), 0.0);
+        uploadTestMaterials(gpu, state);
         cpu.advect(1);
         gpu.advect(1);
         state = gpu.download();
         double fraction_error = 0, velocity_error = 0;
-        for (size_t i = 0; i < state.water_fraction.size(); ++i)
-            fraction_error = std::max(fraction_error, std::abs(state.water_fraction[i] - cpu.water_fraction[i]));
+        for (size_t i = 0; i < state.liquid_fraction.size(); ++i)
+            fraction_error = std::max(fraction_error, std::abs(state.liquid_fraction[i] - cpu.liquid_fraction[i]));
         for (int y = 8; y < 40; ++y)
         for (int x = 8; x < 40; ++x)
         {
             velocity_error = std::max(velocity_error, std::abs(state.u[y * 49 + x] - velocity.x));
             velocity_error = std::max(velocity_error, std::abs(state.v[y * 48 + x] - velocity.y));
         }
-        const double drift = std::accumulate(state.water_fraction.begin(), state.water_fraction.end(), 0.0) - initial;
+        const double drift = std::accumulate(state.liquid_fraction.begin(), state.liquid_fraction.end(), 0.0) - initial;
         std::cout << "diagonal " << velocity.x << ',' << velocity.y << " fraction_error=" << fraction_error
                   << " velocity_error=" << velocity_error << " volume_drift=" << drift << '\n';
         require(fraction_error < 2e-6, "GPU geometric transport differs from CPU");
         require(velocity_error < 2e-4, "GPU density changes altered uniform motion");
-        require(std::abs(drift) < initial * 1e-6, "GPU uniform transport lost water");
+        require(std::abs(drift) < initial * 1e-6, "GPU uniform transport lost liquid");
     }
 }
 
@@ -381,7 +392,7 @@ void transportPreservesPureMaterial()
     constexpr int size = 19;
     FluidGridGPU grid(size, size, 4);
     FluidGridGPU::State state;
-    state.water_fraction.assign(size * size, 1.0f);
+    state.liquid_fraction.assign(size * size, 1.0f);
     state.u.resize((size + 1) * size);
     state.v.resize(size * (size + 1));
     // Differences of a streamfunction give a closed, circulating flow without a pressure solve.
@@ -392,9 +403,9 @@ void transportPreservesPureMaterial()
     for (int x = 0; x <= size; ++x) state.u[grid.uIndex(x, y)] = stream(x, y + 1) - stream(x, y);
     for (int y = 0; y <= size; ++y)
     for (int x = 0; x < size; ++x) state.v[grid.vIndex(x, y)] = stream(x, y) - stream(x + 1, y);
-    grid.upload(state);
+    uploadTestMaterials(grid, state);
     grid.advect(0.137);
-    for (float value : grid.download().water_fraction)
+    for (float value : grid.download().liquid_fraction)
         require(value == 1.0f, "GPU transport accumulated roundoff in a pure material");
 }
 
@@ -402,17 +413,61 @@ void transportKeepsStraightInterfacesSharp()
 {
     FluidGridGPU gpu(40, 8, 1);
     FluidGridGPU::State state;
-    state.water_fraction.resize(40 * 8);
+    state.liquid_fraction.resize(40 * 8);
     state.u.assign(41 * 8, 1);
     for (int y = 0; y < 8; ++y)
-    for (int x = 8; x < 16; ++x) state.water_fraction[y * 40 + x] = 1;
-    gpu.upload(state);
+    for (int x = 8; x < 16; ++x) state.liquid_fraction[y * 40 + x] = 1;
+    uploadTestMaterials(gpu, state);
     gpu.advect(8);
     state = gpu.download();
     for (int y = 0; y < 8; ++y)
     for (int x = 0; x < 40; ++x)
-        require(std::abs(state.water_fraction[y * 40 + x] - (x >= 16 && x < 24 ? 1.0 : 0.0)) < 1e-6,
+        require(std::abs(state.liquid_fraction[y * 40 + x] - (x >= 16 && x < 24 ? 1.0 : 0.0)) < 1e-6,
                 "GPU whole-cell translation blurred a straight interface");
+}
+
+void transportKeepsShallowInterfacesStraight()
+{
+    double largest_error = 0.0;
+    for (bool vertical : {false, true})
+    for (bool reverse_phase : {false, true})
+    for (double slope : {0.0, -0.1, -0.05, 0.05, 0.1})
+    for (double speed : {-1.0, 1.0})
+    {
+        FluidGridGPU grid(96, 96, 1.0);
+        FluidGridGPU::State state;
+        state.liquid_fraction.resize(96 * 96);
+        auto& flow = vertical ? state.v : state.u;
+        flow.assign(96 * 97, float(speed));
+
+        auto exactFraction = [&](double along, double depth)
+        {
+            // Integrate the clipped liquid height across a cell under a known straight line.
+            auto integral = [](double h) { return h <= 0.0 ? 0.0 : h >= 1.0 ? h - 0.5 : 0.5 * h * h; };
+            const double a = depth + 1.0 - (48.25 + slope * (along - 48.0));
+            const double b = a - slope;
+            const double fraction = slope == 0.0 ? std::clamp(a, 0.0, 1.0) : (integral(a) - integral(b)) / slope;
+            return reverse_phase ? 1.0 - fraction : fraction;
+        };
+        for (int y = 0; y < grid.height; ++y)
+        for (int x = 0; x < grid.width; ++x)
+            state.liquid_fraction[y * grid.width + x] = float(vertical ? exactFraction(y, x) : exactFraction(x, y));
+        uploadTestMaterials(grid, state);
+
+        for (int step = 0; step < 20; ++step)
+            grid.advect(0.25);
+        state = grid.download();
+
+        // Inspect the interior, where uniform translation is unaffected by the closed walls.
+        for (int y = 24; y < 72; ++y)
+        for (int x = 24; x < 72; ++x)
+        {
+            const double expected = vertical ? exactFraction(y - 5.0 * speed, x) : exactFraction(x - 5.0 * speed, y);
+            largest_error = std::max(largest_error, std::abs(state.liquid_fraction[y * grid.width + x] - expected));
+        }
+    }
+    std::cout << "GPU shallow-interface fraction error=" << largest_error << '\n';
+    require(largest_error < 1e-5, "GPU uniform transport corrugated a shallow straight interface");
 }
 
 void nonuniformTransportMatchesCPU()
@@ -428,17 +483,18 @@ void nonuniformTransportMatchesCPU()
     for (int y = 0; y <= h; ++y)
     for (int x = 0; x < w; ++x) state.v[y * w + x] = float(stream(x, y) - stream(x + 1, y));
     FluidGrid cpu(w, h, 1);
-    cpu.water_fraction.assign(state.water_fraction.begin(), state.water_fraction.end());
+    cpu.liquid_fraction.assign(state.liquid_fraction.begin(), state.liquid_fraction.end());
     cpu.u.assign(state.u.begin(), state.u.end());
     cpu.v.assign(state.v.begin(), state.v.end());
+    initializeTestMaterials(cpu);
     FluidGridGPU gpu(w, h, 1);
-    gpu.upload(state);
+    uploadTestMaterials(gpu, state);
     cpu.advect(0.1);
     gpu.advect(0.1);
     state = gpu.download();
     double fraction_error = 0, velocity_error = 0;
-    for (size_t i = 0; i < state.water_fraction.size(); ++i)
-        fraction_error = std::max(fraction_error, std::abs(state.water_fraction[i] - cpu.water_fraction[i]));
+    for (size_t i = 0; i < state.liquid_fraction.size(); ++i)
+        fraction_error = std::max(fraction_error, std::abs(state.liquid_fraction[i] - cpu.liquid_fraction[i]));
     for (size_t i = 0; i < state.u.size(); ++i) velocity_error = std::max(velocity_error, std::abs(state.u[i] - cpu.u[i]));
     for (size_t i = 0; i < state.v.size(); ++i) velocity_error = std::max(velocity_error, std::abs(state.v[i] - cpu.v[i]));
     std::cout << "nonuniform transport fraction_error=" << fraction_error << " velocity_error=" << velocity_error << '\n';
@@ -450,16 +506,17 @@ void fullStepsMatchCPU()
     FluidGrid cpu(32, 24, 4);
     FluidGridGPU gpu(32, 24, 4);
     auto state = pool(32, 24);
-    cpu.water_fraction.assign(state.water_fraction.begin(), state.water_fraction.end());
-    gpu.upload(state);
+    cpu.liquid_fraction.assign(state.liquid_fraction.begin(), state.liquid_fraction.end());
+    initializeTestMaterials(cpu);
+    uploadTestMaterials(gpu, state);
     double fraction_error = 0, velocity_error = 0;
     for (int tick = 0; tick < 20; ++tick)
     {
         require(cpu.step(1.0 / 120, 2000, 1e-8).converged, "CPU step reference failed");
         require(gpu.step(1.0 / 120, 2000, 1e-3).converged, "GPU comparison step failed");
         state = gpu.download();
-        for (size_t i = 0; i < state.water_fraction.size(); ++i)
-            fraction_error = std::max(fraction_error, std::abs(state.water_fraction[i] - cpu.water_fraction[i]));
+        for (size_t i = 0; i < state.liquid_fraction.size(); ++i)
+            fraction_error = std::max(fraction_error, std::abs(state.liquid_fraction[i] - cpu.liquid_fraction[i]));
         for (size_t i = 0; i < state.u.size(); ++i) velocity_error = std::max(velocity_error, std::abs(state.u[i] - cpu.u[i]));
         for (size_t i = 0; i < state.v.size(); ++i) velocity_error = std::max(velocity_error, std::abs(state.v[i] - cpu.v[i]));
     }
@@ -473,32 +530,195 @@ void tinyFractionsRemainFinite()
     {
         FluidGridGPU gpu(8, 8, 1);
         FluidGridGPU::State state;
-        state.water_fraction.resize(64);
-        state.water_fraction[3 * 8 + 3] = amount;
-        state.water_fraction[3 * 8 + 4] = amount * 0.5f;
-        state.water_fraction[4 * 8 + 3] = amount * 0.25f;
+        state.liquid_fraction.resize(64);
+        state.liquid_fraction[3 * 8 + 3] = amount;
+        state.liquid_fraction[3 * 8 + 4] = amount * 0.5f;
+        state.liquid_fraction[4 * 8 + 3] = amount * 0.25f;
         state.u.assign(9 * 8, 1);
         state.v.assign(8 * 9, 0.75f);
-        gpu.upload(state);
+        uploadTestMaterials(gpu, state);
         gpu.advect(0.25);
         state = gpu.download();
-        for (const auto* field : { &state.water_fraction, &state.u, &state.v })
-            for (float value : *field) require(std::isfinite(value), "tiny water fractions produced non-finite transport");
+        for (const auto* field : { &state.liquid_fraction, &state.u, &state.v })
+            for (float value : *field) require(std::isfinite(value), "tiny liquid fractions produced non-finite transport");
     }
     // this near-empty remnant reproduced a float 0/0 during the sloshing scene
     FluidGridGPU gpu(8, 8, 4);
     FluidGridGPU::State state;
-    state.water_fraction.resize(64);
-    state.water_fraction[3 * 8 + 3] = 1.654361225e-24f;
-    state.water_fraction[3 * 8 + 4] = 1.051768366e-22f;
-    state.water_fraction[4 * 8 + 3] = 6.335743373e-20f;
+    state.liquid_fraction.resize(64);
+    state.liquid_fraction[3 * 8 + 3] = 1.654361225e-24f;
+    state.liquid_fraction[3 * 8 + 4] = 1.051768366e-22f;
+    state.liquid_fraction[4 * 8 + 3] = 6.335743373e-20f;
     state.u.assign(9 * 8, -28.16068459f);
     state.v.assign(8 * 9, 0.01431973279f);
-    gpu.upload(state);
+    uploadTestMaterials(gpu, state);
     gpu.advect(1.0 / 120);
     state = gpu.download();
-    for (const auto* field : { &state.water_fraction, &state.u, &state.v })
+    for (const auto* field : { &state.liquid_fraction, &state.u, &state.v })
         for (float value : *field) require(std::isfinite(value), "near-empty sloshing cell produced non-finite transport");
+}
+
+// Vary ingredient proportions without adding extra liquid/gas interfaces.
+template<class Grid>
+typename Grid::State componentPool(Grid& grid, int liquid_count, int gas_count, bool varied_density = true)
+{
+    using Scalar = typename Grid::Scalar;
+    const auto water = grid.elements.add({"Water", {0.1f, 0.75f, 0.95f}});
+    const auto red = grid.elements.add({"Red", {0.95f, 0.25f, 0.15f}});
+    const auto air = grid.elements.add({"Air", {0.015f, 0.025f, 0.06f}});
+    const auto cloud = grid.elements.add({"Cloud", {0, 1, 1}});
+    for (int k = 0; k < liquid_count; ++k)
+        grid.liquid_mixture.components.push_back({k % 2 ? red : water, varied_density && k == 1 ? 200.0 : 100.0});
+    for (int k = 0; k < gas_count; ++k)
+        grid.gas_mixture.components.push_back({k == 0 ? air : k == 1 ? cloud : water, varied_density && k > 1 ? 0.2 : 0.1});
+    typename Grid::State state;
+    auto fractions = pool(grid.width, grid.height).liquid_fraction;
+    if (liquid_count == 0) std::fill(fractions.begin(), fractions.end(), 0.0f);
+    if (gas_count == 0) std::fill(fractions.begin(), fractions.end(), 1.0f);
+    state.liquid_fraction.assign(fractions.begin(), fractions.end());
+    const double volume = grid.cell_size * grid.cell_size;
+    auto seed = [&](const auto& mixture, auto& fields, bool liquid)
+    {
+        const size_t count = mixture.components.size();
+        fields.assign(count, std::vector<Scalar>(fractions.size()));
+        for (size_t i = 0; i < fractions.size(); ++i)
+        {
+            std::vector<double> weights(count);
+            double sum = 0;
+            for (size_t k = 0; k < count; ++k)
+            {
+                // Include an identically empty ingredient when the fixture has room.
+                weights[k] = varied_density && count > 2 && k + 1 == count ? 0.0 :
+                    1.0 + 0.8 * std::sin(0.17 * (i % grid.width) + 0.11 * (i / grid.width) + k * 1.7);
+                sum += weights[k];
+            }
+            for (size_t k = 0; k < count; ++k)
+                fields[k][i] = Scalar(mixture.components[k].density * volume *
+                    (liquid ? fractions[i] : 1.0 - fractions[i]) * weights[k] / sum);
+        }
+    };
+    seed(grid.liquid_mixture, state.liquid_mass, true);
+    seed(grid.gas_mixture, state.gas_mass, false);
+    return state;
+}
+
+struct ComponentErrors { double volume = 0, drift = 0, negative = 0; };
+ComponentErrors checkComponents(const FluidGridGPU& grid, const FluidGridGPU::State& state,
+    const FluidGridGPU::State& initial, double volume_tolerance = 5e-6)
+{
+    ComponentErrors error;
+    auto check = [&](const auto& mixture, const auto& fields, const auto& original, bool liquid)
+    {
+        std::vector<double> fractions(state.liquid_fraction.size());
+        for (size_t k = 0; k < fields.size(); ++k)
+        {
+            const double scale = mixture.components[k].density * grid.cell_size * grid.cell_size;
+            const double before = std::accumulate(original[k].begin(), original[k].end(), 0.0);
+            const double after = std::accumulate(fields[k].begin(), fields[k].end(), 0.0);
+            if (before == 0) require(after == 0, "an empty component gained mass");
+            else error.drift = std::max(error.drift, std::abs(after - before) / before);
+            for (size_t i = 0; i < fractions.size(); ++i)
+            {
+                require(std::isfinite(fields[k][i]), "non-finite component mass");
+                const double fraction = fields[k][i] / scale;
+                fractions[i] += fraction;
+                error.negative = std::max(error.negative, -fraction);
+            }
+        }
+        for (size_t i = 0; i < fractions.size(); ++i)
+            error.volume = std::max(error.volume, std::abs(fractions[i] - (liquid ? state.liquid_fraction[i] : 1.0 - state.liquid_fraction[i])));
+    };
+    check(grid.liquid_mixture, state.liquid_mass, initial.liquid_mass, true);
+    check(grid.gas_mixture, state.gas_mass, initial.gas_mass, false);
+    // Check local volume accuracy separately from conservation of each ingredient's total mass.
+    require(error.volume < volume_tolerance && error.drift < 1e-4 && error.negative < 2e-5, "component mass or phase volume invariant failed");
+    return error;
+}
+
+void componentsMatchCPU()
+{
+    for (auto [liquids, gases] : {std::pair{1, 0}, std::pair{0, 1}, std::pair{2, 2}, std::pair{3, 4}, std::pair{9, 9}})
+    {
+        FluidGridGPU gpu(31, 23, 2.5);
+        FluidGrid cpu(31, 23, 2.5);
+        auto initial = componentPool(gpu, liquids, gases);
+        auto reference = componentPool(cpu, liquids, gases);
+        // Start from exactly the same representable masses, so the comparison isolates arithmetic.
+        for (size_t k = 0; k < initial.liquid_mass.size(); ++k)
+            reference.liquid_mass[k].assign(initial.liquid_mass[k].begin(), initial.liquid_mass[k].end());
+        for (size_t k = 0; k < initial.gas_mass.size(); ++k)
+            reference.gas_mass[k].assign(initial.gas_mass[k].begin(), initial.gas_mass[k].end());
+        gpu.upload(initial);
+        cpu.upload(reference);
+        const auto roundtrip = gpu.download();
+        require(roundtrip.liquid_mass == initial.liquid_mass && roundtrip.gas_mass == initial.gas_mass, "packed component upload/download changed mass");
+        double mass_error = 0, velocity_error = 0;
+        for (int tick = 0; tick < 20; ++tick)
+        {
+            require(cpu.step(1.0 / 120, 2000, 1e-8).converged, "CPU component reference failed");
+            require(gpu.step(1.0 / 120, 2000, 1e-3).converged, "GPU component projection failed");
+            const auto state = gpu.download();
+            checkComponents(gpu, state, initial);
+            auto compare = [&](const auto& a, const auto& b, const auto& mixture) {
+                for (size_t k = 0; k < a.size(); ++k)
+                    for (size_t i = 0; i < a[k].size(); ++i)
+                        mass_error = std::max(mass_error, std::abs(a[k][i] - b[k][i]) / (mixture.components[k].density * 6.25));
+            };
+            compare(state.liquid_mass, cpu.liquid_mass, cpu.liquid_mixture);
+            compare(state.gas_mass, cpu.gas_mass, cpu.gas_mixture);
+            for (size_t i = 0; i < state.u.size(); ++i) velocity_error = std::max(velocity_error, std::abs(state.u[i] - cpu.u[i]));
+            for (size_t i = 0; i < state.v.size(); ++i) velocity_error = std::max(velocity_error, std::abs(state.v[i] - cpu.v[i]));
+        }
+        std::cout << "components=" << liquids + gases << " mass_fraction_error=" << mass_error << " velocity_error=" << velocity_error << '\n';
+        require(mass_error < 2e-4 && velocity_error < 0.01, "GPU components differ from CPU reference");
+        fluid::FluidGridDisplay cpu_display, gpu_display;
+        const auto gpu_texture = gpu_display.texture(gpu);
+        const auto cpu_texture = cpu_display.texture(cpu);
+        fluid::gpu_detail::ComputeState guard;
+        GLuint framebuffer;
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        std::vector<float> a(31 * 23 * 4), b(a.size());
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gpu_texture, 0);
+        glReadPixels(0, 0, 31, 23, GL_RGBA, GL_FLOAT, a.data());
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cpu_texture, 0);
+        glReadPixels(0, 0, 31, 23, GL_RGBA, GL_FLOAT, b.data());
+        for (size_t i = 0; i < a.size(); ++i) require(std::abs(a[i] - b[i]) < 5e-4, "GPU catalogue colors differ from CPU");
+        glDeleteFramebuffers(1, &framebuffer);
+        cpu_display.destroy();
+    }
+}
+
+void vanishingSliversCannotExportExcessMass()
+{
+    // This develops tiny liquid remnants that previously produced negative density at tick 120.
+    FluidGridGPU grid(512, 512, 4);
+    const auto initial = componentPool(grid, 2, 2, false);
+    grid.upload(initial);
+    for (int tick = 0; tick < 140; ++tick)
+        require(grid.step(1.0 / 120, 2000, 1e-3).converged, "vanishing donor sliver destabilized component transport");
+    checkComponents(grid, grid.download(), initial);
+}
+
+void componentBenchmark(int steps, int width, int height, int count)
+{
+    FluidGridGPU grid(width, height, 4);
+    grid.upload(componentPool(grid, count / 2, count - count / 2, false));
+    glFinish();
+    const auto started = std::chrono::steady_clock::now();
+    long long iterations = 0;
+    for (int tick = 0; tick < steps; ++tick)
+    {
+        const auto result = grid.step(1.0 / 120, 2000, 1e-3);
+        if (!result.converged)
+            std::cout << "benchmark failure tick=" << tick + 1 << " iterations=" << result.iterations << " divergence=" << result.max_divergence << '\n';
+        require(result.converged, "component benchmark failed to converge");
+        iterations += result.iterations;
+    }
+    glFinish();
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::cout << "component_benchmark grid=" << width << 'x' << height << " components=" << count << " steps=" << steps
+              << " seconds=" << seconds << " fps=" << steps / (6 * seconds) << " mean_iterations=" << double(iterations) / steps << '\n';
 }
 
 void benchmark(int steps)
@@ -521,26 +741,29 @@ void benchmark(int steps)
     for (double tolerance : { 1e-8, 1e-3 })
     {
         FluidGrid cpu(128, 128, 4);
-        cpu.water_fraction.assign(initial.water_fraction.begin(), initial.water_fraction.end());
+        cpu.liquid_fraction.assign(initial.liquid_fraction.begin(), initial.liquid_fraction.end());
+        initializeTestMaterials(cpu);
         time(cpu, "CPU", tolerance);
     }
     FluidGridGPU gpu(128, 128, 4);
-    gpu.upload(initial);
+    uploadTestMaterials(gpu, initial);
     time(gpu, "GPU", 1e-3);
 }
 
-void closedPool(int steps, int size, double tolerance)
+void closedPool(int steps, int size, double tolerance, int count)
 {
     FluidGridGPU grid(size, size, 4);
-    auto state = pool(size, size);
+    auto state = componentPool(grid, count / 2, count - count / 2);
     grid.upload(state);
-    const double initial_volume = std::accumulate(state.water_fraction.begin(), state.water_fraction.end(), 0.0);
+    const auto initial = state;
+    ComponentErrors component_errors;
+    const double initial_volume = std::accumulate(state.liquid_fraction.begin(), state.liquid_fraction.end(), 0.0);
     // use the MAC faces' dual-cell masses for kinetic energy, and the box bottom as zero potential
     auto energy = [&](const FluidGridGPU::State& sample)
     {
         auto density = [&](int x, int y) {
-            double fraction = std::clamp(double(sample.water_fraction[y * size + x]), 0.0, 1.0);
-            return grid.air_density + (grid.water_density - grid.air_density) * fraction;
+            double mass = 0; for (const auto* phase : { &sample.liquid_mass, &sample.gas_mass }) for (const auto& component : *phase) mass += component[y * size + x];
+            return mass / (grid.cell_size * grid.cell_size);
         };
         double total = 0;
         for (int y = 0; y < size; ++y)
@@ -577,16 +800,22 @@ void closedPool(int steps, int size, double tolerance)
         {
             std::cout << "pool failure tick=" << tick << " iterations=" << result.iterations << " divergence=" << result.max_divergence << '\n';
             const auto failed = grid.download();
-            for (const auto& [name, field] : { std::pair{"water", &failed.water_fraction}, std::pair{"u", &failed.u},
+            for (const auto& [name, field] : { std::pair{"liquid", &failed.liquid_fraction}, std::pair{"u", &failed.u},
                                              std::pair{"v", &failed.v}, std::pair{"pressure", &failed.pressure} })
                 for (size_t i = 0; i < field->size(); ++i)
                     if (!std::isfinite((*field)[i])) { std::cout << "first non-finite " << name << " index=" << i << '\n'; break; }
         }
         require(result.converged, "GPU pool projection failed");
         state = grid.download();
-        const double volume = std::accumulate(state.water_fraction.begin(), state.water_fraction.end(), 0.0);
+        // Many CFL splits accumulate float mismatch between mass and independent phase geometry.
+        // Long-run quality budget: 0.2% of one cell, with the same stricter global mass check.
+        const auto errors = checkComponents(grid, state, initial, 2e-3);
+        component_errors.volume = std::max(component_errors.volume, errors.volume);
+        component_errors.drift = std::max(component_errors.drift, errors.drift);
+        component_errors.negative = std::max(component_errors.negative, errors.negative);
+        const double volume = std::accumulate(state.liquid_fraction.begin(), state.liquid_fraction.end(), 0.0);
         largest_drift = std::max(largest_drift, std::abs(volume - initial_volume) / initial_volume);
-        for (float f : state.water_fraction)
+        for (float f : state.liquid_fraction)
         {
             min_fraction = std::min(min_fraction, double(f));
             max_fraction = std::max(max_fraction, double(f));
@@ -600,7 +829,7 @@ void closedPool(int steps, int size, double tolerance)
             require(state.u[y * (size + 1)] == 0 && state.u[y * (size + 1) + size] == 0, "GPU side wall leaked");
         for (int x = 0; x < size; ++x)
             require(state.v[x] == 0 && state.v[size * size + x] == 0, "GPU top or bottom wall leaked");
-        require(largest_drift < 1e-4, "GPU pool lost more than 0.01 percent of its water");
+        require(largest_drift < 1e-4, "GPU pool lost more than 0.01 percent of its liquid");
         const double energy_ratio = energy(state) / initial_energy;
         max_energy_ratio = std::max(max_energy_ratio, energy_ratio);
         require(max_energy_ratio < 1.02, "GPU pool energy grew more than two percent above its initial value");
@@ -610,14 +839,15 @@ void closedPool(int steps, int size, double tolerance)
             for (int y = 0; y < size; ++y)
             for (int x = 0; x < size; ++x)
             {
-                center_x += state.water_fraction[y * size + x] * (x + 0.5) * grid.cell_size;
-                center_y += state.water_fraction[y * size + x] * (y + 0.5) * grid.cell_size;
+                center_x += state.liquid_fraction[y * size + x] * (x + 0.5) * grid.cell_size;
+                center_y += state.liquid_fraction[y * size + x] * (y + 0.5) * grid.cell_size;
             }
             std::cout << "pool tick=" << tick << " time=" << tick / 120.0 << " max_divergence=" << largest_divergence
                       << " fraction=[" << min_fraction << ',' << max_fraction << "] max_relative_drift=" << largest_drift
                       << " max_speed=" << max_speed << " mean_iterations=" << double(iterations) / tick
                       << " centroid=" << center_x / volume << ',' << center_y / volume
                       << " energy_ratio=" << energy_ratio << " max_energy_ratio=" << max_energy_ratio
+                      << " component_volume_error=" << component_errors.volume << " component_drift=" << component_errors.drift << " negative_mass_fraction=" << component_errors.negative
                       << " physics_seconds=" << solve_seconds << " elapsed=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() << '\n';
         }
     }
@@ -631,6 +861,11 @@ int main(int argc, char** argv)
         std::cout << std::unitbuf;
         std::cerr << std::unitbuf;
         Context context;
+        if (argc == 6 && std::string(argv[1]) == "--component-benchmark")
+        {
+            componentBenchmark(std::stoi(argv[2]), std::stoi(argv[3]), std::stoi(argv[4]), std::stoi(argv[5]));
+            return 0;
+        }
         if (argc == 3 && std::string(argv[1]) == "--benchmark-steps")
         {
             benchmark(std::stoi(argv[2]));
@@ -641,7 +876,8 @@ int main(int argc, char** argv)
             const int steps = std::stoi(argv[2]);
             const double tolerance = argc > 3 ? std::stod(argv[3]) : 1e-3;
             const int size = argc > 4 ? std::stoi(argv[4]) : 128;
-            closedPool(steps, size, tolerance);
+            const int count = argc > 5 ? std::stoi(argv[5]) : 2;
+            closedPool(steps, size, tolerance, count);
             require(glGetError() == GL_NO_ERROR, "GL error during GPU pool");
             return 0;
         }
@@ -656,8 +892,11 @@ int main(int argc, char** argv)
         transportMatchesCPU();
         transportPreservesPureMaterial();
         transportKeepsStraightInterfacesSharp();
+        transportKeepsShallowInterfacesStraight();
         nonuniformTransportMatchesCPU();
         fullStepsMatchCPU();
+        componentsMatchCPU();
+        vanishingSliversCannotExportExcessMass();
         zeroTimeAndFailedProjectionAreHandled();
         graphicsStateIsPreserved();
         require(glGetError() == GL_NO_ERROR, "GL error during GPU regressions");

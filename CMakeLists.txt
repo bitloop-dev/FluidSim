@@ -7,12 +7,17 @@ bitloop_enable_languages(LANGUAGES C CXX)
 
 
 set(SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/FluidSim")
+
 file(GLOB_RECURSE SIM_SOURCES CONFIGURE_DEPENDS
     "${SRC_DIR}/*.cpp"
     "${SRC_DIR}/*.h"
     "${SRC_DIR}/*.hpp"
 )
-list(REMOVE_ITEM SIM_SOURCES "${SRC_DIR}/FluidGrid.cpp" "${SRC_DIR}/PressureMultigrid.cpp" "${SRC_DIR}/FluidGridGPU.cpp" "${SRC_DIR}/PressureMultigridGPU.cpp")
+list(REMOVE_ITEM SIM_SOURCES 
+    "${SRC_DIR}/FluidGrid.cpp" 
+    "${SRC_DIR}/PressureMultigrid.cpp"
+    "${SRC_DIR}/FluidGridGPU.cpp"
+    "${SRC_DIR}/PressureMultigridGPU.cpp")
 
 bitloop_new_project(FluidSim ${SIM_SOURCES})
 

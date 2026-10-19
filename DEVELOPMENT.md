@@ -1,6 +1,10 @@
 # FluidSim development guide
 
-Stage 1 geometric material transport and Stage 2 consistent mass/momentum transport are implemented. Water and momentum share transfers through successive X/Y passes. CPU and GPU pressure default to multigrid-preconditioned CG. Optional surface tension remains a later stage. `VISION.md` holds the longer-term ambitions and maths; this file is the short map of the working code and possible next steps.
+Stage 1 geometric material transport and Stage 2 consistent mass/momentum transport are implemented. Liquid geometry, component masses and momentum share transfers through successive X/Y passes. CPU and GPU pressure default to multigrid-preconditioned CG. Optional surface tension remains a later stage. `VISION.md` holds the longer-term ambitions and maths; this file is the short map of the working code and possible next steps.
+
+Both engines use the component system: configure the element catalogue and liquid/gas mixtures, then upload component masses alongside `liquid_fraction`, the total liquid volume fraction. Density, momentum and displayed colours come from those masses. Engine geometry uses liquid/gas terminology; Water, Red, Air and Cloud are scene ingredients. Several miscible ingredients share each phase's geometry; adding an ingredient does not add another interface reconstruction or pressure solve.
+
+The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas ingredient. Air and Cloud share density 0.1; three fixed Perlin scales divide the initial gas volume between them. Noise is evaluated only in `initializePool()`, then ordinary component transport carries the clouds. This visualizes atmospheric flow without adding condensation or evaporation physics.
 
 ## Where things belong
 
@@ -20,17 +24,31 @@ Stage 1 geometric material transport and Stage 2 consistent mass/momentum transp
 
 `FluidSimEngine` is a local CMake library used by both the scene and tests. It depends on Bitloop's vector type and thread pool, but has no Scene, camera, OpenGL or UI code. Another experiment can include `FluidGrid.h` and link that target. Packaging it as a separate repository is a later decision.
 
-A new `FluidGrid(width, height, cell_size)` starts with zero velocity and zero water fraction. The scene creates an initial `State` in `initializePool()` and passes it to `upload()`; that sloped pool is an experiment, not an engine default. Existing CPU public arrays and individual operations remain available for learning. Dimensions and cell size describe a fixed grid; changing them requires constructing another grid.
+A new `FluidGrid(width, height, cell_size)` starts with zero velocity and zero liquid fraction. Configure its mixtures and populate component masses before advancing physics. The scene creates an initial `State` in `initializePool()` and passes it to `upload()`; that sloped pool is an experiment, not an engine default. Existing CPU public arrays and individual operations remain available for learning. Dimensions and cell size describe a fixed grid; changing them requires constructing another grid.
 
 ## Switching CPU and GPU
 
-Change only the member declaration in `FluidSim.h` between `FluidGrid fluid;` and `FluidGridGPU fluid;`, then rebuild. Both headers are included. Grid dimensions belong to the scene; either backend uses the same cell size, initialization, gravity, frame substeps and explicit `1e-3` tolerance. Both engines default to multigrid preconditioning.
+The scene currently uses `FluidGrid fluid;`. Change that one declaration to `FluidGridGPU fluid;` for the GPU version. Both accept the same catalogue, mixture definitions and per-cell component masses, and default to multigrid preconditioning.
+
+Both engines use the same 3x3 mixed Youngs-centered (MYC) normal estimate. The GPU scales the chosen normal before its float geometry calculations; scaling leaves the reconstructed interface unchanged. CPU/GPU transport comparisons pass with their existing precision tolerances.
 
 Both engines provide `Scalar`, `State`, `ProjectionResult`, `upload`, `download`, `step`, `advect`, `applyGravity`, `project`, `maxDivergence`, `uIndex`, `vIndex` and `destroy`. `decltype(fluid)::State` automatically uses double or float fields. Empty uploaded fields mean zero, and upload resets pressure prediction history; it is initialization rather than complete checkpoint restoration. CPU `destroy()` has no device resources to release; its vectors remain owned by its destructor.
 
-`withFluidContext()` uses the engine's `requires_render_thread` constant: CPU initialization/physics run on the simulation worker, while GPU work runs through the render queue. `FluidGridDisplay::texture(fluid)` uploads only the CPU water fractions into a reusable float texture, or returns the GPU engine's fraction texture directly. Drawing and the native-grid capture route use the same adapter. GPU drawing performs no full-grid download.
+`withFluidContext()` uses the engine's `requires_render_thread` constant: CPU initialization/physics run on the simulation worker, while GPU work runs through the render queue. `FluidGridDisplay::texture(fluid)` uploads CPU catalogue colours into a reusable RGBA float texture, or builds them directly from GPU masses. Drawing and the native-grid capture route use the same adapter. GPU stepping and drawing perform no full-grid download; `download()` explicitly reads every state field, including component masses.
 
-The common API supports the current experiment without a base class or virtual dispatch. Direct CPU vectors, `sampleVelocity`, `addVortex` and CPU working-data inspection remain CPU-specific learning tools. Pass an explicit divergence tolerance for comparisons: the engines retain their different precision-appropriate defaults.
+Configure mixture membership/order before `upload()`, and upload again when changing it. State masses are actual mass per cell (unit depth, cell volume = `cell_size * cell_size`) on either backend. An empty mass field initializes to zero; the engine never invents an Air ingredient. The same element can appear in both mixtures with different component densities.
+
+## GPU component execution
+
+- **Storage:** consecutive liquid ingredients followed by gas ingredients occupy lanes of RGBA32F textures, four per group. Each group has current mass, next mass and frozen correction textures: about 12 bytes per cell per ingredient, rounded to groups of four. These buffers stay on-device.
+- **Shared transport:** one geometric liquid-volume flux serves every ingredient. Summed phase masses give the total mass flux for momentum; gas mass is stored separately from liquid mass to avoid subtracting nearly equal numbers at large density contrasts.
+- **Fused updates:** X transport captures the component correction weights for both X/Y passes. When all ingredients fit one group, the same draw also writes the new phase density and liquid fraction. Larger mixtures use one transport draw per group, with density/colour sums processing up to sixteen ingredients per draw.
+- **Reuse:** density remains valid until masses change. Pressure keeps its multigrid solver, device-side reductions and small convergence/CFL readbacks. Private shader programs retain unchanged scalar uniforms between draws.
+- **Float geometry:** face intersections are bounded by the outgoing strip and available donor phase volumes. This prevents a rounded sliver from exporting more mass than exists; component masses are not clipped or renormalized afterwards.
+
+The CPU implementation remains the readable algorithm reference. The GPU executes the same X/Y split transport and pressure model with float arithmetic; long chaotic trajectories need not match pixel-for-pixel.
+
+The shared operations require no base class or virtual dispatch. Direct CPU vectors, `sampleVelocity`, `addVortex` and CPU working-data inspection remain CPU-specific learning tools. Pass an explicit divergence tolerance for comparisons: the engines retain their different precision-appropriate defaults.
 
 Unused dye buffers, `advectDye`, particles and the unused `FluidCell` placeholder have been removed. `sampleVelocity` and `addVortex` remain useful experiment operations.
 
@@ -44,9 +62,9 @@ applyGravity(dt);
 return project(dt, max_iterations, divergence_tolerance);
 ```
 
-1. **Transport material and momentum:** reconstruct interfaces, calculate water/mass transfers and carry both momentum components through X, then Y. After each material pass, recover velocity by dividing momentum by the new face density. Repeat with smaller transport steps when needed to limit outflow.
+1. **Transport material and momentum:** reconstruct interfaces, calculate liquid-volume transfers, transport component masses and carry both momentum components through X, then Y. After each material pass, recover velocity by dividing momentum by the new face density. Repeat with smaller transport steps when needed to limit outflow.
 2. **Apply gravity:** add acceleration to interior vertical faces. Both materials receive the same acceleration; density affects their pressure response.
-3. **Project pressure:** rebuild density coefficients from the current material fractions, close the tank walls, solve for pressure and correct velocity until cell divergence meets the requested tolerance.
+3. **Project pressure:** rebuild density coefficients from the current component masses, close the tank walls, solve for pressure and correct velocity until cell divergence meets the requested tolerance.
 Transport uses the previous substep's projected velocity. The scene starts with zero velocity, which already satisfies incompressibility. An experiment that directly changes velocities must project them before transport. The final projection handles the transported state and gravity, preparing the next substep.
 
 `viewportProcess()` fixes each frame at 0.05 simulated seconds and divides it into six equal steps of 1/120 second. It calls `fluid.step(step, 2000, 1e-3)` for either selected backend. The CPU regression reference retains its double-precision `1e-8` checks; the scene uses the same explicit float-compatible target for comparisons. The engine advances exactly the time passed to it; it does not know about frames or recording.
@@ -57,25 +75,36 @@ On failed final projection, `step()` returns an unconverged result after transpo
 
 | Function | Question it answers |
 | --- | --- |
-| `waterArea` | How much water lies inside this local rectangle, given a dividing line? |
+| `liquidArea` | How much liquid lies inside this local rectangle, given a dividing line? |
 | `interfaceNormal` | Which way does the line face, estimated from neighbouring fractions? |
-| `interfaceOffset` | Where must that line sit to enclose this cell's water fraction? |
+| `interfaceOffset` | Where must that line sit to enclose this cell's liquid fraction? |
 | `rebuildInterfaces` | What are the current normal and offset for each mixed cell? |
-| `waterTransferX/Y` | How much water lies in the outgoing strip beside this face during this substep? Returns a signed amount, already accounting for time |
-| `massTransfer` | How much mass is carried by the water and air portions of a transfer? |
-| `rebuildTransfersX/Y` | Store the water and mass amounts crossing each face for this pass |
-| `rebuildDensity` | What cell density follows from the current fractions? |
+| `liquidTransferX/Y` | How much liquid lies in the outgoing strip beside this face during this substep? Returns a signed fraction of cell volume, already accounting for time |
+| `rebuildTransfersX/Y` | Cache liquid-volume transfers through each face for this pass |
+| `componentMassTransfer` | How much of one ingredient's mass follows its phase's transferred volume? |
+| `rebuildComponentTransfersX/Y` | Cache one ingredient's transfers and accumulate total mass transfers for momentum |
+| `freezeComponentCorrections` | Fix ingredient and momentum split corrections before the X/Y pair |
+| `advectComponents` | Update each ingredient using its transfers and the frozen correction |
+| `rebuildDensity` | What cell density follows from total component mass divided by cell volume? |
 | `rebuildMomentum` | What momentum density belongs to each face velocity? Uses the average density of the two neighbouring cells |
 | `momentumTransfer` | How much momentum crosses a boundary? Mass transfer times donor velocity |
 | `advectMomentumX/Y` | Carry both momentum components in this direction using the cached mass transfers and matching split corrections |
 | `recoverVelocity` | Divide momentum by current face density and write `next_u/next_v` |
 | `advect` | Coordinate material and momentum through successive X/Y passes and CFL substeps |
 
-Local geometry uses a unit square per cell; no local-coordinate fields are stored. `water_fraction` is authoritative material state. Interface arrays are rebuilt working data. `split_weights` are numerical correction flags fixed across both passes, not rounded material fractions. Pure air/water cells bypass interface-area calculations.
+Local geometry uses a unit square per cell; no local-coordinate fields are stored. `liquid_fraction` tracks combined liquid geometry; `liquid_mass` and `gas_mass` track ingredient masses. Their occupied volumes stay consistent through the shared transfers. Interface arrays are rebuilt working data. `split_weights` are numerical correction flags fixed across both passes, not rounded material fractions. Pure gas/liquid cells bypass interface-area calculations. The shared geometric boundary is still needed even though several miscible ingredients can occupy either side.
 
 During the entire `advect(dt)` call, `u/v` remain fixed for material transport and momentum corrections. `next_u/next_v` hold the evolving donor velocities; momentum is updated in place because no loop reads a neighbour's momentum. After each fraction swap, density and working velocity are rebuilt. The velocity buffers swap only after all transport substeps finish. Frozen correction weights are chosen separately for each X/Y pair; their combined contributions vanish for exactly divergence-free transport velocity.
 
-The current method always processes X before Y, estimates normals with four neighbours and uses first-order donor velocities for momentum. It preserves sharper interfaces and couples mass/momentum transport, but numerical damping remains. It does not establish smooth droplets, realistic splashes or complete liquid behaviour.
+The current method always processes X before Y and uses first-order donor velocities for momentum. It preserves sharper interfaces and couples mass/momentum transport, but numerical damping remains. It does not establish smooth droplets, realistic splashes or complete liquid behaviour.
+
+In both engines, `interfaceNormal()` reads the eight surrounding fractions once. Three-cell column/row totals estimate the surface slope; a weighted Youngs gradient provides an alternative near corners and thin features. MYC selects the dominant height direction and compares the two slope estimates. `interfaceOffset()` still positions the chosen line to match the original liquid volume. This changes the reconstructed angle, without filtering fractions or adding a force. The GPU performs this work inside its existing mixed-cell reconstruction pass, with no additional textures or passes. For the underlying method, see [Basilisk's 2D MYC implementation](https://basilisk.fr/src/myc2d.h).
+
+The shallow-line regression checks both coordinate axes, both travel directions, opposite slopes and both phase orientations. Its worst cell-fraction error after translating five cells fell from `0.122386` to `2.18e-11`. At frame 60 of the actual 512x512 CPU scene, the same broad-wave detrending over columns 80–300 measured ripple RMS falling from `0.494` to `0.000837` cells. This is a local surface-quality measurement, not a general claim of exact fluid dynamics.
+
+On the Ryzen 9 9950X3D with eight workers, median startup physics time for 60 output frames (360 steps) changed from 21.64 s to 22.58 s, about 4% slower, with some run-to-run variation. Rebuilding interfaces on the identical saved frame-60 fraction field changed from 261 to 347 microseconds per call. The CPU regression suite passes, including its 20-second pool/component cases; a separate 128x128 run passed 40 simulated seconds with the scene's `1e-3` divergence target. Retained measurements and snapshots: [CPU MYC experiment](.codex/runs/run0023_20261019_022518/validation.json).
+
+The GPU port passes the same forty shallow-line cases with a maximum cell-fraction error of `3.58e-7`, and restores all existing CPU/GPU comparisons without loosening their tolerances. Its native-grid frame-60 capture shows the same smooth surface. On the RX 7700 XT, three 512x512 four-ingredient startup runs measured median physics time changing from 2.534 to 2.547 seconds (about 0.5%, within run-to-run variation). A separate 512x512, cell-size-4 mixed-density pool passed 40 simulated seconds with checks after every step: maximum divergence `0.000999451`, relative ingredient-mass drift `3.20e-7`, and local phase-volume mismatch `0.000660` cells, below the existing `0.002` float budget. These are startup throughput and bounded-duration stability results. Retained evidence: [GPU MYC validation](.codex/runs/run0024_20261019_024053/validation.json).
 
 The Stage 1 check covered 20.05 simulated seconds on the current 128x128 scene at its experimental 100,000:1 density ratio, with every physics substep checked. Relative water-volume drift was below `6e-13`; fraction bounds differed from `[0,1]` by less than `1e-14`; all projections met `1e-8` divergence. At 10 seconds, cells containing 1–99% water fell from 5,065 in the earlier run to 282. This validates this checkpoint, not arbitrary future configurations. Local evidence: [run0011 validation](.codex/runs/run0011_20261016_172158/validation.json).
 
@@ -138,17 +167,36 @@ Read `FluidGridGPU::step()` and then the similarly named `Impl` methods. Each nu
 | Momentum/velocity MRT | Initialize momentum and donor velocity together, saving the initial density rebuild and two recovery draws |
 | Texture-owned framebuffers | Keep a framebuffer attached to each single-output texture across swaps, avoiding repeated attachment changes |
 | Native scalar downloads | Explicit inspections read RED/FLOAT directly; WebGL2 retains the portable RGBA/FLOAT path |
-| Face-wise split cancellation | Evaluate the same material equation with the water flux and split correction paired per face, avoiding accumulated float cancellation in pure water |
+| Face-wise split cancellation | Pair each phase/component flux with its frozen split correction at the same face, reducing float cancellation |
 
 Read `PressureMultigridGPU::cycle()` alongside the CPU version. Both use density-aware series/parallel coarse conductances, bilinear interpolation and its exact transpose for restriction, with mean removal before and after preconditioning. The GPU groups cells until at most 16 remain, rather than the CPU's 64, to keep the fragment-local direct solve small. It uses five fixed pre/post sweeps rather than four; large levels target the upper spectrum of the normalized operator with a fixed polynomial. These are execution/preconditioning choices, not a change to the fine pressure equation or physical model. The maps and buffers persist; coefficients and the coarse factor rebuild once per projection. The GPU result is checked against actual velocity divergence.
 
 CG updates freeze once their residual reaches the internal target, so submitting a predicted batch does not advance the solution past convergence. Only active updates count towards `ProjectionResult::iterations` and the total refinement budget. A negative device-side dot product marks solver breakdown. Each ordinary full step now typically needs about three tiny readbacks; difficult solves and refinements need more. No full-grid readback occurs in normal stepping or drawing.
 
-Construction itself does not allocate GL resources. `upload(State)` allocates and initializes the grid on its owning GL context; empty input arrays mean zero. `download()` explicitly copies fractions, face velocities and pressure back for inspection. It is not part of normal stepping or drawing. Upload initializes pressure history rather than restoring a complete checkpoint. Grid dimensions are fixed after upload.
+Construction itself does not allocate GL resources. `upload(State)` allocates and initializes the grid on its owning GL context; empty input arrays mean zero. `download()` explicitly copies fractions, component masses, face velocities and pressure back for inspection. It is not part of normal stepping or drawing. Upload initializes pressure history rather than restoring a complete checkpoint. Grid dimensions are fixed after upload.
 
-When GPU is selected, the scene calls initialization and physics through `renderThreadQueue().invokeBlocking()` and destroys resources through that queue before scene deletion. The display adapter uses `waterTexture()` to supply the simulation fraction texture directly to the display shader and the existing `scene-0:grid` snapshot route. No full-grid CPU copy/upload occurs each GPU frame. The CPU still controls substeps and PCG batches and reads small reduction results.
+When GPU is selected, the scene calls initialization and physics through `renderThreadQueue().invokeBlocking()` and destroys resources through that queue before scene deletion. The display adapter uses `colorTexture()` for catalogue colours in both the display shader and the existing `scene-0:grid` snapshot route. `liquidFractionTexture()` remains available for inspecting geometry. No full-grid CPU copy/upload occurs each GPU frame. The CPU still controls substeps and PCG batches and reads small reduction results.
 
 Native code targets Bitloop's OpenGL 3.2 context; the shader variant for WebGL2 requires `EXT_color_buffer_float`. Native headless runs must include `--snapshots` to create a graphics context, even when no images are requested. The GPU harness creates its own hidden context. Browser execution has not yet been validated.
+
+The component port passed both regression suites, CPU/GPU comparisons through eighteen ingredients, and 40 simulated seconds of mixed-density pools: four ingredients at 128x128 and 512x512, plus eight at 128x128. The actual 256x256 Water/Red/Air/Cloud scene completed 800 frames with eight native-grid snapshots. Changing only the scene's engine declaration compiled and ran on both backends.
+
+In the 512x512 component run, each ingredient's global mass drift stayed below `1.23e-7` relative, and actual divergence stayed below `0.001`. Float accumulation produced a worst local disagreement between mass-derived phase volume and geometric fraction of `0.001265` of one cell (about 0.13%). This is a measured precision limit, not a loss of 0.13% of the total material. No mass clipping or normalization hides it; arbitrary-duration accuracy is not established.
+
+Current component startup timings on the RX 7700 XT, MSVC Release, are medians of three runs. Each output frame contains six physics steps; setup, rendering and full-state inspections are excluded:
+
+| Grid / startup horizon | Ingredients | Output frames/s |
+| --- | --- | --- |
+| 512x512 / first 3 simulated seconds | 2 | 24.56 |
+| 512x512 / first 3 simulated seconds | 4 | 23.57 |
+| 512x512 / first 3 simulated seconds | 8 | 23.09 |
+| 512x512 / first 3 simulated seconds | 16 | 25.15 |
+| 1920x1080 / first simulated second | 4 | 10.59 |
+| 1920x1080 / first simulated second | 16 | 9.71 |
+
+Small differences at 512x512 should not be read as more ingredients making the solver faster. Pressure work dominates these cases. Developed waves cost more: the instrumented 512x512 four-ingredient run spent 130.32 seconds in physics for 800 output frames (about 6.14 frames/s), with diagnostic downloads between steps. Full-HD developed-wave throughput has not been measured. Retained commands, accuracy results, rejected optimizations and captures: [component-port validation](.codex/runs/run0021_20261019_003948/validation.json).
+
+The following timings and health results are historical two-material baselines, before component masses were added.
 
 The original diagonal GPU port passed a 128x128, 40-second run on the RX 7700 XT at `1e-3`: maximum divergence `0.000993`, relative water-volume drift below `3.27e-5` (0.00327%), finite fields and zero normal wall velocities. Energy peaked about 0.082% above its initial value and ended at 49.65%, close to the CPU reference's 49.91%; individual droplets need not follow identical float/double trajectories. Full-step CPU comparisons and the retained logs are under [run0013](.codex/runs/run0013_20261017_151739/validation.json).
 
@@ -182,9 +230,11 @@ ctest --test-dir <build-directory> -R "^FluidGridTests$" --output-on-failure
 
 On Windows, configure/build from a Visual Studio developer shell. The test executable needs the same vcpkg runtime DLL directory on `PATH` as the application (`<build-directory>/vcpkg_installed/x64-windows/bin`).
 
-With the same test option enabled, build `FluidSimGPUTests` and run both suites with `ctest --test-dir <build-directory> -R "^FluidGrid(GPU)?Tests$" --output-on-failure`. GPU cases cover hydrostatics, odd/thin projection, CPU comparisons, all four diagonal directions, nonuniform momentum transport, tiny interface remnants, sharp slabs, exact pure-material preservation, zero-time/failure handling and graphics-state restoration. GPU multigrid algebra tests cover odd/thin/high-contrast grids through 513x257, including the larger-grid polynomial smoother. Additional cases protect 512x512 default-budget convergence, the one-iteration cap and exact cached-versus-refreshed CFL parity. Common-API tests exercise upload/download, zero/reset behavior and actual display pixels for both types; the CPU suite also checks exact trajectory equivalence between direct array initialization and upload.
+With the same test option enabled, build `FluidSimGPUTests` and run both suites with `ctest --test-dir <build-directory> -R "^FluidGrid(GPU)?Tests$" --output-on-failure`. GPU cases cover hydrostatics, odd/thin projection, CPU comparisons, all four diagonal directions, nonuniform momentum transport, tiny interface remnants, sharp slabs, exact pure-material preservation, zero-time/failure handling and graphics-state restoration. GPU multigrid algebra tests cover odd/thin/high-contrast grids through 513x257, including the larger-grid polynomial smoother. Additional cases protect 512x512 default-budget convergence, the one-iteration cap and exact cached-versus-refreshed CFL parity. Common-API tests exercise upload/download, zero/reset behavior and actual display pixels for both types, including an empty catalogue. Component comparisons cover liquid-only, gas-only, 4, 7 and 18 ingredients, empty fields, differing densities, an element in both phases, and populated ingredients beyond the first sixteen. A 512x512 regression exercises the formerly failing vanishing-sliver case. Both engines' legacy fixtures explicitly populate component masses through `tests/FluidTestSetup.h`.
 
-`FluidSimGPUTests --pool-steps 4800 1e-3` runs the 128x128 scene for 40 simulated seconds, downloading each committed step to check finite fields, fraction bounds, water volume, wall velocities, actual divergence and energy. `--benchmark-steps 360` times the same first three simulated seconds on CPU and GPU without those full-state downloads; initialization, drawing and capture are excluded. It reports the CPU's original `1e-8` target and a matched `1e-3` comparison separately.
+`FluidSimGPUTests --pool-steps 4800 1e-3 512 4` runs a 512x512, four-ingredient mixed-density pool for 40 simulated seconds. It downloads each committed step to check finite fields, fractions, each ingredient's mass, mass-derived phase volumes, closed walls, actual divergence and energy. The last two arguments default to 128 and 2. Short comparisons allow `5e-6` local phase-volume error; long float runs have an explicit quality budget of `0.002` of one cell (0.2%), while global ingredient-mass drift must remain below `1e-4`. This separates accumulated local roundoff from global conservation; it does not normalize masses to hide disagreement.
+
+`--component-benchmark 120 1920 1080 16` times one simulated second with sixteen ingredients sharing the original phase densities. It excludes initialization, rendering and full-state downloads and counts six physics steps per output frame. `--benchmark-steps 360` retains the small CPU/GPU comparison, reporting CPU `1e-8` and matched `1e-3` tolerances separately. Startup timings are not developed-wave performance.
 
 | Implemented case | What it protects |
 | --- | --- |
@@ -192,8 +242,10 @@ With the same test option enabled, build `FluidSimGPUTests` and run both suites 
 | Filled tank under gravity | Hydrostatic pressure balances gravity; walls stay closed |
 | A transported material patch | Conserved volume, expected centroid motion and CFL subcycling |
 | A translated straight material slab | Whole-cell translation preserves its sharp interfaces and expected cell values |
+| A translated shallow straight interface | CPU and GPU MYC preserve analytic cell fractions across X/Y motion, positive/negative slopes and reversed phases, within their precision tolerances |
 | Diagonal motion across a density contrast | Both velocity components remain uniform around a 1000:1 material patch, for all four diagonal directions and multiple transport substeps |
 | Sloshing closed pool for 20 simulated seconds | Repeated convergence, fraction bounds, conserved volume, finite velocities and closed walls at 1000:1 density ratio |
+| Miscible components for 20 simulated seconds | Three populated liquid ingredients, two gas ingredients, differing densities and one element present in both phases; conserved component masses, agreement of mass-derived volumes with phase geometry, and an absent component staying absent |
 | Multigrid algebra and projection agreement | Linear, symmetric, positive, history-independent correction; constant nullspace; odd/thin and parallel grids; agreement with diagonal PCG at `1e-8` |
 | Zero timestep / failed projection | No zero-time advance; failed final projection is reported so the caller can stop |
 

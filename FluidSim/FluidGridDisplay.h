@@ -7,7 +7,7 @@
 namespace fluid
 {
 
-// render-thread adapter: upload CPU fractions, or use the GPU engine's existing texture
+// Render-thread adapter for either engine's volume-weighted catalogue colours.
 class FluidGridDisplay
 {
 public:
@@ -16,7 +16,7 @@ public:
     FluidGridDisplay& operator=(const FluidGridDisplay&) = delete;
 
     std::uint32_t texture(const FluidGrid& grid) const;
-    std::uint32_t texture(const FluidGridGPU& grid) const { return grid.waterTexture(); }
+    std::uint32_t texture(const FluidGridGPU& grid) const { return grid.colorTexture(); }
     void destroy();
 
 private:

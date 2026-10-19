@@ -9,6 +9,7 @@ SIM_BEG;
 
 using namespace bl;
 using fluid::FluidGrid;
+using fluid::ElementId;
 using fluid::FluidGridGPU;
 using fluid::FluidGridDisplay;
 
@@ -18,8 +19,8 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     CameraNavigator  navigator;
 
     /// ─────── Variables ───────
-    int grid_w = 1024;
-    int grid_h = 1024;
+    int grid_w = 512;
+    int grid_h = 512;
 
     double cell_size = 1.0;
 
@@ -30,23 +31,23 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
 
     FluidGridGPU fluid;
 
+    ElementId air_element{};
+    ElementId water_element{};
+    ElementId red_element{};
+    ElementId cloud_element{};
+
     const char* fluid_shader_src = R"(
         #version 300 es
         precision highp float;
 
-        uniform sampler2D u_water;
+        uniform sampler2D u_color;
         
         in vec2 v_uv;
         out vec4 outColor;
 
         void main()
         {
-            float water_fraction = texture(u_water, v_uv).r;
-
-            vec3 air_color = vec3(0.015, 0.025, 0.06);
-            vec3 water_color = vec3(0.1, 0.75, 0.95);
-
-            outColor = vec4(mix(air_color, water_color, water_fraction), 1.0);
+            outColor = texture(u_color, v_uv);
         }
     )";
 
@@ -77,6 +78,32 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     FluidSim_Scene(Config& info [[maybe_unused]])
         : fluid(grid_w, grid_h, cell_size)
     {
+        air_element = fluid.elements.add({
+            "Air", {0.015f, 0.025f, 0.06f}
+        });
+
+        water_element = fluid.elements.add({
+            "Water", {0.1f, 0.35f, 1.0f}
+        });
+
+        red_element = fluid.elements.add({
+            "Red fluid", {0.95f, 0.25f, 0.15f}
+        });
+
+        cloud_element = fluid.elements.add({
+            "Cloud", {0.0f, 1.0f, 1.0f}
+        });
+
+        fluid.liquid_mixture.components = {
+            {water_element, 100.0},
+            {red_element, 100.0}
+        };
+
+        const double atmosphere_density = 0.1;
+        fluid.gas_mixture.components = {
+            {air_element, atmosphere_density},
+            {cloud_element, atmosphere_density}
+        };
     }
 
     struct UI : BufferedInterfaceModel

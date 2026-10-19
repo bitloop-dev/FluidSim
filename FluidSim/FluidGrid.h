@@ -1,6 +1,9 @@
 #pragma once
 #include "FluidGridTypes.h"
 #include "PressureMultigrid.h"
+#include "ElementCatalogue.h"
+#include "FluidMixture.h"
+
 #include <bitloop/core/types.h>
 
 namespace fluid
@@ -11,15 +14,21 @@ struct FluidGrid
     using Scalar = double;
     using State = FluidGridState<Scalar>;
     using ProjectionResult = FluidProjectionResult;
+
     static constexpr bool requires_render_thread = false;
+
+    ElementCatalogue elements;
+    FluidMixture liquid_mixture;
+    FluidMixture gas_mixture;
+
+    std::vector<std::vector<Scalar>> liquid_mass;
+    std::vector<std::vector<Scalar>> gas_mass;
 
     int width = 0;
     int height = 0;
     double cell_size = 1.0;
     bl::DVec2 origin = {};
 
-    double air_density = 0.1;
-    double water_density = 100.0;
     double gravity_y = 100.0;
 
     enum class PressurePreconditioner { Diagonal, Multigrid };
@@ -32,9 +41,11 @@ struct FluidGrid
     std::vector<double> next_v;
     std::vector<double> pressure;
 
-    // cell-centred material state and pressure coefficients
-    std::vector<double> water_fraction;
-    std::vector<double> next_water_fraction;
+    // Geometry of all liquid ingredients combined; gas fills the remaining volume.
+    std::vector<double> liquid_fraction;
+    std::vector<double> next_liquid_fraction;
+
+    // Cached density and pressure coefficients, rebuilt from component masses.
     std::vector<double> density;
     std::vector<double> inv_density_u;
     std::vector<double> inv_density_v;
@@ -69,6 +80,7 @@ struct FluidGrid
 
 private:
     PressureMultigrid pressure_multigrid;
+
     std::vector<double> previous_pressure;
     std::vector<double> pressure_rhs;
     std::vector<double> pressure_residual;
@@ -80,23 +92,47 @@ private:
     std::vector<double>    interface_offsets;
     std::vector<unsigned char> split_weights;
 
-    std::vector<double> water_transfer_u;
-    std::vector<double> water_transfer_v;
+    std::vector<std::vector<Scalar>> liquid_correction_weights;
+    std::vector<std::vector<Scalar>> gas_correction_weights;
+    std::vector<Scalar> mass_correction_weights;
+
+    // Signed liquid volume crossing each face, measured in cell-volume units.
+    std::vector<double> liquid_transfer_u;
+    std::vector<double> liquid_transfer_v;
+
+    // Total transported mass per cell volume, used by momentum.
     std::vector<double> mass_transfer_u;
     std::vector<double> mass_transfer_v;
+
+    // Reused for one ingredient and one direction at a time.
+    std::vector<Scalar> component_transfer;
 
     std::vector<double> momentum_u;
     std::vector<double> momentum_v;
 
     bl::DVec2 interfaceNormal(int x, int y) const;
 
-    double massTransfer(double fluid_transfer, double water_transfer) const;
-    double waterTransferX(int x, int y, double step) const;
-    double waterTransferY(int x, int y, double step) const;
+    static double componentMassTransfer(
+        double volume_transfer,
+        double donor_fraction,
+        double donor_mass);
+
+    double liquidTransferX(int x, int y, double step) const;
+    double liquidTransferY(int x, int y, double step) const;
 
     void rebuildPressureCoefficients();
     void rebuildTransfersX(double step);
     void rebuildTransfersY(double step);
+
+    void rebuildComponentTransfersX(
+        double step, const std::vector<Scalar>& mass, bool is_liquid);
+
+    void rebuildComponentTransfersY(
+        double step, const std::vector<Scalar>& mass, bool is_liquid);
+
+    void freezeComponentCorrections();
+    void advectComponents(double step, bool horizontal);
+
     void rebuildDensity();
     void rebuildMomentum();
 

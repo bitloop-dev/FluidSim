@@ -1,6 +1,8 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cstdint>
 #include <cmath>
 #include <initializer_list>
 #include <stdexcept>
@@ -156,9 +158,10 @@ inline const char* shaderHeader()
 {
 #ifdef __EMSCRIPTEN__
     return "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
-           "#define OUT0 layout(location=0) out\n#define OUT1 layout(location=1) out\n";
+           "#define OUT0 layout(location=0) out\n#define OUT1 layout(location=1) out\n"
+           "#define OUT2 layout(location=2) out\n#define OUT3 layout(location=3) out\n";
 #else
-    return "#version 150\n#define OUT0 out\n#define OUT1 out\n";
+    return "#version 150\n#define OUT0 out\n#define OUT1 out\n#define OUT2 out\n#define OUT3 out\n";
 #endif
 }
 
@@ -185,26 +188,46 @@ inline GLuint compile(GLenum type, const std::string& source, std::string_view n
 struct Program
 {
     GLuint id = 0;
-    std::unordered_map<std::string, GLint> locations;
+    struct Uniform { GLint location = -1; std::uint32_t value = 0; bool initialized = false; };
+    std::unordered_map<std::string, Uniform> uniforms;
     ~Program() { if (id) glDeleteProgram(id); }
     Program() = default;
     Program(const Program&) = delete;
     Program& operator=(const Program&) = delete;
 
-    GLint location(const char* name)
+    Uniform& uniform(const char* name)
     {
-        auto [it, added] = locations.try_emplace(name, -1);
-        if (added) it->second = glGetUniformLocation(id, name);
+        auto [it, added] = uniforms.try_emplace(name);
+        if (added) it->second.location = glGetUniformLocation(id, name);
         return it->second;
     }
-    void scalar(const char* name, float value) { glUniform1f(location(name), value); }
-    void integer(const char* name, int value) { glUniform1i(location(name), value); }
+    GLint location(const char* name) { return uniform(name).location; }
+    // These private programs retain uniforms between draws; most pass parameters stay unchanged.
+    bool changed(Uniform& target, std::uint32_t value)
+    {
+        if (target.location < 0 || (target.initialized && target.value == value)) return false;
+        target.value = value;
+        target.initialized = true;
+        return true;
+    }
+    void scalar(const char* name, float value)
+    {
+        auto& target = uniform(name);
+        if (changed(target, std::bit_cast<std::uint32_t>(value))) glUniform1f(target.location, value);
+    }
+    void integer(const char* name, int value)
+    {
+        auto& target = uniform(name);
+        if (changed(target, std::uint32_t(value))) glUniform1i(target.location, value);
+    }
+    void vector(const char* name, const std::array<float, 4>& value) { glUniform4fv(location(name), 1, value.data()); }
 };
 
 struct PassRunner
 {
     using Input = std::pair<const char*, const Texture*>;
     GLuint framebuffer = 0, vertex_array = 0, vertex_shader = 0;
+    mutable size_t attached_count = 0;
     PassRunner()
     {
         vertex_shader = compile(GL_VERTEX_SHADER, std::string(shaderHeader()) + R"(
@@ -242,12 +265,13 @@ struct PassRunner
             return;
         }
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-        GLenum attachments[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+        GLenum attachments[4] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3 };
         int i = 0;
         for (const Texture* output : outputs)
             glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i++], GL_TEXTURE_2D, output->id, 0);
-        for (; i < 2; ++i)
+        for (; size_t(i) < attached_count; ++i)
             glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i], GL_TEXTURE_2D, 0, 0);
+        attached_count = outputs.size();
         glDrawBuffers(GLsizei(outputs.size()), attachments);
         glViewport(0, 0, first.width, first.height);
     }
@@ -273,6 +297,8 @@ struct PassRunner
 #ifndef __EMSCRIPTEN__
         glBindFragDataLocation(program.id, 0, "output0");
         glBindFragDataLocation(program.id, 1, "output1");
+        glBindFragDataLocation(program.id, 2, "output2");
+        glBindFragDataLocation(program.id, 3, "output3");
 #endif
         glLinkProgram(program.id);
         glDeleteShader(fragment);
@@ -300,16 +326,16 @@ struct PassRunner
 
 inline const std::string common = R"(
     uniform ivec2 grid_size;
-    uniform float cell_size, air_density, water_density, time_step, tolerance;
+    uniform float cell_size, time_step, tolerance;
     uniform int mode;
     OUT0 vec4 output0;
     ivec2 cell() { return ivec2(gl_FragCoord.xy); }
     float at(sampler2D field, ivec2 p) { return texelFetch(field, p, 0).r; }
     bool finite(float x) { return !isnan(x) && !isinf(x); }
-    float densityOf(float fraction)
+    float densityAt(sampler2D field, ivec2 p)
     {
-        fraction = clamp(fraction, 0.0, 1.0);
-        return fraction * water_density + (1.0 - fraction) * air_density;
+        vec2 phases = texelFetch(field, p, 0).rg;
+        return phases.r + phases.g;
     }
 )";
 

@@ -1,5 +1,7 @@
 #pragma once
 #include "FluidGridTypes.h"
+#include "ElementCatalogue.h"
+#include "FluidMixture.h"
 #include <bitloop/core/types.h>
 #include <cstdint>
 #include <memory>
@@ -19,8 +21,9 @@ public:
     int height;
     double cell_size;
     bl::DVec2 origin = {};
-    double air_density = 0.1;
-    double water_density = 100.0;
+    ElementCatalogue elements;
+    FluidMixture liquid_mixture;
+    FluidMixture gas_mixture;
     double gravity_y = 100.0;
 
     enum class PressurePreconditioner { Diagonal, Multigrid };
@@ -31,12 +34,14 @@ public:
     FluidGridGPU(const FluidGridGPU&) = delete;
     FluidGridGPU& operator=(const FluidGridGPU&) = delete;
 
-    // call upload once before stepping; empty fields start at zero
+    // configure the catalogue and mixtures, then upload per-cell masses before stepping
+    // empty fields start at zero; mixture membership/order stays fixed until the next upload
     // GPU operations and destruction require the owning GL context; construction itself needs none
     void upload(const State& state);
     State download() const;
     void destroy();
-    std::uint32_t waterTexture() const;
+    std::uint32_t liquidFractionTexture() const;
+    std::uint32_t colorTexture() const;
 
     ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-3);
     void advect(double dt);
