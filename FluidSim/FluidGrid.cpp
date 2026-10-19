@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 
 namespace fluid
 {
@@ -13,6 +14,41 @@ namespace Thread = bl::Thread;
 
 namespace
 {
+int batchWorkers(int count)
+{
+    if (count < 65536) return 1;
+    return std::min(8, int(Thread::threadCount()));
+}
+
+template<typename Operation>
+void forBatches(int count, Operation&& operation, int work_per_item = 1)
+{
+    const int workers = batchWorkers(count * work_per_item);
+    if (workers > 1)
+        Thread::forEachBatch(count, std::forward<Operation>(operation), workers);
+    else
+        operation(0, count);
+}
+
+template<typename Operation, typename Merge>
+auto reduceBatches(int count, Operation&& operation, Merge&& merge, int work_per_item = 1)
+{
+    const int workers = batchWorkers(count * work_per_item);
+    if (workers == 1) return operation(0, count);
+    const auto partials = Thread::forEachBatch(count, std::forward<Operation>(operation), workers);
+    auto result = partials.front();
+    // Merge in batch order rather than worker completion order.
+    for (size_t i = 1; i < partials.size(); ++i) result = merge(result, partials[i]);
+    return result;
+}
+
+double sumValues(const std::vector<double>& values)
+{
+    return reduceBatches(int(values.size()), [&](int first, int last) {
+        return std::reduce(values.begin() + first, values.begin() + last, 0.0);
+    }, std::plus<double>{});
+}
+
 double sampleScalar(
     const std::vector<double>& data,
     int width,
@@ -204,6 +240,14 @@ void FluidGrid::upload(const State& state)
         gas_mass.size(), std::vector<Scalar>(cell_count, 0.0));
 
     previous_pressure = pressure;
+    invalidateCaches();
+}
+
+void FluidGrid::invalidateCaches()
+{
+    density_valid = false;
+    pressure_coefficients_valid = false;
+    multigrid_valid = false;
 }
 
 FluidGrid::State FluidGrid::download() const
@@ -234,30 +278,29 @@ FluidGrid::ProjectionResult FluidGrid::step(
 void FluidGrid::advect(double dt)
 {
     rebuildMomentum();
-    recoverVelocity();
 
-    double max_outflow = 0.0;
-
-    for (int y = 0; y < height; ++y) 
+    const double max_outflow = reduceBatches(height, [&](int y0, int y1)
     {
-        for (int x = 0; x < width; ++x)
+        double maximum = 0.0;
+        for (int y = y0; y < y1; ++y)
         {
-            const double outflow =
-                std::max( u[uIndex(x + 1, y)], 0.0) +
-                std::max(-u[uIndex(x, y)],     0.0) +
-                std::max( v[vIndex(x, y + 1)], 0.0) +
-                std::max(-v[vIndex(x, y)],     0.0);
-
-            max_outflow = std::max(max_outflow, outflow);
+            const double* horizontal = u.data() + y * (width + 1);
+            const double* vertical = v.data() + y * width;
+            for (int x = 0; x < width; ++x)
+            {
+                const double outflow = std::max(horizontal[x + 1], 0.0) + std::max(-horizontal[x], 0.0) +
+                    std::max(vertical[x + width], 0.0) + std::max(-vertical[x], 0.0);
+                maximum = std::max(maximum, outflow);
+            }
         }
-    }
+        return maximum;
+    }, [](double a, double b) { return std::max(a, b); }, width);
 
     // Limit transport so no cell exports more than half its volume per substep.
     const double max_step =
         max_outflow > 0.0 ? 0.5 * cell_size / max_outflow : dt;
 
     double remaining = dt;
-    int count = width * height;
 
     while (remaining > 0.0)
     {
@@ -265,9 +308,6 @@ void FluidGrid::advect(double dt)
         const double scale = step / cell_size;
 
         // keep the same correction weights throughout both directional passes
-        for (int i = 0; i < count; ++i)
-            split_weights[i] = liquid_fraction[i] > 0.5 ? 1 : 0;
-
         freezeComponentCorrections();
 
         // reconstruct the current interface before horizontal transport
@@ -276,13 +316,11 @@ void FluidGrid::advect(double dt)
         advectComponents(step, true);
         advectMomentumX(step, u);
 
-        Thread::forEachBatch(next_liquid_fraction, [&](int i0, int i1)
+        forBatches(height, [&](int y0, int y1)
         {
-            for (int i = i0; i < i1; ++i)
+            for (int y = y0; y < y1; ++y)
+            for (int x = 0, i = y * width; x < width; ++x, ++i)
             {
-                const int x = i % width;
-                const int y = i / width;
-
                 const int left_face = uIndex(x, y);
 
                 // signed liquid leaving through the right face minus the left face
@@ -300,7 +338,7 @@ void FluidGrid::advect(double dt)
                     liquid_fraction[i] - net_liquid_transfer +
                     split_weights[i] * net_fluid_transfer;
             }
-        });
+        }, width);
 
         liquid_fraction.swap(next_liquid_fraction);
         recoverVelocity();
@@ -311,9 +349,10 @@ void FluidGrid::advect(double dt)
         advectComponents(step, false);
         advectMomentumY(step, v);
 
-        Thread::forEachBatch(next_liquid_fraction, [&](int i0, int i1)
+        forBatches(height, [&](int y0, int y1)
         {
-            for (int i = i0; i < i1; ++i)
+            for (int y = y0; y < y1; ++y)
+            for (int x = 0, i = y * width; x < width; ++x, ++i)
             {
                 // signed liquid leaving through the bottom face minus the top face
                 const double net_liquid_transfer =
@@ -329,7 +368,7 @@ void FluidGrid::advect(double dt)
                     liquid_fraction[i] - net_liquid_transfer +
                     split_weights[i] * net_fluid_transfer;
             }
-        });
+        }, width);
 
         liquid_fraction.swap(next_liquid_fraction);
         recoverVelocity();
@@ -398,24 +437,18 @@ DVec2 FluidGrid::interfaceNormal(int x, int y) const
 
 void FluidGrid::rebuildInterfaces()
 {
-    for (int i = 0; i < width * height; ++i)
+    forBatches(height, [&](int y0, int y1)
     {
-        const double fraction = liquid_fraction[i];
-
-        // entirely gas or entirely liquid needs no internal dividing line
-        if (fraction <= 0.0 || fraction >= 1.0)
-            continue;
-
-        const int x = i % width;
-        const int y = i / width;
-
-        // neighbouring fractions estimate which way the interface faces
-        const DVec2 normal = interfaceNormal(x, y);
-
-        // this cell's fraction determines where the interface sits
-        interface_normals[i] = normal;
-        interface_offsets[i] = interfaceOffset(normal, fraction);
-    }
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, i = y * width; x < width; ++x, ++i)
+        {
+            const double fraction = liquid_fraction[i];
+            if (fraction <= 0.0 || fraction >= 1.0) continue;
+            const DVec2 normal = interfaceNormal(x, y);
+            interface_normals[i] = normal;
+            interface_offsets[i] = interfaceOffset(normal, fraction);
+        }
+    }, width);
 }
 
 double FluidGrid::componentMassTransfer(
@@ -462,19 +495,16 @@ void FluidGrid::advectMomentumX(
     };
 
     // carry horizontal momentum horizontally
-    Thread::forEachBatch(momentum_u, [&](int i0, int i1)
+    forBatches(height, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * (width + 1); x < width + 1; ++x, ++face)
         {
-            const int x = face % (width + 1);
-
             if (x == 0 || x == width)
             {
                 momentum_u[face] = 0.0;
                 continue;
             }
-
-            const int y = face / (width + 1);
 
             // average transfers onto the boundaries between u samples
             const double left_mass = 0.5 * (
@@ -500,12 +530,13 @@ void FluidGrid::advectMomentumX(
                 left_momentum - right_momentum +
                 u[face] * correction;
         }
-    });
+    }, width + 1);
 
     // carry vertical momentum horizontally
-    Thread::forEachBatch(momentum_v, [&](int i0, int i1)
+    forBatches(height + 1, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * width; x < width; ++x, ++face)
         {
             if (face < width || face >= width * height)
             {
@@ -513,8 +544,6 @@ void FluidGrid::advectMomentumX(
                 continue;
             }
 
-            const int x = face % width;
-            const int y = face / width;
             const int above_left = uIndex(x, y - 1);
             const int below_left = uIndex(x, y);
 
@@ -544,7 +573,7 @@ void FluidGrid::advectMomentumX(
                 left_momentum - right_momentum +
                 v[face] * correction;
         }
-    });
+    }, width);
 }
 
 void FluidGrid::advectMomentumY(
@@ -567,19 +596,17 @@ void FluidGrid::advectMomentumY(
     };
 
     // carry horizontal momentum vertically
-    Thread::forEachBatch(momentum_u, [&](int i0, int i1)
+    forBatches(height, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * (width + 1); x < width + 1; ++x, ++face)
         {
-            const int x = face % u_stride;
-
             if (x == 0 || x == width)
             {
                 momentum_u[face] = 0.0;
                 continue;
             }
 
-            const int y = face / u_stride;
             const int left_top = vIndex(x - 1, y);
             const int right_top = vIndex(x, y);
 
@@ -611,21 +638,19 @@ void FluidGrid::advectMomentumY(
                 top_momentum - bottom_momentum +
                 u[face] * correction;
         }
-    });
+    }, width + 1);
 
     // carry vertical momentum vertically
-    Thread::forEachBatch(momentum_v, [&](int i0, int i1)
+    forBatches(height + 1, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * width; x < width; ++x, ++face)
         {
             if (face < width || face >= width * height)
             {
                 momentum_v[face] = 0.0;
                 continue;
             }
-
-            const int x = face % width;
-            const int y = face / width;
 
             // average transfers onto the boundaries between v samples
             const double top_mass = 0.5 * (
@@ -650,26 +675,24 @@ void FluidGrid::advectMomentumY(
                 top_momentum - bottom_momentum +
                 v[face] * correction;
         }
-    });
+    }, width);
 }
 
 void FluidGrid::recoverVelocity()
 {
     rebuildDensity();
 
-    Thread::forEachBatch(next_u, [&](int i0, int i1)
+    forBatches(height, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * (width + 1); x < width + 1; ++x, ++face)
         {
-            const int x = face % (width + 1);
-
             if (x == 0 || x == width)
             {
                 next_u[face] = 0.0;
                 continue;
             }
 
-            const int y = face / (width + 1);
             const int cell = y * width + x;
             const double face_density =
                 0.5 * (density[cell - 1] + density[cell]);
@@ -677,11 +700,12 @@ void FluidGrid::recoverVelocity()
             // recover velocity using the mass now occupying this region
             next_u[face] = momentum_u[face] / face_density;
         }
-    });
+    }, width + 1);
 
-    Thread::forEachBatch(next_v, [&](int i0, int i1)
+    forBatches(height + 1, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * width; x < width; ++x, ++face)
         {
             if (face < width || face >= width * height)
             {
@@ -694,7 +718,7 @@ void FluidGrid::recoverVelocity()
 
             next_v[face] = momentum_v[face] / face_density;
         }
-    });
+    }, width);
 }
 
 double FluidGrid::liquidTransferX(int x, int y, double step) const
@@ -714,11 +738,12 @@ double FluidGrid::liquidTransferX(int x, int y, double step) const
         return 0.0;
 
     // convert distance travelled into a fraction of one cell's width
-    const double strip_width = std::abs(speed) * step / cell_size;
+    const double volume_transfer = speed * (step / cell_size);
+    const double strip_width = std::abs(volume_transfer);
 
     // a full-liquid cell supplies liquid across the entire outgoing strip
     if (fraction >= 1.0)
-        return speed * step / cell_size;
+        return volume_transfer;
 
     // select the strip beside the donor cell's outgoing face
     const DVec2 rect_min{ (speed > 0.0 ? 1.0 - strip_width : 0.0), 0.0 };
@@ -730,8 +755,13 @@ double FluidGrid::liquidTransferX(int x, int y, double step) const
         rect_min,
         rect_max);
 
+    // Bound roundoff in tiny slivers so neither phase exports more than the donor contains.
+    const double bounded_area = std::clamp(area,
+        std::max(0.0, strip_width - (1.0 - fraction)),
+        std::min(strip_width, fraction));
+
     // positive transfer moves liquid right; negative transfer moves it left
-    return speed > 0.0 ? area : -area;
+    return speed > 0.0 ? bounded_area : -bounded_area;
 }
 
 double FluidGrid::liquidTransferY(int x, int y, double step) const
@@ -751,11 +781,12 @@ double FluidGrid::liquidTransferY(int x, int y, double step) const
         return 0.0;
 
     // convert distance travelled into a fraction of one cell's height
-    const double strip_height = std::abs(speed) * step / cell_size;
+    const double volume_transfer = speed * (step / cell_size);
+    const double strip_height = std::abs(volume_transfer);
 
     // a full-liquid cell supplies liquid across the entire outgoing strip
     if (fraction >= 1.0)
-        return speed * step / cell_size;
+        return volume_transfer;
 
     // select the bottom strip for downward motion or the top strip for upward motion
     const DVec2 rect_min{
@@ -773,15 +804,21 @@ double FluidGrid::liquidTransferY(int x, int y, double step) const
         rect_min,
         rect_max);
 
+    // Bound roundoff in tiny slivers so neither phase exports more than the donor contains.
+    const double bounded_area = std::clamp(area,
+        std::max(0.0, strip_height - (1.0 - fraction)),
+        std::min(strip_height, fraction));
+
     // positive transfer moves liquid down; negative transfer moves it up
-    return speed > 0.0 ? area : -area;
+    return speed > 0.0 ? bounded_area : -bounded_area;
 }
 
 void FluidGrid::applyGravity(double dt)
 {
     // Gravity accelerates both materials equally; skip the two outer wall rows.
-    for (int i = width; i < width * height; ++i)
-        v[i] += gravity_y * dt;
+    forBatches(width * (height - 1), [&](int first, int last) {
+        for (int i = first + width; i < last + width; ++i) v[i] += gravity_y * dt;
+    });
 }
 
 void FluidGrid::addVortex(DVec2 center, double radius, double strength)
@@ -837,10 +874,6 @@ FluidGrid::ProjectionResult FluidGrid::project(double dt, int max_iterations, do
 
     const double pressure_scale = cell_size * cell_size / dt;
 
-    auto index = [&](int x, int y) {
-        return y * width + x;
-    };
-
     const size_t count = size_t(width) * height;
     pressure.resize(count);
     previous_pressure.resize(count);
@@ -851,10 +884,6 @@ FluidGrid::ProjectionResult FluidGrid::project(double dt, int max_iterations, do
     pressure_product.resize(count);
 
     rebuildPressureCoefficients();
-
-    // The hierarchy follows the current density field, but stays fixed during this PCG solve.
-    if (pressure_preconditioner == PressurePreconditioner::Multigrid && !pressure_multigrid.rebuild(inv_density_u, inv_density_v))
-        return {};
 
     // prevent flow through the outer boundaries
     for (int y = 0; y < height; ++y) {
@@ -867,52 +896,50 @@ FluidGrid::ProjectionResult FluidGrid::project(double dt, int max_iterations, do
         v[vIndex(x, height)] = 0.0;
     }
 
-    // solve the positive pressure operator against negative, scaled divergence
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            int i = index(x, y);
-
-            double du = u[uIndex(x + 1, y)] - u[uIndex(x, y)];
-            double dv = v[vIndex(x, y + 1)] - v[vIndex(x, y)];
-
-            pressure_rhs[i] = -(du + dv) / cell_size * pressure_scale;
+    // Form the compatible RHS and accumulate its mean in the same traversal.
+    const double rhs_sum = reduceBatches(height, [&](int y0, int y1)
+    {
+        double sum = 0.0;
+        for (int y = y0; y < y1; ++y)
+        {
+            const double* horizontal = u.data() + y * (width + 1);
+            const double* vertical = v.data() + y * width;
+            double* rhs = pressure_rhs.data() + y * width;
+            for (int x = 0; x < width; ++x)
+            {
+                const double du = horizontal[x + 1] - horizontal[x];
+                const double dv = vertical[x + width] - vertical[x];
+                rhs[x] = -(du + dv) / cell_size * pressure_scale;
+                sum += rhs[x];
+            }
         }
-    }
+        return sum;
+    }, std::plus<double>{}, width);
+    const double rhs_mean = rhs_sum / double(count);
+    forBatches(int(count), [&](int first, int last) {
+        for (int i = first; i < last; ++i) pressure_rhs[i] -= rhs_mean;
+    });
 
-    // closed walls require a compatible right-hand side; pressure is defined up to a constant
-    removeMean(pressure_rhs);
     ProjectionResult result;
     result.iterations = solvePressure(max_iterations, divergence_tolerance * pressure_scale);
+    if (result.iterations < 0) return {};
 
-    // correct horizontal velocities
-    for (int y = 0; y < height; ++y) {
-        for (int x = 1; x < width; ++x) {
-            // if the cell on the right has higher pressure than the cell on the left,
-            // increases velocity across that boundary towards the left
-            double gradient = (
-                pressure[index(x, y)] -
-                pressure[index(x - 1, y)]
-            ) / cell_size;
-
-            const int face = uIndex(x, y);
-            u[face] -= gradient * dt * inv_density_u[face];
+    forBatches(height, [&](int y0, int y1)
+    {
+        for (int y = y0; y < y1; ++y)
+        {
+            const double* row = pressure.data() + y * width;
+            double* horizontal = u.data() + y * (width + 1);
+            const double* horizontal_weight = inv_density_u.data() + y * (width + 1);
+            for (int x = 1; x < width; ++x)
+                horizontal[x] -= ((row[x] - row[x - 1]) / cell_size) * dt * horizontal_weight[x];
+            if (y == 0) continue;
+            double* vertical = v.data() + y * width;
+            const double* vertical_weight = inv_density_v.data() + y * width;
+            for (int x = 0; x < width; ++x)
+                vertical[x] -= ((row[x] - row[x - width]) / cell_size) * dt * vertical_weight[x];
         }
-    }
-
-    // correct vertical velocities
-    for (int y = 1; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            // if the cell on the bottom has higher pressure than the cell on the top,
-            // increases velocity across that boundary towards the top
-            double gradient = (
-                pressure[index(x, y)] -
-                pressure[index(x, y - 1)]
-                ) / cell_size;
-
-            const int face = vIndex(x, y);
-            v[face] -= gradient * dt * inv_density_v[face];
-        }
-    }
+    }, width);
 
     result.max_divergence = maxDivergence();
     result.converged = result.max_divergence <= divergence_tolerance;
@@ -921,92 +948,87 @@ FluidGrid::ProjectionResult FluidGrid::project(double dt, int max_iterations, do
 
 double FluidGrid::maxDivergence() const
 {
-    double result = 0.0;
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            double du = u[uIndex(x + 1, y)] - u[uIndex(x, y)];
-            double dv = v[vIndex(x, y + 1)] - v[vIndex(x, y)];
-
-            double divergence = (du + dv) / cell_size;
-
-            if (!std::isfinite(divergence))
-                return std::numeric_limits<double>::infinity();
-
-            result = std::max(result, std::abs(divergence));
+    return reduceBatches(height, [&](int y0, int y1)
+    {
+        double maximum = 0.0;
+        for (int y = y0; y < y1; ++y)
+        {
+            const double* horizontal = u.data() + y * (width + 1);
+            const double* vertical = v.data() + y * width;
+            for (int x = 0; x < width; ++x)
+            {
+                const double divergence = ((horizontal[x + 1] - horizontal[x]) + (vertical[x + width] - vertical[x])) / cell_size;
+                if (!std::isfinite(divergence)) return std::numeric_limits<double>::infinity();
+                maximum = std::max(maximum, std::abs(divergence));
+            }
         }
-    }
-
-    return result;
+        return maximum;
+    }, [](double a, double b) { return std::max(a, b); }, width);
 }
 
 void FluidGrid::rebuildPressureCoefficients()
 {
+    if (pressure_coefficients_valid) return;
     rebuildDensity();
 
-    // Zero wall weights exclude pressure corrections through the tank boundary.
-    std::fill(inv_density_u.begin(), inv_density_u.end(), 0.0);
-    std::fill(inv_density_v.begin(), inv_density_v.end(), 0.0);
+    forBatches(height, [&](int y0, int y1)
+    {
+        for (int y = y0; y < y1; ++y)
+        {
+            const double* row = density.data() + y * width;
+            double* horizontal = inv_density_u.data() + y * (width + 1);
+            double* vertical = inv_density_v.data() + y * width;
+            // Zero only the walls; every interior weight is overwritten below.
+            horizontal[0] = horizontal[width] = 0.0;
+            for (int x = 1; x < width; ++x)
+                horizontal[x] = 2.0 / (row[x - 1] + row[x]);
+            if (y == 0) std::fill_n(vertical, width, 0.0);
+            else for (int x = 0; x < width; ++x)
+                vertical[x] = 2.0 / (row[x - width] + row[x]);
+        }
+    }, width);
+    std::fill_n(inv_density_v.data() + height * width, width, 0.0);
 
-    // Each shared face uses the reciprocal of the neighboring cells' average density.
-    for (int y = 0; y < height; ++y)
+    // The diagonal reads neighbouring rows, after all face weights have been written.
+    forBatches(height, [&](int y0, int y1)
     {
-        for (int x = 1; x < width; ++x)
+        for (int y = y0; y < y1; ++y)
         {
-            const int i = y * width + x;
-            inv_density_u[uIndex(x, y)] = 2.0 / (density[i - 1] + density[i]);
+            const double* horizontal = inv_density_u.data() + y * (width + 1);
+            const double* vertical = inv_density_v.data() + y * width;
+            double* diagonal = inv_pressure_diagonal.data() + y * width;
+            for (int x = 0; x < width; ++x)
+            {
+                const double sum = horizontal[x] + horizontal[x + 1] + vertical[x] + vertical[x + width];
+                diagonal[x] = sum > 0.0 ? 1.0 / sum : 0.0;
+            }
         }
-    }
-    for (int y = 1; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
-            const int i = y * width + x;
-            inv_density_v[vIndex(x, y)] = 2.0 / (density[i - width] + density[i]);
-        }
-    }
-
-    // The matrix diagonal is the sum of the four shared face weights.
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
-            const double diagonal =
-                inv_density_u[uIndex(x, y)] +
-                inv_density_u[uIndex(x + 1, y)] +
-                inv_density_v[vIndex(x, y)] +
-                inv_density_v[vIndex(x, y + 1)];
-            inv_pressure_diagonal[y * width + x] = diagonal > 0.0 ? 1.0 / diagonal : 0.0;
-        }
-    }
+    }, width);
+    pressure_coefficients_valid = true;
 }
 
 void FluidGrid::rebuildTransfersX(double step)
 {
-    Thread::forEachBatch(liquid_transfer_u, [&](int i0, int i1)
+    forBatches(height, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * (width + 1); x < width + 1; ++x, ++face)
         {
-            const int x = face % (width + 1);
-            const int y = face / (width + 1);
-
             liquid_transfer_u[face] = liquidTransferX(x, y, step);
         }
-    });
+    }, width + 1);
 }
 
 void FluidGrid::rebuildTransfersY(double step)
 {
-    Thread::forEachBatch(liquid_transfer_v, [&](int i0, int i1)
+    forBatches(height + 1, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * width; x < width; ++x, ++face)
         {
-            const int x = face % width;
-            const int y = face / width;
-
             liquid_transfer_v[face] = liquidTransferY(x, y, step);
         }
-    });
+    }, width);
 }
 
 void FluidGrid::rebuildComponentTransfersX(
@@ -1016,13 +1038,11 @@ void FluidGrid::rebuildComponentTransfersX(
     const double inverse_cell_volume =
         1.0 / (cell_size * cell_size);
 
-    Thread::forEachBatch(u, [&](int i0, int i1)
+    forBatches(height, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * (width + 1); x < width + 1; ++x, ++face)
         {
-            const int x = face % (width + 1);
-            const int y = face / (width + 1);
-
             // Closed walls cannot transfer any ingredient.
             if (x == 0 || x == width)
             {
@@ -1048,7 +1068,7 @@ void FluidGrid::rebuildComponentTransfersX(
             mass_transfer_u[face] +=
                 component_transfer[face] * inverse_cell_volume;
         }
-    });
+    }, width + 1);
 }
 
 void FluidGrid::rebuildComponentTransfersY(
@@ -1058,12 +1078,11 @@ void FluidGrid::rebuildComponentTransfersY(
     const double inverse_cell_volume =
         1.0 / (cell_size * cell_size);
 
-    Thread::forEachBatch(v, [&](int i0, int i1)
+    forBatches(height + 1, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * width; x < width; ++x, ++face)
         {
-            const int y = face / width;
-
             // Closed walls cannot transfer any ingredient.
             if (y == 0 || y == height)
             {
@@ -1089,56 +1108,48 @@ void FluidGrid::rebuildComponentTransfersY(
             mass_transfer_v[face] +=
                 component_transfer[face] * inverse_cell_volume;
         }
-    });
+    }, width);
 }
 
 void FluidGrid::freezeComponentCorrections()
 {
-    const double inverse_cell_volume =
-        1.0 / (cell_size * cell_size);
-
-    std::fill(
-        mass_correction_weights.begin(),
-        mass_correction_weights.end(),
-        0.0);
-
-    auto freeze = [&]<bool IsLiquid>(const auto& fields, auto& corrections)
+    const double inverse_cell_volume = 1.0 / (cell_size * cell_size);
+    forBatches(width * height, [&](int i0, int i1)
     {
-        for (size_t k = 0; k < fields.size(); ++k)
+        // Small cell blocks keep ingredient traversals contiguous without dispatching each ingredient.
+        constexpr int block_size = 128;
+        double inverse_fractions[block_size];
+        for (int first = i0; first < i1; first += block_size)
         {
-            const auto& mass = fields[k];
-            auto& weights = corrections[k];
-
-            Thread::forEachBatch(weights, [&](int i0, int i1)
+            const int last = std::min(first + block_size, i1);
+            for (int i = first; i < last; ++i)
             {
-                for (int i = i0; i < i1; ++i)
+                const double fraction = liquid_fraction[i];
+                const bool selected = fraction > 0.5;
+                split_weights[i] = selected;
+                // The selected phase fills at least half the cell.
+                inverse_fractions[i - first] = 1.0 / (selected ? fraction : 1.0 - fraction);
+                mass_correction_weights[i] = 0.0;
+            }
+            auto freeze = [&]<bool IsLiquid>(const auto& fields, auto& corrections)
+            {
+                for (size_t k = 0; k < fields.size(); ++k)
                 {
-                    if constexpr (IsLiquid)
+                    const double* mass = fields[k].data();
+                    double* weights = corrections[k].data();
+                    for (int i = first; i < last; ++i)
                     {
-                        const bool selected = split_weights[i];
-                        const double fraction = liquid_fraction[i];
-
-                        // The selected mixture occupies at least half the cell.
-                        weights[i] = selected ? mass[i] / fraction : 0.0;
+                        const bool selected = bool(split_weights[i]) == IsLiquid;
+                        const double weight = selected ? mass[i] * inverse_fractions[i - first] : 0.0;
+                        weights[i] = weight;
+                        mass_correction_weights[i] += weight * inverse_cell_volume;
                     }
-                    else
-                    {
-                        const bool selected = split_weights[i] == 0;
-                        const double fraction = 1.0 - liquid_fraction[i];
-
-                        // The selected mixture occupies at least half the cell.
-                        weights[i] = selected ? mass[i] / fraction : 0.0;
-                    }
-
-                    // Combine ingredient corrections in the momentum solver's units.
-                    mass_correction_weights[i] += weights[i] * inverse_cell_volume;
                 }
-            });
+            };
+            freeze.operator()<true>(liquid_mass, liquid_correction_weights);
+            freeze.operator()<false>(gas_mass, gas_correction_weights);
         }
-    };
-
-    freeze.operator()<true>(liquid_mass, liquid_correction_weights);
-    freeze.operator()<false>(gas_mass, gas_correction_weights);
+    });
 }
 
 void FluidGrid::advectComponents(double step, bool horizontal)
@@ -1169,13 +1180,14 @@ void FluidGrid::advectComponents(double step, bool horizontal)
             else
                 rebuildComponentTransfersY(step, mass, is_liquid);
 
-            Thread::forEachBatch(mass, [&](int i0, int i1)
+            forBatches(height, [&](int y0, int y1)
             {
-                for (int i = i0; i < i1; ++i)
+                for (int y = y0; y < y1; ++y)
+                for (int x = 0, i = y * width; x < width; ++x, ++i)
                 {
                     // Before/after means left/right for X, or top/bottom for Y.
                     const int before = horizontal
-                        ? uIndex(i % width, i / width)
+                        ? uIndex(x, y)
                         : i;
 
                     const int after = before + face_offset;
@@ -1189,20 +1201,22 @@ void FluidGrid::advectComponents(double step, bool horizontal)
                         component_transfer[after] +
                         weights[i] * net_fluid_transfer;
                 }
-            });
+            }, width);
         }
     };
 
     advect_mixture(liquid_mass, liquid_correction_weights, true);
     advect_mixture(gas_mass, gas_correction_weights, false);
+    invalidateCaches();
 }
 
 void FluidGrid::rebuildDensity()
 {
+    if (density_valid) return;
     const double inverse_cell_volume =
         1.0 / (cell_size * cell_size);
 
-    Thread::forEachBatch(density, [&](int i0, int i1)
+    forBatches(int(density.size()), [&](int i0, int i1)
     {
         for (int i = i0; i < i1; ++i)
         {
@@ -1218,26 +1232,26 @@ void FluidGrid::rebuildDensity()
             density[i] = total_mass * inverse_cell_volume;
         }
     });
+    density_valid = true;
 }
 
 void FluidGrid::rebuildMomentum()
 {
     rebuildDensity();
 
-    Thread::forEachBatch(momentum_u, [&](int i0, int i1)
+    forBatches(height, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * (width + 1); x < width + 1; ++x, ++face)
         {
-            const int x = face % (width + 1);
-
             // the left and right walls have zero normal velocity
             if (x == 0 || x == width)
             {
                 momentum_u[face] = 0.0;
+                next_u[face] = 0.0;
                 continue;
             }
 
-            const int y = face / (width + 1);
             const int cell = y * width + x;
 
             // associate this velocity with half of each neighbouring cell
@@ -1245,17 +1259,20 @@ void FluidGrid::rebuildMomentum()
                 0.5 * (density[cell - 1] + density[cell]);
 
             momentum_u[face] = face_density * u[face];
+            next_u[face] = u[face];
         }
-    });
+    }, width + 1);
 
-    Thread::forEachBatch(momentum_v, [&](int i0, int i1)
+    forBatches(height + 1, [&](int y0, int y1)
     {
-        for (int face = i0; face < i1; ++face)
+        for (int y = y0; y < y1; ++y)
+        for (int x = 0, face = y * width; x < width; ++x, ++face)
         {
             // the first and last face rows are the top and bottom walls
             if (face < width || face >= width * height)
             {
                 momentum_v[face] = 0.0;
+                next_v[face] = 0.0;
                 continue;
             }
 
@@ -1264,26 +1281,29 @@ void FluidGrid::rebuildMomentum()
                 0.5 * (density[face - width] + density[face]);
 
             momentum_v[face] = face_density * v[face];
+            next_v[face] = v[face];
         }
-    });
+    }, width);
 }
 
 void FluidGrid::removeMean(std::vector<double>& values)
 {
-    const double mean = std::reduce(values.begin(), values.end(), 0.0) / double(values.size());
-    for (double& value : values)
-        value -= mean;
+    const double mean = sumValues(values) / double(values.size());
+    forBatches(int(values.size()), [&](int first, int last) {
+        for (int i = first; i < last; ++i) values[i] -= mean;
+    });
 }
 
 double FluidGrid::maxAbs(const std::vector<double>& values)
 {
-    // Preserve non-finite failure detection while reducing absolute residuals.
-    return std::transform_reduce(values.begin(), values.end(), 0.0,
-        [](double a, double b) { return std::max(a, b); },
-        [](double value) { return std::isfinite(value) ? std::abs(value) : std::numeric_limits<double>::infinity(); });
+    return reduceBatches(int(values.size()), [&](int first, int last) {
+        return std::transform_reduce(values.begin() + first, values.begin() + last, 0.0,
+            [](double a, double b) { return std::max(a, b); },
+            [](double value) { return std::isfinite(value) ? std::abs(value) : std::numeric_limits<double>::infinity(); });
+    }, [](double a, double b) { return std::max(a, b); });
 }
 
-void FluidGrid::applyPressureOperator(
+double FluidGrid::applyPressureOperator(
     const std::vector<double>& input,
     std::vector<double>& output) const
 {
@@ -1300,21 +1320,23 @@ void FluidGrid::applyPressureOperator(
         if (y + 1 < height) value += inv_density_v[i + width]        * (center - input[i + width]);
 
         output[i] = value;
+        return center * value;
     };
 
     // These grids have no interior.
     if (width < 3 || height < 3)
     {
+        double dot = 0.0;
         for (int y = 0; y < height; ++y)
             for (int x = 0; x < width; ++x)
-                applyCell(x, y);
-
-        return;
+                dot += applyCell(x, y);
+        return dot;
     }
 
     const int stride = width;
     auto applyRows = [&](int first_row, int last_row)
     {
+        double dots[4] = {};
         for (int y = first_row + 1; y < last_row + 1; ++y) {
             const double* row = input.data() + y * stride;
             const double* above = row - stride;
@@ -1323,67 +1345,94 @@ void FluidGrid::applyPressureOperator(
             const double* up = inv_density_v.data() + y * stride;
             const double* down = up + stride;
             double* result = output.data() + y * stride;
-            for (int x = 1; x < stride - 1; ++x) {
+            auto apply = [&](int x) {
                 const double center = row[x];
                 result[x] =
                     (horizontal[x] * (center - row[x - 1]) + horizontal[x + 1] * (center - row[x + 1])) +
                     (up[x] * (center - above[x]) + down[x] * (center - below[x]));
+                return center * result[x];
+            };
+            int x = 1;
+            for (; x + 3 < stride - 1; x += 4)
+            {
+                dots[0] += apply(x); dots[1] += apply(x + 1);
+                dots[2] += apply(x + 2); dots[3] += apply(x + 3);
             }
+            for (; x < stride - 1; ++x) dots[0] += apply(x);
         }
+        return (dots[0] + dots[1]) + (dots[2] + dots[3]);
     };
-    // Large stencils amortize worker dispatch; small grids stay on the calling thread.
-    const int workers = std::min(width * height >= 1048576 ? 8 : 4, int(Thread::threadCount()));
-    if (width * height >= 262144 && workers > 1)
-        Thread::forEachBatch(height - 2, applyRows, workers);
-    else
-        applyRows(0, height - 2);
+    double dot = reduceBatches(height - 2, applyRows, std::plus<double>{}, width);
 
     // Top and bottom, including corners.
     for (int x = 0; x < width; ++x)
     {
-        applyCell(x, 0);
-        applyCell(x, height - 1);
+        dot += applyCell(x, 0);
+        dot += applyCell(x, height - 1);
     }
 
     // Left and right, excluding the already processed corners.
     for (int y = 1; y < height - 1; ++y)
     {
-        applyCell(0, y);
-        applyCell(width - 1, y);
+        dot += applyCell(0, y);
+        dot += applyCell(width - 1, y);
     }
+    return dot;
 }
 
 FluidGrid::ResidualStats FluidGrid::updatePressureAndResidual(double alpha)
 {
-    double* pressure_values = pressure.data();
-    double* residual_values = pressure_residual.data();
-    const double* direction = pressure_direction.data();
-    const double* product = pressure_product.data();
-    const size_t count = pressure.size();
-    double sums[4] = {}, maxima[4] = {};
-
-    // Measure the new residual while updating it, with four independent accumulators.
-    auto update = [&](size_t i) {
-        pressure_values[i] += alpha * direction[i];
-        residual_values[i] -= alpha * product[i];
-        return residual_values[i];
-    };
-    size_t i = 0;
-    for (; i + 3 < count; i += 4) {
-        for (size_t lane = 0; lane < 4; ++lane) {
-            const double value = update(i + lane);
-            sums[lane] += value;
-            maxima[lane] = std::max(maxima[lane], std::abs(value));
+    auto stats = reduceBatches(int(pressure.size()), [&](int first, int last)
+    {
+        double sums[4] = {}, maxima[4] = {};
+        int i = first;
+        for (; i + 3 < last; i += 4)
+            for (int lane = 0; lane < 4; ++lane)
+            {
+                pressure[i + lane] += alpha * pressure_direction[i + lane];
+                const double value = pressure_residual[i + lane] -= alpha * pressure_product[i + lane];
+                sums[lane] += value;
+                maxima[lane] = std::max(maxima[lane], std::abs(value));
+            }
+        ResidualStats part{(sums[0] + sums[1]) + (sums[2] + sums[3]),
+            std::max(std::max(maxima[0], maxima[1]), std::max(maxima[2], maxima[3]))};
+        for (; i < last; ++i)
+        {
+            pressure[i] += alpha * pressure_direction[i];
+            const double value = pressure_residual[i] -= alpha * pressure_product[i];
+            part.sum += value;
+            part.maximum = std::max(part.maximum, std::abs(value));
         }
-    }
-    ResidualStats stats{(sums[0] + sums[1]) + (sums[2] + sums[3]),
-        std::max(std::max(maxima[0], maxima[1]), std::max(maxima[2], maxima[3]))};
-    for (; i < count; ++i) {
-        const double value = update(i);
-        stats.sum += value;
-        stats.maximum = std::max(stats.maximum, std::abs(value));
-    }
-    // Any non-finite residual also makes its sum non-finite.
+        return part;
+    }, [](ResidualStats a, ResidualStats b) { return ResidualStats{a.sum + b.sum, std::max(a.maximum, b.maximum)}; });
+    if (!std::isfinite(stats.sum)) stats.maximum = std::numeric_limits<double>::infinity();
+    return stats;
+}
+
+FluidGrid::ResidualStats FluidGrid::rebuildPressureResidual()
+{
+    applyPressureOperator(pressure, pressure_product);
+    auto stats = reduceBatches(int(pressure.size()), [&](int first, int last)
+    {
+        double sums[4] = {}, maxima[4] = {};
+        int i = first;
+        for (; i + 3 < last; i += 4)
+            for (int lane = 0; lane < 4; ++lane)
+            {
+                const double value = pressure_residual[i + lane] = pressure_rhs[i + lane] - pressure_product[i + lane];
+                sums[lane] += value;
+                maxima[lane] = std::max(maxima[lane], std::abs(value));
+            }
+        ResidualStats part{(sums[0] + sums[1]) + (sums[2] + sums[3]),
+            std::max(std::max(maxima[0], maxima[1]), std::max(maxima[2], maxima[3]))};
+        for (; i < last; ++i)
+        {
+            const double value = pressure_residual[i] = pressure_rhs[i] - pressure_product[i];
+            part.sum += value;
+            part.maximum = std::max(part.maximum, std::abs(value));
+        }
+        return part;
+    }, [](ResidualStats a, ResidualStats b) { return ResidualStats{a.sum + b.sum, std::max(a.maximum, b.maximum)}; });
     if (!std::isfinite(stats.sum)) stats.maximum = std::numeric_limits<double>::infinity();
     return stats;
 }
@@ -1394,60 +1443,75 @@ double FluidGrid::applyPreconditioner(const std::vector<double>& residual, std::
     if (pressure_preconditioner == PressurePreconditioner::Multigrid)
         pressure_multigrid.apply(residual, correction, residual_mean);
     else
-        for (size_t i = 0; i < residual.size(); ++i)
-            correction[i] = (residual[i] - residual_mean) * inv_pressure_diagonal[i];
-    const double mean = std::reduce(correction.begin(), correction.end(), 0.0) / double(correction.size());
+        forBatches(int(residual.size()), [&](int first, int last) {
+            for (int i = first; i < last; ++i)
+                correction[i] = (residual[i] - residual_mean) * inv_pressure_diagonal[i];
+        });
+    const double mean = sumValues(correction) / double(correction.size());
 
     // Accumulate residual dot correction while removing the correction's mean.
-    double dots[4] = {};
-    size_t i = 0;
-    for (; i + 3 < residual.size(); i += 4) {
-        for (size_t lane = 0; lane < 4; ++lane) {
-            correction[i + lane] -= mean;
-            dots[lane] += residual[i + lane] * correction[i + lane];
+    return reduceBatches(int(residual.size()), [&](int first, int last)
+    {
+        double dots[4] = {};
+        int i = first;
+        for (; i + 3 < last; i += 4)
+            for (int lane = 0; lane < 4; ++lane)
+            {
+                correction[i + lane] -= mean;
+                dots[lane] += residual[i + lane] * correction[i + lane];
+            }
+        double dot = (dots[0] + dots[1]) + (dots[2] + dots[3]);
+        for (; i < last; ++i)
+        {
+            correction[i] -= mean;
+            dot += residual[i] * correction[i];
         }
-    }
-    double dot = (dots[0] + dots[1]) + (dots[2] + dots[3]);
-    for (; i < residual.size(); ++i) {
-        correction[i] -= mean;
-        dot += residual[i] * correction[i];
-    }
-    return dot;
+        return dot;
+    }, std::plus<double>{});
 }
 
 int FluidGrid::solvePressure(int max_iterations, double residual_tolerance)
 {
     // A divergence-free field needs no correction, regardless of the previous pressure.
     if (maxAbs(pressure_rhs) <= residual_tolerance) {
-        std::fill(pressure.begin(), pressure.end(), 0.0);
-        std::fill(previous_pressure.begin(), previous_pressure.end(), 0.0);
+        forBatches(int(pressure.size()), [&](int first, int last) {
+            std::fill(pressure.begin() + first, pressure.begin() + last, 0.0);
+            std::fill(previous_pressure.begin() + first, previous_pressure.begin() + last, 0.0);
+        });
         return 0;
     }
 
     // Predict pressure from the last two solves, then rebuild its residual for the current system.
-    for (size_t i = 0; i < pressure.size(); ++i) {
-        const double latest = pressure[i];
-        pressure[i] = 2.0 * latest - previous_pressure[i];
-        previous_pressure[i] = latest;
-    }
+    forBatches(int(pressure.size()), [&](int first, int last) {
+        for (int i = first; i < last; ++i) {
+            const double latest = pressure[i];
+            pressure[i] = 2.0 * latest - previous_pressure[i];
+            previous_pressure[i] = latest;
+        }
+    });
     removeMean(pressure);
-    applyPressureOperator(pressure, pressure_product);
-    for (size_t i = 0; i < pressure.size(); ++i)
-        pressure_residual[i] = pressure_rhs[i] - pressure_product[i];
-
-    if (maxAbs(pressure_residual) <= residual_tolerance || max_iterations == 0)
+    const auto initial = rebuildPressureResidual();
+    if (initial.maximum <= residual_tolerance || max_iterations == 0)
         return 0;
 
-    double residual_mean = std::reduce(pressure_residual.begin(), pressure_residual.end(), 0.0) / double(pressure_residual.size());
+    // Only build the preconditioner if prediction leaves an error that needs solving.
+    // Density changes invalidate it; it stays fixed throughout each PCG solve.
+    if (pressure_preconditioner == PressurePreconditioner::Multigrid && !multigrid_valid)
+    {
+        multigrid_valid = pressure_multigrid.rebuild(inv_density_u, inv_density_v);
+        if (!multigrid_valid) return -1;
+    }
+
+    double residual_mean = initial.sum / double(pressure_residual.size());
     double residual_dot_correction = applyPreconditioner(pressure_residual, pressure_correction, residual_mean);
-    pressure_direction = pressure_correction;
+    forBatches(int(pressure.size()), [&](int first, int last) {
+        std::copy(pressure_correction.begin() + first, pressure_correction.begin() + last, pressure_direction.begin() + first);
+    });
     int iterations = 0;
 
     while (iterations < max_iterations && residual_dot_correction > 0.0 && std::isfinite(residual_dot_correction))
     {
-        applyPressureOperator(pressure_direction, pressure_product);
-
-        const double denominator = std::transform_reduce(pressure_direction.begin(), pressure_direction.end(), pressure_product.begin(), 0.0);
+        const double denominator = applyPressureOperator(pressure_direction, pressure_product);
         if (denominator <= 0.0 || !std::isfinite(denominator))
             break;
 
@@ -1464,14 +1528,11 @@ int FluidGrid::solvePressure(int max_iterations, double residual_tolerance)
         if (stats.maximum <= residual_tolerance)
         {
             // verify the true residual before accepting convergence; restart if recurrence drifted
-            applyPressureOperator(pressure, pressure_product);
-
-            for (size_t i = 0; i < pressure.size(); ++i)
-                pressure_residual[i] = pressure_rhs[i] - pressure_product[i];
-            if (maxAbs(pressure_residual) <= residual_tolerance)
+            const auto actual = rebuildPressureResidual();
+            if (actual.maximum <= residual_tolerance)
                 break;
 
-            residual_mean = std::reduce(pressure_residual.begin(), pressure_residual.end(), 0.0) / double(pressure_residual.size());
+            residual_mean = actual.sum / double(pressure_residual.size());
             restart = true;
         }
 
@@ -1481,8 +1542,10 @@ int FluidGrid::solvePressure(int max_iterations, double residual_tolerance)
         if (!std::isfinite(beta))
             break;
 
-        for (size_t i = 0; i < pressure.size(); ++i)
-            pressure_direction[i] = pressure_correction[i] + beta * pressure_direction[i];
+        forBatches(int(pressure.size()), [&](int first, int last) {
+            for (int i = first; i < last; ++i)
+                pressure_direction[i] = pressure_correction[i] + beta * pressure_direction[i];
+        });
 
         residual_dot_correction = next_dot;
     }

@@ -19,12 +19,14 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     CameraNavigator  navigator;
 
     /// ─────── Variables ───────
-    int grid_w = 512;
-    int grid_h = 512;
+    int grid_w = 1024;
+    int grid_h = 1024;
 
     double cell_size = 1.0;
 
     bool simulation_failed = false;
+
+    double simulation_time = 0.0;
 
     double world_w = double(grid_w) * cell_size;
     double world_h = double(grid_h) * cell_size;
@@ -96,7 +98,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
 
         fluid.liquid_mixture.components = {
             {water_element, 100.0},
-            {red_element, 100.0}
+            {red_element, 300.0}
         };
 
         const double atmosphere_density = 0.1;

@@ -56,6 +56,10 @@ struct FluidGrid
     void upload(const State& state);
     State download() const;
 
+    // Call after editing component masses or derived density/pressure coefficients directly.
+    // upload() and engine transport invalidate these caches automatically; velocities are not cached.
+    void invalidateCaches();
+
     // CPU storage is released by the destructor; there are no device resources to destroy
     void destroy() {}
 
@@ -80,6 +84,9 @@ struct FluidGrid
 
 private:
     PressureMultigrid pressure_multigrid;
+    bool density_valid = false;
+    bool pressure_coefficients_valid = false;
+    bool multigrid_valid = false;
 
     std::vector<double> previous_pressure;
     std::vector<double> pressure_rhs;
@@ -147,7 +154,8 @@ private:
 
     static void removeMean(std::vector<double>& values);
     static double maxAbs(const std::vector<double>& values);
-    void applyPressureOperator(const std::vector<double>& input, std::vector<double>& output) const;
+    // Also returns input dot output, used as the CG denominator.
+    double applyPressureOperator(const std::vector<double>& input, std::vector<double>& output) const;
 
     struct ResidualStats
     {
@@ -156,6 +164,7 @@ private:
     };
 
     ResidualStats updatePressureAndResidual(double alpha);
+    ResidualStats rebuildPressureResidual();
     double applyPreconditioner(const std::vector<double>& residual, std::vector<double>& correction, double residual_mean);
     int solvePressure(int max_iterations, double residual_tolerance);
 };

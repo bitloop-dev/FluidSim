@@ -206,12 +206,14 @@ void FluidSim_Scene::viewportProcess(
 
     // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
     const double frame_time = 0.02;// std::min(dt, 0.05);
-    const int steps_per_frame = 240;
+    const int steps_per_frame = 60;
     //const double play_speed = 0.8;
 
     //const int step_count = int(play_speed / frame_time);
     const int step_count = int(std::ceil(frame_time * double(steps_per_frame)));
     const double step = frame_time / step_count;
+
+    simulation_time += frame_time;
 
     withFluidContext([&]()
     {
@@ -255,7 +257,10 @@ void FluidSim_Scene::viewportDraw(Viewport* ctx) const
 
     ctx->worldMode();
     ctx->drawShaderSurface(surface, bounds);
-    ctx->drawWorldAxis();
+    ctx->drawWorldAxis(0.3, 0.0);
+
+    ctx->setFontSize(10.0);
+    ctx->fillText<double>("Time: " + std::to_string(simulation_time), {10.0, 10.0});
 }
 
 void FluidSim_Scene::onEvent(Event e)

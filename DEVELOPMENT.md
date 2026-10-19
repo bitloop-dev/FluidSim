@@ -26,9 +26,11 @@ The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas i
 
 A new `FluidGrid(width, height, cell_size)` starts with zero velocity and zero liquid fraction. Configure its mixtures and populate component masses before advancing physics. The scene creates an initial `State` in `initializePool()` and passes it to `upload()`; that sloped pool is an experiment, not an engine default. Existing CPU public arrays and individual operations remain available for learning. Dimensions and cell size describe a fixed grid; changing them requires constructing another grid.
 
+CPU density, pressure coefficients and the multigrid hierarchy are now cached. After directly editing `liquid_mass`, `gas_mass` or derived density/pressure-coefficient arrays, call `fluid.invalidateCaches()` before the next physics operation. It marks derived data stale; rebuilding happens when needed. `upload()` and engine material transport do this automatically. Direct velocity edits need no cache notification because CPU velocity statistics are recomputed, but transport still requires projected velocity. Mixture membership changes continue to require `upload()`. GPU mass/velocity textures are private and its `upload()` already invalidates its caches; direct CPU-array access is not part of the shared interface.
+
 ## Switching CPU and GPU
 
-The scene currently uses `FluidGrid fluid;`. Change that one declaration to `FluidGridGPU fluid;` for the GPU version. Both accept the same catalogue, mixture definitions and per-cell component masses, and default to multigrid preconditioning.
+Select the scene backend with `FluidGrid fluid;` or `FluidGridGPU fluid;`. Both accept the same catalogue, mixture definitions and per-cell component masses, and default to multigrid preconditioning.
 
 Both engines use the same 3x3 mixed Youngs-centered (MYC) normal estimate. The GPU scales the chosen normal before its float geometry calculations; scaling leaves the reconstructed interface unchanged. CPU/GPU transport comparisons pass with their existing precision tolerances.
 
@@ -67,7 +69,7 @@ return project(dt, max_iterations, divergence_tolerance);
 3. **Project pressure:** rebuild density coefficients from the current component masses, close the tank walls, solve for pressure and correct velocity until cell divergence meets the requested tolerance.
 Transport uses the previous substep's projected velocity. The scene starts with zero velocity, which already satisfies incompressibility. An experiment that directly changes velocities must project them before transport. The final projection handles the transported state and gravity, preparing the next substep.
 
-`viewportProcess()` fixes each frame at 0.05 simulated seconds and divides it into six equal steps of 1/120 second. It calls `fluid.step(step, 2000, 1e-3)` for either selected backend. The CPU regression reference retains its double-precision `1e-8` checks; the scene uses the same explicit float-compatible target for comparisons. The engine advances exactly the time passed to it; it does not know about frames or recording.
+`viewportProcess()` currently fixes each frame at 0.02 simulated seconds and divides it into five equal steps of 0.004 second. It calls `fluid.step(step, 2000, 1e-3)` for either selected backend. The CPU regression reference retains its double-precision `1e-8` checks; the scene uses the same explicit float-compatible target for comparisons. The engine advances exactly the time passed to it; it does not know about frames or recording. Older measurements below used six 1/120-second steps per frame; compare timing only with matched timestep and simulated duration.
 
 On failed final projection, `step()` returns an unconverged result after transport and gravity have already run. It does **not** roll back material, velocity or pressure. The scene pauses and reports the failure rather than continuing with that state. A zero timestep leaves state unchanged.
 
@@ -83,7 +85,7 @@ On failed final projection, `step()` returns an unconverged result after transpo
 | `rebuildTransfersX/Y` | Cache liquid-volume transfers through each face for this pass |
 | `componentMassTransfer` | How much of one ingredient's mass follows its phase's transferred volume? |
 | `rebuildComponentTransfersX/Y` | Cache one ingredient's transfers and accumulate total mass transfers for momentum |
-| `freezeComponentCorrections` | Fix ingredient and momentum split corrections before the X/Y pair |
+| `freezeComponentCorrections` | Select the phase and fix ingredient/momentum split corrections in small contiguous blocks before the X/Y pair |
 | `advectComponents` | Update each ingredient using its transfers and the frozen correction |
 | `rebuildDensity` | What cell density follows from total component mass divided by cell volume? |
 | `rebuildMomentum` | What momentum density belongs to each face velocity? Uses the average density of the two neighbouring cells |
@@ -117,28 +119,49 @@ These preserve the current pressure equation and the outer PCG algorithm. Multig
 | Optimisation | Plain meaning | Where to look |
 | --- | --- | --- |
 | Reused vectors | Keep allocated working memory between solves | `project` and private buffers |
+| Explicit cache invalidation | Reuse density and pressure coefficients until component masses change; direct CPU edits call `invalidateCaches()` | `upload`, `advectComponents`, `rebuildDensity` |
+| Momentum/donor initialization | Copy initial donor velocity while building momentum, avoiding a density rebuild and multiply/divide round trip | `rebuildMomentum` |
 | Pressure prediction | Use the last two pressures to guess the next one; rebuild the residual against the current system | Start of `solvePressure` |
-| Cached inverse diagonal | Compute each cell's diagonal reciprocal once per projection rather than divide every CG iteration | `rebuildPressureCoefficients` |
+| Lazy multigrid setup | Rebuild a stale hierarchy only after prediction leaves a residual that needs solving | `solvePressure` |
+| Cached inverse diagonal | Compute each cell's diagonal reciprocal when density changes rather than divide every CG iteration | `rebuildPressureCoefficients` |
 | Multigrid V-cycle | Smooth local errors, solve broad errors on smaller grids, interpolate corrections back and smooth again | `PressureMultigrid::cycle` |
 | Density-aware coarse weights | Combine pressure conductances in series and parallel instead of averaging away density barriers | `PressureMultigrid::coarsen` |
-| Reused coarse factorization | Factor the smallest system once per projection; reuse it in every V-cycle | `factorCoarsest`, `solveCoarsest` |
+| Reused coarse factorization | Factor the smallest system when rebuilding a stale hierarchy; reuse it in every V-cycle | `factorCoarsest`, `solveCoarsest` |
 | Zero halo | Zero wall weights and a padded border remove boundary branches from multigrid stencils | `PressureMultigrid::Level` |
 | Interior/boundary split | Interior cells always have four neighbours; process them without boundary checks, then handle walls separately | `applyPressureOperator` |
 | Row pointers | Locate each row once, then walk along it instead of reconstructing flattened indices | Interior operator loop |
 | Fused updates and statistics | Update pressure/residual and measure the residual in the same pass | `updatePressureAndResidual` |
+| Fused stencil/dot product | Accumulate CG's denominator while applying the pressure operator | `applyPressureOperator` |
+| Fused RHS/true-residual statistics | Accumulate compatibility or convergence statistics while forming those fields | `project`, `rebuildPressureResidual` |
 | Fused preconditioner reduction | Remove the correction's mean while accumulating the dot product CG needs | `applyPreconditioner` |
 | Four accumulators | Let the CPU work on several independent sums instead of waiting on one running sum | Residual/preconditioner loops |
-| Size-aware pressure parallelism | Keep small/coarse grids serial; batch independent rows on large grids, with a barrier between red/black colours | `applyPressureOperator`, multigrid `forRows` and `smooth` |
-| Parallel advection/transport | Workers read fixed input arrays and write disjoint entries; in-place momentum updates read only their own old momentum | `Thread::forEachBatch` calls |
+| Size-aware pressure parallelism | Keep small/coarse grids serial; batch pressure updates, reductions, setup and copies as well as stencils; merge reductions in batch order | `forBatches`, `reduceBatches`, multigrid `forRows` |
+| Row-based transport | Traverse complete rows to avoid per-face coordinate division; workers read fixed inputs and write disjoint entries | Transport and interface loops |
+| Batched component corrections | Choose phase and its reciprocal once per cell; traverse ingredient arrays in small blocks within one worker dispatch | `freezeComponentCorrections` |
 | Equal frame substeps | Avoid tiny remainder timesteps that make pressure prediction less useful | `viewportProcess` |
 
 `applyPressureOperator` defines the equation; `applyPreconditioner` helps CG solve it faster. Mean removal before and after preconditioning preserves symmetry on mean-zero pressures. Both engines expose `PressurePreconditioner::{Multigrid, Diagonal}` and a `pressure_preconditioner` member. Set `grid.pressure_preconditioner = decltype(grid)::PressurePreconditioner::Diagonal` to compare with the original method without changing the scene's backend declaration.
 
 Read `PressureMultigrid::cycle()` for the sequence. Each level groups roughly 2x2 cells until at most 64 remain. Four red/black Gauss-Seidel sweeps reduce local error; `restrictResidual` passes the remaining error down. The smallest system fixes one pressure, solves by Cholesky and removes the arbitrary constant. `prolongCorrection` interpolates the correction back, followed by four sweeps in the reverse colour order. Restriction is exactly the transpose of prolongation. These choices make each application a fixed linear symmetric positive preconditioner, as ordinary PCG requires. Coarse conductances approximate the fine system; the fine-grid equation and its final convergence checks remain authoritative.
 
-The hierarchy's dimensions, interpolation maps and buffers are reused. Density-dependent conductances and the small factorization rebuild once per projection. Large levels use four workers, rising to eight from one million cells, bounded by the shared pool's configured worker count. Smoothing and transfer passes dispatch from 65,536 cells; the fine PCG stencil dispatches from 262,144. These thresholds and four smoothing sweeps were selected by measurement rather than a change to the physical model.
+The hierarchy's dimensions, interpolation maps and buffers are reused. Density-dependent conductances and the small factorization rebuild when masses have changed and a solve actually needs the preconditioner. Engine batches below 65,536 entries stay serial; larger transport and pressure-vector loops use up to eight workers, bounded by the shared pool's configured worker count. Multigrid retains four workers on medium levels and eight above about one million cells, with small/coarse levels serial. Red/black smoothing retains a barrier between colours and four symmetric pre/post sweeps. The fine pressure equation, true-residual verification and final divergence checks are unchanged; reduction grouping can change floating-point rounding and stopping iterations.
 
 True-residual verification and the final divergence check are correctness checks, not optional performance overhead. A small internal CG residual alone does not prove that the final velocity meets the requested divergence tolerance.
+
+The CPU execution pass was measured on the Ryzen 9 9950X3D, MSVC Release, with a fixed eight-worker pool. Three sequential, alternating before/after runs used identical sloped pools, `dt=0.004`, density ratio 1000:1 and divergence tolerance `1e-3`. Times include the complete physics step and exclude initialization, rendering and state inspection. The 128/256/512 grids cover the first simulated second (250 steps); full HD covers 0.2 second (50 steps).
+
+| Grid | Ingredients | Before median | After median | Less CPU time |
+| --- | --- | --- | --- | --- |
+| 128x128 | 4 | 0.666 s | 0.598 s | 10.2% |
+| 256x256 | 4 | 1.865 s | 1.627 s | 12.8% |
+| 512x512 | 4 | 5.788 s | 4.607 s | 20.4% |
+| 512x512 | 18 | 9.640 s | 7.392 s | 23.3% |
+| 1920x1080 | 4 | 10.553 s | 8.574 s | 18.8% |
+
+Pressure iteration totals matched before and after in every case. These are startup measurements, not developed-wave or rendered frame rates. The correction weights use small contiguous ingredient blocks; medium transport batches retain eight workers because reducing them to four regressed the eighteen-ingredient case. No component limit, phase model, interface algorithm or accuracy target changed. Retained measurements: [CPU execution validation](.codex/runs/run0025_20261019_131749/validation.json).
+
+**Current CPU stability limitation:** the additional 512x512, cell-size-1 run did not pass its planned 40-second validation. Both the original and optimized engines develop component masses inconsistent with phase geometry at the 12.82-second inspection. The original then fails projection at 12.972 seconds; the optimized run still meets divergence through 20 seconds, but its worst local phase-volume disagreement reaches 1.27 cell volumes, so that state is not physically valid. The run was stopped. Small-grid 20-second regressions still pass at their existing tighter tolerance. The subsequent diagnosis traced this pre-optimization defect to roundoff allowing a nearly full liquid cell to export more gas than it contains. CPU X/Y liquid intersections now use the GPU's donor-phase and outgoing-strip volume bounds; the total volume uses the same arithmetic as component transport. Component masses and pressure tolerances are unchanged. Tests and the long-run replay were not rerun for this correction at the user's request, so sustained stability remains unverified. Diagnosis: [CPU transfer failure](.codex/runs/run0026_20261019_144524/validation.json).
+
 
 On the Ryzen 9 9950X3D, matched-input sloped pressure benchmarks at `1e-3`, including coefficient/hierarchy rebuild, fell from 683 ms to 36 ms at 512x512 and from 28.68 s to 0.524 s at 1920x1080. These compare the original serial diagonal solver with the tuned multigrid solver; they are projection timings, not complete frames. At the previous wave-stopping time (14.77 s), copies of the same preprojection state required 2,062 diagonal iterations versus 22 multigrid iterations, taking 1.12 s versus 70 ms. The comparison allowed 8,000 iterations so the diagonal reference could finish; the scene retains its 2,000 limit.
 

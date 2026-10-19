@@ -1,5 +1,6 @@
 #include "FluidGrid.h"
 #include "FluidTestSetup.h"
+#include <bitloop/core/threads.h>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -114,6 +115,54 @@ void pressureBalancesGravity()
     const double expected_rise = grid.liquid_mixture.components[0].density * grid.gravity_y * grid.cell_size * (grid.height - 1);
     require(std::abs(pressure_rise - expected_rise) < expected_rise * 1e-8, "incorrect hydrostatic pressure gradient");
     requireValidState(grid, initial_volume);
+}
+
+void explicitCacheInvalidationMatchesFreshState()
+{
+    for (const auto preconditioner : {FluidGrid::PressurePreconditioner::Multigrid, FluidGrid::PressurePreconditioner::Diagonal})
+    {
+        FluidGrid edited(33, 25, 2.0);
+        edited.pressure_preconditioner = preconditioner;
+        initializeTestMaterials(edited);
+        edited.applyGravity(0.01);
+        require(edited.project(0.01, 2000, 1e-8).converged, "cache fixture failed to project");
+
+        // Change the density distribution after all pressure caches have been populated.
+        for (int y = 0; y < edited.height; ++y)
+        for (int x = 0; x < edited.width; ++x)
+        {
+            const int i = y * edited.width + x;
+            const double f = edited.liquid_fraction[i] = std::clamp(y + 1.0 - (0.3 * x + 6.0), 0.0, 1.0);
+            edited.liquid_mass[0][i] = 400.0 * f;
+            edited.gas_mass[0][i] = 0.4 * (1.0 - f);
+        }
+        edited.invalidateCaches();
+        FluidGrid fresh(edited.width, edited.height, edited.cell_size);
+        initializeTestMaterials(fresh);
+        fresh.pressure_preconditioner = preconditioner;
+        fresh.upload(edited.download());
+        edited.addVortex({30, 24}, 12, 0.1);
+        fresh.addVortex({30, 24}, 12, 0.1);
+        require(edited.project(0.01, 2000, 1e-8).converged && fresh.project(0.01, 2000, 1e-8).converged,
+            "projection after direct mass edits failed");
+        require(edited.density == fresh.density && edited.inv_density_u == fresh.inv_density_u && edited.inv_density_v == fresh.inv_density_v,
+            "explicit invalidation retained stale density or pressure coefficients");
+        for (size_t i = 0; i < edited.u.size(); ++i)
+            require(std::abs(edited.u[i] - fresh.u[i]) < 2e-7, "edited horizontal pressure solution differs from fresh upload");
+        for (size_t i = 0; i < edited.v.size(); ++i)
+            require(std::abs(edited.v[i] - fresh.v[i]) < 2e-7, "edited vertical pressure solution differs from fresh upload");
+
+        FluidGrid forced = edited;
+        for (int tick = 0; tick < 20; ++tick)
+        {
+            forced.invalidateCaches();
+            require(edited.step(0.004, 2000, 1e-8).converged && forced.step(0.004, 2000, 1e-8).converged,
+                "cached/forced-refresh transport failed");
+            require(edited.u == forced.u && edited.v == forced.v && edited.pressure == forced.pressure &&
+                edited.liquid_fraction == forced.liquid_fraction && edited.liquid_mass == forced.liquid_mass && edited.gas_mass == forced.gas_mass,
+                "automatic transport invalidation differs from forced cache refresh");
+        }
+    }
 }
 
 void transportConservesLiquidAndMovesItsCentroid()
@@ -447,6 +496,52 @@ void largeMixedPressureConvergesWithinDefaultBudget()
     require(result.converged && result.max_divergence <= 1e-6, "512x512 mixed-density pressure exhausted the default iteration budget");
 }
 
+void parallelExecutionMatchesSerialOnOddGrid()
+{
+    FluidGrid serial(513, 257, 1.0);
+    for (int y = 0; y < serial.height; ++y)
+        for (int x = 0; x < serial.width; ++x)
+            serial.liquid_fraction[y * serial.width + x] = std::clamp(y + 1.0 - (0.3 * x + 30.0), 0.0, 1.0);
+    for (size_t i = 0; i < serial.u.size(); ++i) serial.u[i] = std::sin(i * 0.03);
+    for (size_t i = 0; i < serial.v.size(); ++i) serial.v[i] = std::cos(i * 0.017);
+    initializeTestMaterials(serial);
+    FluidGrid parallel = serial;
+    const int previous_threads = int(bl::Thread::threadCount());
+    bl::Thread::setMaxThreads(1);
+    const auto a = serial.project(0.004, 2000, 1e-8);
+    bl::Thread::setMaxThreads(8);
+    const auto b = parallel.project(0.004, 2000, 1e-8);
+    bl::Thread::setMaxThreads(previous_threads);
+    require(a.converged && b.converged, "serial/parallel odd-grid projection failed");
+    for (size_t i = 0; i < serial.u.size(); ++i)
+        require(std::abs(serial.u[i] - parallel.u[i]) < 2e-7, "parallel horizontal projection changed the solution");
+    for (size_t i = 0; i < serial.v.size(); ++i)
+        require(std::abs(serial.v[i] - parallel.v[i]) < 2e-7, "parallel vertical projection changed the solution");
+
+    // Cross row-batch boundaries during both transport directions and interface reconstruction.
+    for (int tick = 0; tick < 3; ++tick)
+    {
+        bl::Thread::setMaxThreads(1);
+        const auto serial_step = serial.step(0.004, 2000, 1e-8);
+        bl::Thread::setMaxThreads(8);
+        const auto parallel_step = parallel.step(0.004, 2000, 1e-8);
+        bl::Thread::setMaxThreads(previous_threads);
+        require(serial_step.converged && parallel_step.converged, "serial/parallel transport failed");
+        for (size_t i = 0; i < serial.liquid_fraction.size(); ++i)
+        {
+            require(std::abs(serial.liquid_fraction[i] - parallel.liquid_fraction[i]) < 2e-7,
+                "parallel transport changed phase geometry");
+            require(std::abs(serial.liquid_mass[0][i] - parallel.liquid_mass[0][i]) < 2e-5 &&
+                    std::abs(serial.gas_mass[0][i] - parallel.gas_mass[0][i]) < 2e-8,
+                "parallel transport changed component masses");
+        }
+        for (size_t i = 0; i < serial.u.size(); ++i)
+            require(std::abs(serial.u[i] - parallel.u[i]) < 2e-7, "parallel transport changed horizontal momentum");
+        for (size_t i = 0; i < serial.v.size(); ++i)
+            require(std::abs(serial.v[i] - parallel.v[i]) < 2e-7, "parallel transport changed vertical momentum");
+    }
+}
+
 }
 
 int main()
@@ -455,6 +550,7 @@ int main()
         {"staggered world-space sampling", samplesStaggeredVelocityInWorldSpace},
         {"state transfer and CPU initialization equivalence", stateTransferPreservesCPUBehaviour},
         {"hydrostatic equilibrium", pressureBalancesGravity},
+        {"explicit and automatic cache invalidation", explicitCacheInvalidationMatchesFreshState},
         {"conservative material transport", transportConservesLiquidAndMovesItsCentroid},
         {"sharp straight-interface transport", transportKeepsStraightInterfacesSharp},
         {"shallow straight-interface transport", transportKeepsShallowInterfacesStraight},
@@ -464,7 +560,8 @@ int main()
         {"miscible component conservation and phase volumes", miscibleComponentsConserveMassAndVolume},
         {"multigrid linearity, symmetry and positivity", multigridPreservesPCGContract},
         {"multigrid and diagonal pressure agreement", multigridMatchesDiagonalProjection},
-        {"large mixed-density pressure convergence", largeMixedPressureConvergesWithinDefaultBudget}
+        {"large mixed-density pressure convergence", largeMixedPressureConvergesWithinDefaultBudget},
+        {"parallel odd-grid pressure and transport agreement", parallelExecutionMatchesSerialOnOddGrid}
     };
     int failures = 0;
     for (const auto& test : tests)

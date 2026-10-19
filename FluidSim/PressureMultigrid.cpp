@@ -90,23 +90,27 @@ void PressureMultigrid::buildTransfers(Level& fine, const Level& coarse)
 
 void PressureMultigrid::Level::rebuildDiagonal()
 {
-    for (int y = 0; y < height; ++y)
-        for (int x = 0, i = (y + 1) * stride + 1; x < width; ++x, ++i)
-        {
-            const double diagonal = right[i - 1] + right[i] + down[i - stride] + down[i];
-            inverse_diagonal[i] = diagonal > 0.0 ? 1.0 / diagonal : 0.0;
-        }
+    forRows(width, height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            for (int x = 0, i = (y + 1) * stride + 1; x < width; ++x, ++i)
+            {
+                const double diagonal = right[i - 1] + right[i] + down[i - stride] + down[i];
+                inverse_diagonal[i] = diagonal > 0.0 ? 1.0 / diagonal : 0.0;
+            }
+    });
 }
 
 bool PressureMultigrid::rebuild(const std::vector<double>& inv_density_u, const std::vector<double>& inv_density_v)
 {
     auto& fine = levels.front();
-    for (int y = 0; y < fine.height; ++y)
-        for (int x = 0, i = (y + 1) * fine.stride + 1; x < fine.width; ++x, ++i)
-        {
-            fine.right[i] = inv_density_u[y * (fine.width + 1) + x + 1];
-            fine.down[i] = inv_density_v[(y + 1) * fine.width + x];
-        }
+    forRows(fine.width, fine.height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            for (int x = 0, i = (y + 1) * fine.stride + 1; x < fine.width; ++x, ++i)
+            {
+                fine.right[i] = inv_density_u[y * (fine.width + 1) + x + 1];
+                fine.down[i] = inv_density_v[(y + 1) * fine.width + x];
+            }
+    });
     fine.rebuildDiagonal();
     for (size_t i = 0; i + 1 < levels.size(); ++i)
         coarsen(levels[i], levels[i + 1]);
@@ -116,42 +120,46 @@ bool PressureMultigrid::rebuild(const std::vector<double>& inv_density_u, const 
 void PressureMultigrid::coarsen(const Level& fine, Level& coarse)
 {
     // Add parallel paths, but combine conductances in series across density jumps.
-    for (int y = 0; y < coarse.height; ++y)
-        for (int x = 0; x + 1 < coarse.width; ++x)
-        {
-            const int edge = 2 * x + 2;
-            const double left = (fine.center_x[edge - 1] - coarse.center_x[x]) /
-                                (fine.center_x[edge - 1] - fine.center_x[edge - 2]);
-            const double right = edge + 1 < fine.width ?
-                (coarse.center_x[x + 1] - fine.center_x[edge]) / (fine.center_x[edge + 1] - fine.center_x[edge]) : 0.0;
-            double conductance = 0.0;
-            for (int fy = 2 * y; fy < std::min(2 * y + 2, fine.height); ++fy)
+    forRows(coarse.width, coarse.height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            for (int x = 0; x + 1 < coarse.width; ++x)
             {
-                const int i = (fy + 1) * fine.stride + edge;
-                double resistance = left / fine.right[i - 1] + 1.0 / fine.right[i];
-                if (right != 0.0) resistance += right / fine.right[i + 1];
-                conductance += 1.0 / resistance;
+                const int edge = 2 * x + 2;
+                const double left = (fine.center_x[edge - 1] - coarse.center_x[x]) /
+                                    (fine.center_x[edge - 1] - fine.center_x[edge - 2]);
+                const double right = edge + 1 < fine.width ?
+                    (coarse.center_x[x + 1] - fine.center_x[edge]) / (fine.center_x[edge + 1] - fine.center_x[edge]) : 0.0;
+                double conductance = 0.0;
+                for (int fy = 2 * y; fy < std::min(2 * y + 2, fine.height); ++fy)
+                {
+                    const int i = (fy + 1) * fine.stride + edge;
+                    double resistance = left / fine.right[i - 1] + 1.0 / fine.right[i];
+                    if (right != 0.0) resistance += right / fine.right[i + 1];
+                    conductance += 1.0 / resistance;
+                }
+                coarse.right[(y + 1) * coarse.stride + x + 1] = conductance;
             }
-            coarse.right[(y + 1) * coarse.stride + x + 1] = conductance;
-        }
-    for (int y = 0; y + 1 < coarse.height; ++y)
-        for (int x = 0; x < coarse.width; ++x)
-        {
-            const int edge = 2 * y + 2;
-            const double up = (fine.center_y[edge - 1] - coarse.center_y[y]) /
-                              (fine.center_y[edge - 1] - fine.center_y[edge - 2]);
-            const double down = edge + 1 < fine.height ?
-                (coarse.center_y[y + 1] - fine.center_y[edge]) / (fine.center_y[edge + 1] - fine.center_y[edge]) : 0.0;
-            double conductance = 0.0;
-            for (int fx = 2 * x; fx < std::min(2 * x + 2, fine.width); ++fx)
+    });
+    forRows(coarse.width, coarse.height - 1, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            for (int x = 0; x < coarse.width; ++x)
             {
-                const int i = edge * fine.stride + fx + 1;
-                double resistance = up / fine.down[i - fine.stride] + 1.0 / fine.down[i];
-                if (down != 0.0) resistance += down / fine.down[i + fine.stride];
-                conductance += 1.0 / resistance;
+                const int edge = 2 * y + 2;
+                const double up = (fine.center_y[edge - 1] - coarse.center_y[y]) /
+                                  (fine.center_y[edge - 1] - fine.center_y[edge - 2]);
+                const double down = edge + 1 < fine.height ?
+                    (coarse.center_y[y + 1] - fine.center_y[edge]) / (fine.center_y[edge + 1] - fine.center_y[edge]) : 0.0;
+                double conductance = 0.0;
+                for (int fx = 2 * x; fx < std::min(2 * x + 2, fine.width); ++fx)
+                {
+                    const int i = edge * fine.stride + fx + 1;
+                    double resistance = up / fine.down[i - fine.stride] + 1.0 / fine.down[i];
+                    if (down != 0.0) resistance += down / fine.down[i + fine.stride];
+                    conductance += 1.0 / resistance;
+                }
+                coarse.down[(y + 1) * coarse.stride + x + 1] = conductance;
             }
-            coarse.down[(y + 1) * coarse.stride + x + 1] = conductance;
-        }
+    });
     coarse.rebuildDiagonal();
 }
 
@@ -318,13 +326,17 @@ void PressureMultigrid::cycle(int index)
 void PressureMultigrid::apply(const std::vector<double>& residual, std::vector<double>& correction, double residual_mean)
 {
     auto& fine = levels.front();
-    for (int y = 0; y < fine.height; ++y)
-        for (int x = 0; x < fine.width; ++x)
-            fine.rhs[(y + 1) * fine.stride + x + 1] = residual[y * fine.width + x] - residual_mean;
+    forRows(fine.width, fine.height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            for (int x = 0; x < fine.width; ++x)
+                fine.rhs[(y + 1) * fine.stride + x + 1] = residual[y * fine.width + x] - residual_mean;
+    });
     cycle(0);
     correction.resize(residual.size());
-    for (int y = 0; y < fine.height; ++y)
-        std::copy_n(fine.solution.data() + (y + 1) * fine.stride + 1, fine.width, correction.data() + y * fine.width);
+    forRows(fine.width, fine.height, [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            std::copy_n(fine.solution.data() + (y + 1) * fine.stride + 1, fine.width, correction.data() + y * fine.width);
+    });
 }
 
 }
