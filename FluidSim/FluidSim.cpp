@@ -217,6 +217,7 @@ void FluidSim_Scene::viewportProcess(
 
     ///const double previous_time = simulation_time;
     simulation_time += frame_time;
+    real_time += dt;
 
     withFluidContext([&]()
     {
@@ -276,8 +277,10 @@ void FluidSim_Scene::viewportDraw(Viewport* ctx) const
     ctx->drawShaderSurface(surface, bounds);
     ctx->drawWorldAxis(0.3, 0.0);
 
-    ctx->setFontSize(10.0);
-    ctx->fillText<double>("Time: " + std::to_string(simulation_time), {10.0, 10.0});
+    ctx->worldHudMode();
+    ctx->setFontSize(12.0);
+    ctx->fillText<double>("Sim Time: " + std::to_string(simulation_time), {10.0, 10.0});
+    ctx->fillText<double>("Real Time: " + std::to_string(real_time), {10.0, 30.0});
 }
 
 void FluidSim_Scene::onEvent(Event e)

@@ -10,6 +10,9 @@
 namespace fluid
 {
 
+class FluidGridHybrid;
+class PressureMultigrid;
+
 class FluidGridGPU
 {
 public:
@@ -57,8 +60,10 @@ public:
     constexpr int vIndex(int x, int y) const { return y * width + x; }
 
 private:
+    friend class FluidGridHybrid;
     friend Edit;
     void commitEdits(detail::CellEditBatch& batch);
+    void useCPUCoarsePressure(PressureMultigrid* solver, int max_cells);
 
     struct Impl;
     std::unique_ptr<Impl> gpu;

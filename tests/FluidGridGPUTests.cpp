@@ -67,11 +67,12 @@ FluidGridGPU::State pool(int width, int height)
     return state;
 }
 
+template<class Grid = FluidGridGPU>
 void pressureBalancesGravity()
 {
     for (const auto& [w, h] : { std::pair{15, 11}, std::pair{1, 13}, std::pair{13, 1} })
     {
-        FluidGridGPU grid(w, h, 4);
+        Grid grid(w, h, 4);
         FluidGridGPU::State state;
         state.liquid_fraction.assign(w * h, 1);
         uploadTestMaterials(grid, state);
@@ -84,6 +85,7 @@ void pressureBalancesGravity()
     }
 }
 
+template<class Grid = FluidGridGPU>
 void projectionMatchesCPU()
 {
     for (const auto& [w, h] : { std::pair{17, 13}, std::pair{128, 128} })
@@ -97,7 +99,7 @@ void projectionMatchesCPU()
         require(reference.converged, "CPU projection reference failed");
         for (auto preconditioner : {FluidGridGPU::PressurePreconditioner::Diagonal, FluidGridGPU::PressurePreconditioner::Multigrid})
         {
-            FluidGridGPU gpu(w, h, 4);
+            Grid gpu(w, h, 4);
             gpu.pressure_preconditioner = preconditioner;
             uploadTestMaterials(gpu, state);
             gpu.applyGravity(1.0 / 120);
@@ -126,7 +128,7 @@ void zeroTimeAndFailedProjectionAreHandled()
     require(!grid.project(0.01, 0).converged, "zero-iteration projection unexpectedly converged");
 }
 
-void multigridPreservesPCGContract()
+void multigridPreservesPCGContract(int cpu_cells = 0)
 {
     using namespace fluid::gpu_detail;
     ComputeState guard;
@@ -134,6 +136,14 @@ void multigridPreservesPCGContract()
     for (auto [w, h] : {std::pair{1, 1}, {1, 129}, {131, 1}, {2, 67}, {13, 9}, {65, 37}, {128, 128}, {512, 512}, {513, 257}})
     {
         PressureMultigridGPU multigrid(runner, w, h);
+        std::unique_ptr<fluid::PressureMultigrid> cpu;
+        if (cpu_cells)
+        {
+            int cw = w, ch = h;
+            while (cw * ch > cpu_cells && cw * ch > 16) { cw = (cw + 1) / 2; ch = (ch + 1) / 2; }
+            cpu = std::make_unique<fluid::PressureMultigrid>(cw, ch);
+            multigrid.useCPUCoarsePressure(cpu.get(), cpu_cells);
+        }
         Texture coefficients(w, h, 4), rhs(w, h), stats(1, 1, 4);
         std::vector<float> weights(size_t(w) * h * 4), a(w * h), b(w * h), combined(w * h);
         auto density = [](int x, int y) { return (x / 3 + y / 4) % 2 == 0 ? 0.1f : 100.0f; };
@@ -192,7 +202,7 @@ void multigridPreservesPCGContract()
         const auto constant = apply(a);
         double constant_error = 0.0;
         for (double value : constant) constant_error = std::max(constant_error, std::abs(value));
-        std::cout << "multigrid " << w << 'x' << h << " linearity=" << error / std::max(1.0, scale)
+        std::cout << "multigrid " << w << 'x' << h << " cpu_cells=" << cpu_cells << " linearity=" << error / std::max(1.0, scale)
                   << " constant_error=" << constant_error << " scale=" << scale << '\n';
         require(constant_error <= 5e-6 * std::max(1.0, scale), "GPU multigrid did not remove its nullspace within float accuracy");
     }
@@ -292,7 +302,8 @@ void commonInterfaceAndDisplay()
     glDeleteFramebuffers(1, &framebuffer);
 }
 
-void graphicsStateIsPreserved()
+template<class Grid = FluidGridGPU>
+void graphicsStateIsPreserved(int w = 8, int h = 8)
 {
     GLuint texture, framebuffer, buffers[2];
     glGenTextures(1, &texture);
@@ -311,14 +322,14 @@ void graphicsStateIsPreserved()
     glScissor(0, 0, 0, 0);
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     {
-        FluidGridGPU gpu(8, 8, 1);
-        uploadTestMaterials(gpu, pool(8, 8));
+        Grid gpu(w, h, 1);
+        uploadTestMaterials(gpu, pool(w, h));
         auto edit = gpu.beginEdit();
-        edit.setCell(0, 7, fluid::Phase::Liquid, gpu.liquid_mixture.components[0].element);
+        edit.setCell(0, h - 1, fluid::Phase::Liquid, gpu.liquid_mixture.components[0].element);
         edit.commit();
         require(gpu.step(1.0 / 120, 2000, 1e-3).converged, "graphics state changed the numerical passes");
         const auto state = gpu.download();
-        require(state.liquid_fraction[7 * 8] > 0.9f, "pixel buffers or color mask corrupted GPU state");
+        require(state.liquid_fraction[(h - 1) * w] > 0.9f, "pixel buffers or color mask corrupted GPU state");
         GLint value, viewport[4];
         GLboolean mask[4];
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &value);
@@ -948,7 +959,10 @@ int main(int argc, char** argv)
             return 0;
         }
         pressureBalancesGravity();
+        pressureBalancesGravity<fluid::FluidGridHybrid>();
         multigridPreservesPCGContract();
+        multigridPreservesPCGContract(64);
+        multigridPreservesPCGContract(1024);
         largeMixedPressureConvergesWithinDefaultBudget();
         cachedVelocityStatsRemainCurrent();
         fluid::test::materialEditingIsSparseAndReusable<FluidGridGPU>();
@@ -956,7 +970,9 @@ int main(int argc, char** argv)
         fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGridGPU>();
         commonInterfaceAndDisplay<FluidGrid>();
         commonInterfaceAndDisplay<FluidGridGPU>();
+        commonInterfaceAndDisplay<fluid::FluidGridHybrid>();
         projectionMatchesCPU();
+        projectionMatchesCPU<fluid::FluidGridHybrid>();
         tinyFractionsRemainFinite();
         transportMatchesCPU();
         transportPreservesPureMaterial();
@@ -968,6 +984,8 @@ int main(int argc, char** argv)
         vanishingSliversCannotExportExcessMass();
         zeroTimeAndFailedProjectionAreHandled();
         graphicsStateIsPreserved();
+        graphicsStateIsPreserved<fluid::FluidGridHybrid>();
+        graphicsStateIsPreserved<fluid::FluidGridHybrid>(65, 37);
         require(glGetError() == GL_NO_ERROR, "GL error during GPU regressions");
         std::cout << "PASS GPU regressions\n";
         return 0;

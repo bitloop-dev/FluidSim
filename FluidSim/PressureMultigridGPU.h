@@ -1,6 +1,8 @@
 #pragma once
 #include "FluidGridGPUInternal.h"
 
+namespace fluid { class PressureMultigrid; }
+
 namespace fluid::gpu_detail
 {
 
@@ -10,7 +12,10 @@ class PressureMultigridGPU
 public:
     PressureMultigridGPU(PassRunner& runner, int width, int height);
     void rebuild(const Texture& fine_coefficients);
-    const Texture& apply(const Texture& residual, const Texture& residual_stats);
+    const Texture& apply(const Texture& residual, const Texture& residual_stats, float tolerance = 0);
+    void useCPUCoarsePressure(PressureMultigrid* solver, int max_cells);
+    bool usesCPUCoarsePressure() const { return cpu_coarse != nullptr; }
+    bool cpuConverged() const { return cpu_converged; }
 
 private:
     static constexpr int smoothing_sweeps = 5;
@@ -28,7 +33,19 @@ private:
     const Texture* fine_coefficients = nullptr;
     const Texture* residual_stats = nullptr;
     std::array<float, smoothing_sweeps> smoothing_weights;
-    Program coarsen, smooth_pair, polynomial_smooth, residual, restrict_pass, prolong, factor, coarse_solve;
+    Program coarsen, smooth_pair, polynomial_smooth, residual, restrict_pass, restrict_cpu, prolong, factor, coarse_solve;
+    PressureMultigrid* cpu_coarse = nullptr;
+    int cpu_level = 0;
+    bool cpu_matrix_stale = true;
+    bool cpu_converged = false;
+    float cpu_tolerance = 0;
+    Texture cpu_readback;
+    std::vector<float> cpu_pixels;
+    std::vector<double> cpu_rhs, cpu_solution, cpu_right, cpu_down;
+
+    void readCPU(const Texture& texture);
+    void rebuildCPU();
+    void solveCPU(const Texture& rhs);
 
     void buildTransfers(Level& fine, const Level& coarse);
     void run(Program& program, int level, std::initializer_list<const Texture*> outputs,

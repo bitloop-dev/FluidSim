@@ -2,6 +2,7 @@
 #include <bitloop.h>
 #include "FluidGrid.h"
 #include "FluidGridGPU.h"
+#include "FluidGridHybrid.h"
 #include "FluidGridDisplay.h"
 #include <utility>
 
@@ -11,6 +12,7 @@ using namespace bl;
 using fluid::FluidGrid;
 using fluid::ElementId;
 using fluid::FluidGridGPU;
+using fluid::FluidGridHybrid;
 using fluid::FluidGridDisplay;
 
 struct FluidSim_Scene : public Scene<FluidSim_Scene>
@@ -27,11 +29,12 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     bool simulation_failed = false;
 
     double simulation_time = 0.0;
+    double real_time = 0.0;
 
     double world_w = double(grid_w) * cell_size;
     double world_h = double(grid_h) * cell_size;
 
-    FluidGridGPU fluid;
+    FluidGridHybrid fluid;
 
     ElementId air_element{};
     ElementId water_element{};

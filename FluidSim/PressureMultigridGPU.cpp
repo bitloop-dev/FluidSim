@@ -1,4 +1,5 @@
 #include "PressureMultigridGPU.h"
+#include "PressureMultigrid.h"
 
 namespace fluid::gpu_detail
 {
@@ -128,7 +129,7 @@ PressureMultigridGPU::PressureMultigridGPU(PassRunner& runner, int width, int he
         uniform sampler2D source, rhs, coefficients;
         void main() { output0 = vec4(rhsAt(rhs, cell()) - product(source, coefficients, cell())); }
     )");
-    build(restrict_pass, "multigrid transpose restriction", R"(
+    const char* restriction = R"(
         uniform sampler2D source, maps;
         void main()
         {
@@ -147,8 +148,14 @@ PressureMultigridGPU::PressureMultigridGPU(PassRunner& runner, int width, int he
                 value += wy[y] * horizontal;
             }
             output0 = vec4(value);
+#ifdef CPU_COARSE
+            vec4 stats = texelFetch(rhs_stats, ivec2(0), 0);
+            output0 = vec4(value, stats.g, stats.a, 0);
+#endif
         }
-    )");
+    )";
+    build(restrict_pass, "multigrid transpose restriction", restriction);
+    runner.build(restrict_cpu, "multigrid CPU restriction and statistics", geometry + "\n#define CPU_COARSE\n", restriction);
     build(prolong, "multigrid prolong correction", R"(
         uniform sampler2D source, coarse, maps;
         void main()
@@ -277,9 +284,83 @@ const Texture& PressureMultigridGPU::coefficients(int level) const
 void PressureMultigridGPU::rebuild(const Texture& fine)
 {
     fine_coefficients = &fine;
-    for (int i = 1; i < int(levels.size()); ++i)
+    const int last = cpu_coarse ? cpu_level : int(levels.size()) - 1;
+    for (int i = 1; i <= last; ++i)
         run(coarsen, i, {&levels[i].coefficients}, {{"source", &coefficients(i - 1)}});
-    run(factor, int(levels.size()) - 1, {&coarse_factor}, {{"coefficients", &coefficients(int(levels.size()) - 1)}});
+    if (cpu_coarse) cpu_matrix_stale = true;
+    else run(factor, last, {&coarse_factor}, {{"coefficients", &coefficients(last)}});
+}
+
+void PressureMultigridGPU::useCPUCoarsePressure(PressureMultigrid* solver, int max_cells)
+{
+    cpu_coarse = solver;
+    cpu_level = 0;
+    if (!solver) return;
+    while (cpu_level + 1 < int(levels.size()) && levels[cpu_level].width * levels[cpu_level].height > max_cells) ++cpu_level;
+    const auto& level = levels[cpu_level];
+    cpu_readback = Texture(level.width, level.height, 4);
+    cpu_rhs.resize(size_t(level.width) * level.height);
+    cpu_right.assign(size_t(level.width + 1) * level.height, 0.0);
+    cpu_down.assign(size_t(level.width) * (level.height + 1), 0.0);
+}
+
+void PressureMultigridGPU::readCPU(const Texture& texture)
+{
+    runner.target({&texture});
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+#ifndef __EMSCRIPTEN__
+    const int channels = texture.channels == 1 ? 1 : 4;
+    cpu_pixels.resize(size_t(texture.width) * texture.height * channels);
+    glReadPixels(0, 0, texture.width, texture.height, channels == 1 ? GL_RED : GL_RGBA, GL_FLOAT, cpu_pixels.data());
+#else
+    cpu_pixels.resize(size_t(texture.width) * texture.height * 4);
+    glReadPixels(0, 0, texture.width, texture.height, GL_RGBA, GL_FLOAT, cpu_pixels.data());
+#endif
+}
+
+void PressureMultigridGPU::rebuildCPU()
+{
+    const auto& level = levels[cpu_level];
+    readCPU(coefficients(cpu_level));
+    for (int y = 0; y < level.height; ++y)
+    for (int x = 0; x < level.width; ++x)
+    {
+        const int i = y * level.width + x;
+        cpu_right[y * (level.width + 1) + x + 1] = cpu_pixels[4 * i + 1];
+        cpu_down[(y + 1) * level.width + x] = cpu_pixels[4 * i + 3];
+    }
+    if (!cpu_coarse->rebuild(cpu_right, cpu_down))
+        throw std::runtime_error("FluidGridHybrid coarse pressure factorization failed");
+}
+
+void PressureMultigridGPU::solveCPU(const Texture& rhs)
+{
+    const auto& level = levels[cpu_level];
+    double mean = 0.0;
+    float maximum = 0, invalid = 0;
+    if (cpu_level == 0)
+    {
+        readCPU(*residual_stats);
+        mean = double(cpu_pixels[0]) / double(level.width * level.height);
+        maximum = cpu_pixels[1];
+        invalid = cpu_pixels[3];
+    }
+    readCPU(rhs);
+    if (cpu_level != 0) { maximum = cpu_pixels[1]; invalid = cpu_pixels[2]; }
+    // Carry convergence with the coarse RHS instead of adding a scalar GPU round trip.
+    if (cpu_tolerance > 0 && invalid == 0 && maximum <= cpu_tolerance) { cpu_converged = true; return; }
+    const size_t stride = cpu_pixels.size() / cpu_rhs.size();
+    for (size_t i = 0; i < cpu_rhs.size(); ++i) cpu_rhs[i] = double(cpu_pixels[stride * i]) - mean;
+    if (cpu_matrix_stale)
+    {
+        rebuildCPU();
+        cpu_matrix_stale = false;
+    }
+    // This is a correction to the same global pressure problem, never a separate tank.
+    cpu_coarse->apply(cpu_rhs, cpu_solution, 0.0);
+    for (size_t i = 0; i < cpu_rhs.size(); ++i) cpu_pixels[i] = float(cpu_solution[i]);
+    glBindTexture(GL_TEXTURE_2D, level.solution.id);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, level.width, level.height, GL_RED, GL_FLOAT, cpu_pixels.data());
 }
 
 void PressureMultigridGPU::smoothLevel(int index, const Texture& rhs, bool reverse, bool from_zero, int sweep)
@@ -296,6 +377,11 @@ void PressureMultigridGPU::smoothLevel(int index, const Texture& rhs, bool rever
 void PressureMultigridGPU::cycle(int index, const Texture& rhs)
 {
     auto& fine = levels[index];
+    if (cpu_coarse && index == cpu_level)
+    {
+        solveCPU(rhs);
+        return;
+    }
     if (index + 1 == int(levels.size()))
     {
         run(coarse_solve, index, {&fine.solution}, {{"rhs", &rhs}, {"factor", &coarse_factor}, {"rhs_stats", residual_stats}});
@@ -306,16 +392,22 @@ void PressureMultigridGPU::cycle(int index, const Texture& rhs)
     for (int sweep = 1; sweep < smoothing_sweeps; ++sweep) smoothLevel(index, rhs, false, false, sweep);
     run(residual, index, {&fine.residual}, {{"source", &fine.solution}, {"rhs", &rhs},
         {"coefficients", &coefficients(index)}, {"rhs_stats", residual_stats}});
-    run(restrict_pass, index, {&coarse.rhs}, {{"source", &fine.residual}, {"maps", &fine.restrict_map}});
-    cycle(index + 1, coarse.rhs);
+    const bool to_cpu = cpu_coarse && index + 1 == cpu_level;
+    if (to_cpu)
+        run(restrict_cpu, index, {&cpu_readback}, {{"source", &fine.residual}, {"maps", &fine.restrict_map}, {"rhs_stats", residual_stats}});
+    else run(restrict_pass, index, {&coarse.rhs}, {{"source", &fine.residual}, {"maps", &fine.restrict_map}});
+    cycle(index + 1, to_cpu ? cpu_readback : coarse.rhs);
+    if (cpu_converged) return;
     run(prolong, index, {&fine.next_solution}, {{"source", &fine.solution}, {"coarse", &coarse.solution}, {"maps", &fine.prolong_map}});
     fine.solution.swap(fine.next_solution);
     for (int sweep = 0; sweep < smoothing_sweeps; ++sweep) smoothLevel(index, rhs, true, false, sweep);
 }
 
-const Texture& PressureMultigridGPU::apply(const Texture& residual, const Texture& stats)
+const Texture& PressureMultigridGPU::apply(const Texture& residual, const Texture& stats, float tolerance)
 {
     residual_stats = &stats;
+    cpu_tolerance = tolerance;
+    cpu_converged = false;
     cycle(0, residual);
     return levels.front().solution;
 }

@@ -389,6 +389,12 @@ void FluidGridGPU::Impl::rebuildPressureCoefficients()
     if (use_multigrid) multigrid.rebuild(pressure_coefficients);
 }
 
+void FluidGridGPU::useCPUCoarsePressure(PressureMultigrid* solver, int max_cells)
+{
+    ComputeState guard;
+    gpu->multigrid.useCPUCoarsePressure(solver, max_cells);
+}
+
 void FluidGridGPU::Impl::applyPressureOperator(const Texture& input)
 {
     run(pressure_operator, { &pressure_product }, { {"source", &input}, {"coefficients", &pressure_coefficients} });
@@ -405,10 +411,11 @@ void FluidGridGPU::Impl::applyPreconditioner(bool restart)
 {
     const Texture* correction = &pressure_correction;
     if (use_multigrid)
-        correction = &multigrid.apply(pressure_residual, residual_stats);
+        correction = &multigrid.apply(pressure_residual, residual_stats, tolerance);
     else
         run(precondition, { &pressure_correction }, {
             {"residual", &pressure_residual}, {"stats", &residual_stats}, {"coefficients", &pressure_coefficients} });
+    if (use_multigrid && multigrid.cpuConverged()) return;
     reduce(*correction, correction_stats, 2, &pressure_residual);
     run(coefficients, { &next_solver_state }, {
         {"residual_stats", &residual_stats}, {"correction_stats", &correction_stats},
@@ -435,6 +442,10 @@ int FluidGridGPU::Impl::solvePressure(int max_iterations, float residual_toleran
     applyPreconditioner(true);
     int submitted = 0;
     int batch = use_multigrid ? (refinement ? 2 : std::clamp(previous_solve_iterations + 1, 2, 64)) : 8;
+    const bool cpu_coarse = use_multigrid && multigrid.usesCPUCoarsePressure();
+    // Check short GPU solves directly; hybrid cycles carry convergence with their coarse data.
+    const bool check_each_iteration = use_multigrid && !cpu_coarse && previous_solve_iterations <= 8;
+    if (check_each_iteration) batch = 1;
     int extra_batch = 4;
     std::array<float, 4> state = {};
     while (submitted < max_iterations)
@@ -451,12 +462,27 @@ int FluidGridGPU::Impl::solvePressure(int max_iterations, float residual_toleran
             pressure.swap(next_pressure);
             pressure_residual.swap(next_residual);
             reduce(pressure_residual, residual_stats);
+            if (check_each_iteration)
+            {
+                const auto current = readScalar(residual_stats);
+                if (current[3] == 0 && current[1] <= tolerance)
+                {
+                    // A converged correction needs no further V-cycle or search direction.
+                    removeMean(pressure, next_pressure);
+                    return submitted + 1;
+                }
+            }
             applyPreconditioner(false);
+            if (cpu_coarse && multigrid.cpuConverged())
+            {
+                removeMean(pressure, next_pressure);
+                return submitted + 1;
+            }
         }
         state = readScalar(solver_state);
         // project verifies the true remaining error on velocity before accepting this correction
         if (state[0] < 0.0 || state[2] <= tolerance) break;
-        batch = use_multigrid ? extra_batch : 8;
+        batch = check_each_iteration ? 1 : use_multigrid ? extra_batch : 8;
         extra_batch = std::min(extra_batch * 2, 128);
     }
     removeMean(pressure, next_pressure);
