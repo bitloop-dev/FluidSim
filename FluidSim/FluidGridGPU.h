@@ -1,5 +1,6 @@
 #pragma once
 #include "FluidGridTypes.h"
+#include "FluidGridEdit.h"
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
 #include <bitloop/core/types.h>
@@ -15,6 +16,7 @@ public:
     using Scalar = float;
     using State = FluidGridState<Scalar>;
     using ProjectionResult = FluidProjectionResult;
+    using Edit = FluidGridEdit<FluidGridGPU>;
     static constexpr bool requires_render_thread = true;
 
     int width;
@@ -39,6 +41,8 @@ public:
     // GPU operations and destruction require the owning GL context; construction itself needs none
     void upload(const State& state);
     State download() const;
+    // Staging needs no GL context; commit requires the owning context after upload().
+    Edit beginEdit() { return Edit(*this); }
     void destroy();
     std::uint32_t liquidFractionTexture() const;
     std::uint32_t colorTexture() const;
@@ -53,6 +57,9 @@ public:
     constexpr int vIndex(int x, int y) const { return y * width + x; }
 
 private:
+    friend Edit;
+    void commitEdits(detail::CellEditBatch& batch);
+
     struct Impl;
     std::unique_ptr<Impl> gpu;
 };

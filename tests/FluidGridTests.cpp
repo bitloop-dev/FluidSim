@@ -1,5 +1,6 @@
 #include "FluidGrid.h"
 #include "FluidTestSetup.h"
+#include "FluidGridEditTests.h"
 #include <bitloop/core/threads.h>
 #include <algorithm>
 #include <cmath>
@@ -549,6 +550,9 @@ int main()
     const struct { const char* name; void (*run)(); } tests[] = {
         {"staggered world-space sampling", samplesStaggeredVelocityInWorldSpace},
         {"state transfer and CPU initialization equivalence", stateTransferPreservesCPUBehaviour},
+        {"sparse reusable material edit sessions", fluid::test::materialEditingIsSparseAndReusable<FluidGrid>},
+        {"bulk material edit batches", fluid::test::bulkMaterialEditsPreserveEveryCell<FluidGrid>},
+        {"repeated material edits and phase volumes", fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGrid>},
         {"hydrostatic equilibrium", pressureBalancesGravity},
         {"explicit and automatic cache invalidation", explicitCacheInvalidationMatchesFreshState},
         {"conservative material transport", transportConservesLiquidAndMovesItsCentroid},

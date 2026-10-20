@@ -126,9 +126,11 @@ void FluidSim_Scene::initializePool(double amplitude)
             // Layer three Perlin scales to give broad clouds some smaller detail.
             const double nx = (x + 0.5) * cloud_noise_scale;
             const double ny = (y + 0.5) * cloud_noise_scale;
-            const double cloud_noise = (perlinNoise(nx, ny) +
+            const double cloud_noise = (
+                perlinNoise(nx, ny) +
                 0.5 * perlinNoise(2.0 * nx, 2.0 * ny) +
                 0.25 * perlinNoise(4.0 * nx, 4.0 * ny)) / 1.75;
+
             const double cloud_share = std::clamp(0.15 + 2.5 * cloud_noise, 0.0, 1.0);
 
             for (size_t k = 0; k < fluid.gas_mixture.components.size(); ++k)
@@ -213,10 +215,25 @@ void FluidSim_Scene::viewportProcess(
     const int step_count = int(std::ceil(frame_time * double(steps_per_frame)));
     const double step = frame_time / step_count;
 
+    ///const double previous_time = simulation_time;
     simulation_time += frame_time;
 
     withFluidContext([&]()
     {
+        // Spawn water by replacing gas; the ordinary fluid step handles the fall.
+        ///constexpr double drops_per_second = 20.0;
+        ///constexpr int drop_radius = 2;
+        ///auto rain = fluid.beginEdit();
+        ///for (int drop = int(previous_time * drops_per_second); drop < int(simulation_time * drops_per_second); ++drop)
+        ///{
+        ///    const int center_x = int(random(drop_radius + 1, fluid.width - drop_radius - 1));
+        ///    for (int y = -drop_radius; y <= drop_radius; ++y)
+        ///    for (int x = -drop_radius; x <= drop_radius; ++x)
+        ///        if (x * x + y * y <= drop_radius * drop_radius)
+        ///            rain.setCell(center_x + x, drop_radius + 2 + y, fluid::Phase::Liquid, water_element);
+        ///}
+        ///rain.commit();
+
         for (int substep = 0; substep < step_count; ++substep)
         {
             // use one float-compatible tolerance for backend comparisons

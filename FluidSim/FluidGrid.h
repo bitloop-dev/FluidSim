@@ -1,5 +1,6 @@
 #pragma once
 #include "FluidGridTypes.h"
+#include "FluidGridEdit.h"
 #include "PressureMultigrid.h"
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
@@ -14,6 +15,7 @@ struct FluidGrid
     using Scalar = double;
     using State = FluidGridState<Scalar>;
     using ProjectionResult = FluidProjectionResult;
+    using Edit = FluidGridEdit<FluidGrid>;
 
     static constexpr bool requires_render_thread = false;
 
@@ -56,6 +58,9 @@ struct FluidGrid
     void upload(const State& state);
     State download() const;
 
+    // Replace selected cells with a pure configured ingredient; existing velocities are retained.
+    Edit beginEdit() { return Edit(*this); }
+
     // Call after editing component masses or derived density/pressure coefficients directly.
     // upload() and engine transport invalidate these caches automatically; velocities are not cached.
     void invalidateCaches();
@@ -83,6 +88,9 @@ struct FluidGrid
     void addVortex(bl::DVec2 center, double radius, double strength);
 
 private:
+    friend Edit;
+    void commitEdits(detail::CellEditBatch& batch);
+
     PressureMultigrid pressure_multigrid;
     bool density_valid = false;
     bool pressure_coefficients_valid = false;

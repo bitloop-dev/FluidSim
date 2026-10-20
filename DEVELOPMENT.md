@@ -17,6 +17,7 @@ The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas i
 | `FluidSim/PressureMultigridGPU.h/.cpp` | GPU pressure hierarchy, fixed symmetric V-cycle and device-side tiny Cholesky solve |
 | `FluidSim/FluidGridGPUInternal.h` | Private numeric textures, shaders, pass runner and graphics-state preservation shared by those two GPU components |
 | `FluidSim/FluidGridTypes.h` | Common state layout and projection result; CPU state uses double, GPU state uses float |
+| `FluidSim/FluidGridEdit.h` | Shared staged material replacements, validation and sparse commit ordering |
 | `FluidSim/FluidGridDisplay.h/.cpp` | Render-thread texture adapter for either engine |
 | `FluidSim/FluidSim.h/.cpp` | This experiment's initial pool, frame timing, failure reporting, camera, rendering and captures |
 | `tests/FluidGridTests.cpp` | Small engine regression set, independent of scenes and drawing |
@@ -34,11 +35,37 @@ Select the scene backend with `FluidGrid fluid;` or `FluidGridGPU fluid;`. Both 
 
 Both engines use the same 3x3 mixed Youngs-centered (MYC) normal estimate. The GPU scales the chosen normal before its float geometry calculations; scaling leaves the reconstructed interface unchanged. CPU/GPU transport comparisons pass with their existing precision tolerances.
 
-Both engines provide `Scalar`, `State`, `ProjectionResult`, `upload`, `download`, `step`, `advect`, `applyGravity`, `project`, `maxDivergence`, `uIndex`, `vIndex` and `destroy`. `decltype(fluid)::State` automatically uses double or float fields. Empty uploaded fields mean zero, and upload resets pressure prediction history; it is initialization rather than complete checkpoint restoration. CPU `destroy()` has no device resources to release; its vectors remain owned by its destructor.
+Both engines provide `Scalar`, `State`, `ProjectionResult`, `Edit`, `beginEdit`, `upload`, `download`, `step`, `advect`, `applyGravity`, `project`, `maxDivergence`, `uIndex`, `vIndex` and `destroy`. `decltype(fluid)::State` automatically uses double or float fields. Empty uploaded fields mean zero, and upload resets pressure prediction history; it is initialization rather than complete checkpoint restoration. CPU `destroy()` has no device resources to release; its vectors remain owned by its destructor.
 
 `withFluidContext()` uses the engine's `requires_render_thread` constant: CPU initialization/physics run on the simulation worker, while GPU work runs through the render queue. `FluidGridDisplay::texture(fluid)` uploads CPU catalogue colours into a reusable RGBA float texture, or builds them directly from GPU masses. Drawing and the native-grid capture route use the same adapter. GPU stepping and drawing perform no full-grid download; `download()` explicitly reads every state field, including component masses.
 
 Configure mixture membership/order before `upload()`, and upload again when changing it. State masses are actual mass per cell (unit depth, cell volume = `cell_size * cell_size`) on either backend. An empty mass field initializes to zero; the engine never invents an Air ingredient. The same element can appear in both mixtures with different component densities.
+
+## Editing material at runtime
+
+`beginEdit()` creates a move-only, reusable session over the existing grid. Draw any shape by selecting individual cells; staging does not read or copy the live grid:
+
+```cpp
+auto edit = fluid.beginEdit();
+edit.reserve(256);
+for (int y = center_y - radius; y <= center_y + radius; ++y)
+for (int x = center_x - radius; x <= center_x + radius; ++x)
+{
+    if ((x - center_x) * (x - center_x) + (y - center_y) * (y - center_y) <= radius * radius)
+        edit.setCell(x, y, fluid::Phase::Liquid, water_element);
+}
+withFluidContext([&] { edit.commit(); });
+```
+
+The scene chooses positions, shapes and timing. Keep the chosen cells inside the grid. The grid must outlive its sessions, and `upload()` must have initialized the configured mixtures before a nonempty commit. Stage on one thread at a time and commit between physics/drawing operations; GPU commit needs the owning GL context. Staging, `reserve()`, `size()`, `empty()` and `clear()` need no GL context. Sessions provide staged writes, not reads of existing GPU cells.
+
+`setCell(x, y, Phase::Liquid/Gas, element)` appends a 16-byte command on the supported native build. With reserved capacity it only appends that record; component lookup and mass calculation happen at commit. Each selected cell becomes entirely the chosen ingredient: its liquid fraction becomes one or zero, its selected component mass becomes phase density times cell volume, and all other liquid/gas component masses become zero. The element must already belong to the selected mixture; if it appears more than once there, the first matching component is selected. Elements present in both phases use the density of the selected phase.
+
+The last queued write to a cell wins. Commit validates the whole batch before material changes: out-of-grid coordinates throw `std::out_of_range`, and a missing phase ingredient throws `std::invalid_argument`. Rejected commands remain queued for inspection/counting or `clear()`. Successful commit clears the commands and retains staging capacity for reuse. Empty commits do nothing; destroying or clearing a session discards uncommitted writes. A session must not be used concurrently with a mutation of its grid or mixture configuration.
+
+Commit preserves current face velocities and pressure prediction history, so replacement material inherits the local flow and the existing divergence-free transport condition. The next physics operation rebuilds stale density/pressure data. This is an explicit material source/sink: replacing gas with water removes the gas mass in those cells; it does not compress or relocate that gas.
+
+Commit sorts only when edits are out of raster order and resolves duplicates. CPU commit writes only the selected cells, using the existing thread pool for large batches once each cell has a unique final replacement. GPU commit packs contiguous row spans; equal adjacent spans merge into rectangles without covering unedited gaps. It uploads only the selected fractions and packed ingredient masses, reusing a staging buffer and preserving graphics state; there is no readback or full-grid upload. With the scene's four ingredients, 100 distinct edited cells transfer 2,000 bytes of texture payload. Widely scattered edits still require more upload calls than compact shapes.
 
 ## GPU component execution
 
@@ -254,6 +281,10 @@ ctest --test-dir <build-directory> -R "^FluidGridTests$" --output-on-failure
 On Windows, configure/build from a Visual Studio developer shell. The test executable needs the same vcpkg runtime DLL directory on `PATH` as the application (`<build-directory>/vcpkg_installed/x64-windows/bin`).
 
 With the same test option enabled, build `FluidSimGPUTests` and run both suites with `ctest --test-dir <build-directory> -R "^FluidGrid(GPU)?Tests$" --output-on-failure`. GPU cases cover hydrostatics, odd/thin projection, CPU comparisons, all four diagonal directions, nonuniform momentum transport, tiny interface remnants, sharp slabs, exact pure-material preservation, zero-time/failure handling and graphics-state restoration. GPU multigrid algebra tests cover odd/thin/high-contrast grids through 513x257, including the larger-grid polynomial smoother. Additional cases protect 512x512 default-budget convergence, the one-iteration cap and exact cached-versus-refreshed CFL parity. Common-API tests exercise upload/download, zero/reset behavior and actual display pixels for both types, including an empty catalogue. Component comparisons cover liquid-only, gas-only, 4, 7 and 18 ingredients, empty fields, differing densities, an element in both phases, and populated ingredients beyond the first sixteen. A 512x512 regression exercises the formerly failing vanishing-sliver case. Both engines' legacy fixtures explicitly populate component masses through `tests/FluidTestSetup.h`.
+
+Edit-session regressions cover staged/cancelled/moved/reused sessions, empty commits, initialization requirements, arbitrary sparse masks, duplicate-write ordering, row-boundary gaps, liquid/gas replacement through nineteen ingredients, invalid-batch atomicity, cache refresh against a fresh upload, edited display colours and GL state restoration. A 257x129 full-grid edit also covers threaded CPU commits and merged GPU uploads. A two-second, 240-step source/sink case on each backend commits twelve batches during pool motion; every step checks projection, source-adjusted component mass, fraction bounds and mass-derived phase volumes. Existing twenty-second CPU pool/component regressions continue to cover the unchanged transport/pressure algorithms.
+
+`FluidSimGPUTests --edit-benchmark` measures reserved staging and GPU-complete commits for 1, 10 and 100 separate 6x6 drops on the 1024x1024 four-ingredient grid, plus a full-state download/upload reference. These are isolated edit costs with explicit GPU synchronization, excluding physics and drawing.
 
 `FluidSimGPUTests --pool-steps 4800 1e-3 512 4` runs a 512x512, four-ingredient mixed-density pool for 40 simulated seconds. It downloads each committed step to check finite fields, fractions, each ingredient's mass, mass-derived phase volumes, closed walls, actual divergence and energy. The last two arguments default to 128 and 2. Short comparisons allow `5e-6` local phase-volume error; long float runs have an explicit quality budget of `0.002` of one cell (0.2%), while global ingredient-mass drift must remain below `1e-4`. This separates accumulated local roundoff from global conservation; it does not normalize masses to hide disagreement.
 

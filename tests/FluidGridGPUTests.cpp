@@ -1,5 +1,6 @@
 #include "FluidGrid.h"
 #include "FluidTestSetup.h"
+#include "FluidGridEditTests.h"
 #include "FluidGridGPU.h"
 #include "FluidGridDisplay.h"
 #include "PressureMultigridGPU.h"
@@ -265,6 +266,13 @@ void commonInterfaceAndDisplay()
     };
     checkTexture(0.375f);
     require(before.liquid_fraction == grid.download().liquid_fraction, "display mutated the material state");
+    auto edit = grid.beginEdit();
+    edit.setCell(3, 2, fluid::Phase::Liquid, grid.liquid_mixture.components[0].element);
+    edit.commit();
+    checkTexture(1.0f);
+    edit.setCell(3, 2, fluid::Phase::Gas, grid.gas_mixture.components[0].element);
+    edit.commit();
+    checkTexture(0.0f);
     require(grid.step(1.0 / 120, 2000, 1e-3).converged, "common physics call failed");
     grid.destroy();
     grid.upload({});
@@ -305,6 +313,9 @@ void graphicsStateIsPreserved()
     {
         FluidGridGPU gpu(8, 8, 1);
         uploadTestMaterials(gpu, pool(8, 8));
+        auto edit = gpu.beginEdit();
+        edit.setCell(0, 7, fluid::Phase::Liquid, gpu.liquid_mixture.components[0].element);
+        edit.commit();
         require(gpu.step(1.0 / 120, 2000, 1e-3).converged, "graphics state changed the numerical passes");
         const auto state = gpu.download();
         require(state.liquid_fraction[7 * 8] > 0.9f, "pixel buffers or color mask corrupted GPU state");
@@ -750,6 +761,55 @@ void benchmark(int steps)
     time(gpu, "GPU", 1e-3);
 }
 
+void editBenchmark()
+{
+    FluidGridGPU grid(1024, 1024, 1);
+    grid.upload(componentPool(grid, 2, 2, false));
+    const auto water = grid.liquid_mixture.components[0].element;
+    auto edit = grid.beginEdit();
+    edit.reserve(3600);
+    auto median = [](std::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        return values[values.size() / 2];
+    };
+    for (int drops : {1, 10, 100})
+    {
+        std::vector<double> staging, commits;
+        for (int repeat = 0; repeat < 25; ++repeat)
+        {
+            glFinish();
+            const auto start = std::chrono::steady_clock::now();
+            for (int drop = 0; drop < drops; ++drop)
+            for (int y = 0; y < 6; ++y)
+            for (int x = 0; x < 6; ++x)
+                edit.setCell(4 + (drop % 10) * 100 + x, 4 + (drop / 10) * 100 + y, fluid::Phase::Liquid, water);
+            const auto queued = std::chrono::steady_clock::now();
+            edit.commit();
+            glFinish();
+            const auto finished = std::chrono::steady_clock::now();
+            if (repeat >= 5)
+            {
+                staging.push_back(std::chrono::duration<double, std::micro>(queued - start).count());
+                commits.push_back(std::chrono::duration<double, std::micro>(finished - queued).count());
+            }
+        }
+        std::cout << "edit drops=" << drops << " cells=" << drops * 36 << " texture_bytes=" << drops * 36 * 20
+                  << " staging_us=" << median(staging) << " commit_gpu_complete_us=" << median(commits) << '\n';
+    }
+    std::vector<double> full_transfers;
+    for (int repeat = 0; repeat < 7; ++repeat)
+    {
+        glFinish();
+        const auto start = std::chrono::steady_clock::now();
+        const auto state = grid.download();
+        grid.upload(state);
+        glFinish();
+        if (repeat >= 2)
+            full_transfers.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    }
+    std::cout << "full_state_round_trip_ms=" << median(full_transfers) << '\n';
+}
+
 void closedPool(int steps, int size, double tolerance, int count)
 {
     FluidGridGPU grid(size, size, 4);
@@ -861,6 +921,12 @@ int main(int argc, char** argv)
         std::cout << std::unitbuf;
         std::cerr << std::unitbuf;
         Context context;
+        if (argc == 2 && std::string(argv[1]) == "--edit-benchmark")
+        {
+            editBenchmark();
+            require(glGetError() == GL_NO_ERROR, "GL error during edit benchmark");
+            return 0;
+        }
         if (argc == 6 && std::string(argv[1]) == "--component-benchmark")
         {
             componentBenchmark(std::stoi(argv[2]), std::stoi(argv[3]), std::stoi(argv[4]), std::stoi(argv[5]));
@@ -885,6 +951,9 @@ int main(int argc, char** argv)
         multigridPreservesPCGContract();
         largeMixedPressureConvergesWithinDefaultBudget();
         cachedVelocityStatsRemainCurrent();
+        fluid::test::materialEditingIsSparseAndReusable<FluidGridGPU>();
+        fluid::test::bulkMaterialEditsPreserveEveryCell<FluidGridGPU>();
+        fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGridGPU>();
         commonInterfaceAndDisplay<FluidGrid>();
         commonInterfaceAndDisplay<FluidGridGPU>();
         projectionMatchesCPU();

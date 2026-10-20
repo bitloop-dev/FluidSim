@@ -243,6 +243,29 @@ void FluidGrid::upload(const State& state)
     invalidateCaches();
 }
 
+void FluidGrid::commitEdits(detail::CellEditBatch& batch)
+{
+    batch.prepare(width, height, cell_size * cell_size, liquid_mixture, gas_mixture);
+    if (liquid_mass.size() != liquid_mixture.components.size() || gas_mass.size() != gas_mixture.components.size())
+        throw std::logic_error("Upload the configured fluid mixtures before committing edits");
+
+    forBatches(int(batch.cells.size()), [&](int first, int last)
+    {
+        for (int n = first; n < last; ++n)
+        {
+            const auto& cell = batch.cells[n];
+            const size_t i = size_t(cell.y) * width + cell.x;
+            const bool liquid = cell.component < liquid_mass.size();
+            liquid_fraction[i] = liquid ? 1.0 : 0.0;
+            for (auto& mass : liquid_mass) mass[i] = 0.0;
+            for (auto& mass : gas_mass) mass[i] = 0.0;
+            if (liquid) liquid_mass[cell.component][i] = cell.mass;
+            else gas_mass[cell.component - liquid_mass.size()][i] = cell.mass;
+        }
+    }, int(liquid_mass.size() + gas_mass.size()));
+    invalidateCaches();
+}
+
 void FluidGrid::invalidateCaches()
 {
     density_valid = false;

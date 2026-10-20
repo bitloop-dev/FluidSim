@@ -41,6 +41,7 @@ struct FluidGridGPU::Impl
         ComponentGroup(int w, int h) : mass(w, h, 4), next_mass(w, h, 4), correction(w, h, 4) {}
     };
     std::vector<ComponentGroup> components;
+    std::vector<float> edit_upload;
     size_t liquid_count = 0, gas_count = 0;
     bool density_valid = false;
     Texture momentum_u, momentum_v, next_momentum_u, next_momentum_v;
@@ -667,6 +668,56 @@ void FluidGridGPU::upload(const State& state)
     gpu->previous_solve_iterations = 7;
     gpu->cached_outflow = 0;
     gpu->velocity_stats_valid = state.u.empty() && state.v.empty();
+}
+
+void FluidGridGPU::commitEdits(detail::CellEditBatch& batch)
+{
+    batch.prepare(width, height, cell_size * cell_size, liquid_mixture, gas_mixture);
+    if (!gpu || gpu->liquid_count != liquid_mixture.components.size() || gpu->gas_count != gas_mixture.components.size())
+        throw std::logic_error("Upload the configured fluid mixtures before committing edits");
+
+    ComputeState guard;
+    const auto& cells = batch.cells;
+    for (size_t first = 0; first < cells.size();)
+    {
+        const int x = cells[first].x, y = cells[first].y;
+        auto rowEnd = [&](size_t start) {
+            size_t end = start + 1;
+            while (end < cells.size() && cells[end].y == cells[start].y && cells[end].x == cells[end - 1].x + 1) ++end;
+            return end;
+        };
+        size_t last = rowEnd(first);
+        const int span_width = int(last - first);
+        int span_height = 1;
+        // Equal adjacent row spans form one rectangle, without uploading gaps in a shape.
+        while (last < cells.size() && cells[last].x == x && cells[last].y == y + span_height)
+        {
+            const size_t end = rowEnd(last);
+            if (end - last != size_t(span_width)) break;
+            last = end;
+            ++span_height;
+        }
+
+        const size_t count = last - first;
+        auto& data = gpu->edit_upload;
+        data.assign(count * (1 + 4 * gpu->components.size()), 0.0f);
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto& cell = cells[first + i];
+            data[i] = cell.component < gpu->liquid_count ? 1.0f : 0.0f;
+            data[count + (cell.component / 4) * count * 4 + i * 4 + cell.component % 4] = float(cell.mass);
+        }
+
+        glBindTexture(GL_TEXTURE_2D, gpu->liquid_fraction.id);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, span_width, span_height, GL_RED, GL_FLOAT, data.data());
+        for (size_t group = 0; group < gpu->components.size(); ++group)
+        {
+            glBindTexture(GL_TEXTURE_2D, gpu->components[group].mass.id);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, span_width, span_height, GL_RGBA, GL_FLOAT, data.data() + count * (1 + 4 * group));
+        }
+        first = last;
+    }
+    gpu->density_valid = false;
 }
 
 FluidGridGPU::State FluidGridGPU::download() const
