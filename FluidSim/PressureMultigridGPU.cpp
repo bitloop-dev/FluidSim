@@ -4,6 +4,8 @@
 namespace fluid::gpu_detail
 {
 
+PressureMultigridGPU::~PressureMultigridGPU() = default;
+
 PressureMultigridGPU::Level::Level(int w, int h, int s, bool finest) :
     width(w), height(h), spacing(s), coefficients(finest ? Texture() : Texture(w, h, 4)),
     rhs(finest ? Texture() : Texture(w, h)), solution(w, h), next_solution(w, h), residual(w, h)
@@ -291,13 +293,16 @@ void PressureMultigridGPU::rebuild(const Texture& fine)
     else run(factor, last, {&coarse_factor}, {{"coefficients", &coefficients(last)}});
 }
 
-void PressureMultigridGPU::useCPUCoarsePressure(PressureMultigrid* solver, int max_cells)
+void PressureMultigridGPU::useCPUCoarsePressure(int max_cells)
 {
-    cpu_coarse = solver;
+    cpu_coarse.reset();
     cpu_level = 0;
-    if (!solver) return;
+    cpu_converged = false;
+    if (max_cells == 0) return;
     while (cpu_level + 1 < int(levels.size()) && levels[cpu_level].width * levels[cpu_level].height > max_cells) ++cpu_level;
     const auto& level = levels[cpu_level];
+    cpu_coarse = std::make_unique<PressureMultigrid>(level.width, level.height);
+    cpu_matrix_stale = true;
     cpu_readback = Texture(level.width, level.height, 4);
     cpu_rhs.resize(size_t(level.width) * level.height);
     cpu_right.assign(size_t(level.width + 1) * level.height, 0.0);
@@ -330,7 +335,7 @@ void PressureMultigridGPU::rebuildCPU()
         cpu_down[(y + 1) * level.width + x] = cpu_pixels[4 * i + 3];
     }
     if (!cpu_coarse->rebuild(cpu_right, cpu_down))
-        throw std::runtime_error("FluidGridHybrid coarse pressure factorization failed");
+        throw std::runtime_error("FluidGridGPU coarse pressure factorization failed");
 }
 
 void PressureMultigridGPU::solveCPU(const Texture& rhs)

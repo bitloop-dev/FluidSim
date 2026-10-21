@@ -1,14 +1,13 @@
 #pragma once
 #include "FluidGrid.h"
 #include "FluidGridGPU.h"
-#include "FluidGridHybrid.h"
 #include <cstdint>
 #include <vector>
 
 namespace fluid
 {
 
-// Render-thread adapter for the CPU, GPU and hybrid engines' catalogue colours.
+// Render-thread adapter for the CPU and GPU engines' catalogue colours.
 class FluidGridDisplay
 {
 public:
@@ -18,7 +17,6 @@ public:
 
     std::uint32_t texture(const FluidGrid& grid) const;
     std::uint32_t texture(const FluidGridGPU& grid) const { return grid.colorTexture(); }
-    std::uint32_t texture(const FluidGridHybrid& grid) const { return grid.colorTexture(); }
     void destroy();
 
 private:

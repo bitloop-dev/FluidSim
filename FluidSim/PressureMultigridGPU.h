@@ -1,5 +1,6 @@
 #pragma once
 #include "FluidGridGPUInternal.h"
+#include <memory>
 
 namespace fluid { class PressureMultigrid; }
 
@@ -11,9 +12,10 @@ class PressureMultigridGPU
 {
 public:
     PressureMultigridGPU(PassRunner& runner, int width, int height);
+    ~PressureMultigridGPU();
     void rebuild(const Texture& fine_coefficients);
     const Texture& apply(const Texture& residual, const Texture& residual_stats, float tolerance = 0);
-    void useCPUCoarsePressure(PressureMultigrid* solver, int max_cells);
+    void useCPUCoarsePressure(int max_cells);
     bool usesCPUCoarsePressure() const { return cpu_coarse != nullptr; }
     bool cpuConverged() const { return cpu_converged; }
 
@@ -34,7 +36,7 @@ private:
     const Texture* residual_stats = nullptr;
     std::array<float, smoothing_sweeps> smoothing_weights;
     Program coarsen, smooth_pair, polynomial_smooth, residual, restrict_pass, restrict_cpu, prolong, factor, coarse_solve;
-    PressureMultigrid* cpu_coarse = nullptr;
+    std::unique_ptr<PressureMultigrid> cpu_coarse;
     int cpu_level = 0;
     bool cpu_matrix_stale = true;
     bool cpu_converged = false;

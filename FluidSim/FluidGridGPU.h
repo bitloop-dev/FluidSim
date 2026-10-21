@@ -10,9 +10,6 @@
 namespace fluid
 {
 
-class FluidGridHybrid;
-class PressureMultigrid;
-
 class FluidGridGPU
 {
 public:
@@ -33,6 +30,9 @@ public:
 
     enum class PressurePreconditioner { Diagonal, Multigrid };
     PressurePreconditioner pressure_preconditioner = PressurePreconditioner::Multigrid;
+
+    // CPU coarse-pressure cutoff in cells, set before upload(); zero keeps every level on the GPU.
+    int cpu_pressure_cells = 1024;
 
     FluidGridGPU(int width, int height, double cell_size);
     ~FluidGridGPU();
@@ -60,10 +60,8 @@ public:
     constexpr int vIndex(int x, int y) const { return y * width + x; }
 
 private:
-    friend class FluidGridHybrid;
     friend Edit;
     void commitEdits(detail::CellEditBatch& batch);
-    void useCPUCoarsePressure(PressureMultigrid* solver, int max_cells);
 
     struct Impl;
     std::unique_ptr<Impl> gpu;

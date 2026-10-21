@@ -2,6 +2,7 @@
 #include "FluidTestSetup.h"
 #include "FluidGridEditTests.h"
 #include "FluidGridGPU.h"
+#include "FluidGridGPUCoarseTests.h"
 #include "FluidGridDisplay.h"
 #include "PressureMultigridGPU.h"
 #include <SDL3/SDL.h>
@@ -67,12 +68,12 @@ FluidGridGPU::State pool(int width, int height)
     return state;
 }
 
-template<class Grid = FluidGridGPU>
-void pressureBalancesGravity()
+void pressureBalancesGravity(int cpu_cells = 1024)
 {
     for (const auto& [w, h] : { std::pair{15, 11}, std::pair{1, 13}, std::pair{13, 1} })
     {
-        Grid grid(w, h, 4);
+        FluidGridGPU grid(w, h, 4);
+        grid.cpu_pressure_cells = cpu_cells;
         FluidGridGPU::State state;
         state.liquid_fraction.assign(w * h, 1);
         uploadTestMaterials(grid, state);
@@ -85,8 +86,7 @@ void pressureBalancesGravity()
     }
 }
 
-template<class Grid = FluidGridGPU>
-void projectionMatchesCPU()
+void projectionMatchesCPU(int cpu_cells = 1024)
 {
     for (const auto& [w, h] : { std::pair{17, 13}, std::pair{128, 128} })
     {
@@ -99,7 +99,8 @@ void projectionMatchesCPU()
         require(reference.converged, "CPU projection reference failed");
         for (auto preconditioner : {FluidGridGPU::PressurePreconditioner::Diagonal, FluidGridGPU::PressurePreconditioner::Multigrid})
         {
-            Grid gpu(w, h, 4);
+            FluidGridGPU gpu(w, h, 4);
+            gpu.cpu_pressure_cells = cpu_cells;
             gpu.pressure_preconditioner = preconditioner;
             uploadTestMaterials(gpu, state);
             gpu.applyGravity(1.0 / 120);
@@ -136,14 +137,7 @@ void multigridPreservesPCGContract(int cpu_cells = 0)
     for (auto [w, h] : {std::pair{1, 1}, {1, 129}, {131, 1}, {2, 67}, {13, 9}, {65, 37}, {128, 128}, {512, 512}, {513, 257}})
     {
         PressureMultigridGPU multigrid(runner, w, h);
-        std::unique_ptr<fluid::PressureMultigrid> cpu;
-        if (cpu_cells)
-        {
-            int cw = w, ch = h;
-            while (cw * ch > cpu_cells && cw * ch > 16) { cw = (cw + 1) / 2; ch = (ch + 1) / 2; }
-            cpu = std::make_unique<fluid::PressureMultigrid>(cw, ch);
-            multigrid.useCPUCoarsePressure(cpu.get(), cpu_cells);
-        }
+        multigrid.useCPUCoarsePressure(cpu_cells);
         Texture coefficients(w, h, 4), rhs(w, h), stats(1, 1, 4);
         std::vector<float> weights(size_t(w) * h * 4), a(w * h), b(w * h), combined(w * h);
         auto density = [](int x, int y) { return (x / 3 + y / 4) % 2 == 0 ? 0.1f : 100.0f; };
@@ -249,9 +243,10 @@ void cachedVelocityStatsRemainCurrent()
 }
 
 template<typename Grid>
-void commonInterfaceAndDisplay()
+void commonInterfaceAndDisplay(int cpu_cells = 1024)
 {
     Grid grid(9, 7, 2.5);
+    if constexpr (std::is_same_v<Grid, FluidGridGPU>) grid.cpu_pressure_cells = cpu_cells;
     typename Grid::State initial;
     initial.liquid_fraction.resize(9 * 7);
     initial.liquid_fraction[2 * 9 + 3] = typename Grid::Scalar(0.375);
@@ -302,8 +297,7 @@ void commonInterfaceAndDisplay()
     glDeleteFramebuffers(1, &framebuffer);
 }
 
-template<class Grid = FluidGridGPU>
-void graphicsStateIsPreserved(int w = 8, int h = 8)
+void graphicsStateIsPreserved(int w = 8, int h = 8, int cpu_cells = 1024)
 {
     GLuint texture, framebuffer, buffers[2];
     glGenTextures(1, &texture);
@@ -322,7 +316,8 @@ void graphicsStateIsPreserved(int w = 8, int h = 8)
     glScissor(0, 0, 0, 0);
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     {
-        Grid gpu(w, h, 1);
+        FluidGridGPU gpu(w, h, 1);
+        gpu.cpu_pressure_cells = cpu_cells;
         uploadTestMaterials(gpu, pool(w, h));
         auto edit = gpu.beginEdit();
         edit.setCell(0, h - 1, fluid::Phase::Liquid, gpu.liquid_mixture.components[0].element);
@@ -932,6 +927,17 @@ int main(int argc, char** argv)
         std::cout << std::unitbuf;
         std::cerr << std::unitbuf;
         Context context;
+        if (argc >= 2 && (std::string(argv[1]) == "--coarse-benchmark" || std::string(argv[1]) == "--coarse-compare"))
+        {
+            fluid::test::coarsePressureBenchmark(argc > 2 ? std::stoi(argv[2]) : 512, argc > 3 ? std::stoi(argv[3]) : 0,
+                                                 std::string(argv[1]) == "--coarse-compare");
+            return 0;
+        }
+        if (argc >= 3 && std::string(argv[1]) == "--coarse-pool-steps")
+        {
+            fluid::test::coarsePressurePool(std::stoi(argv[2]), argc > 3 ? std::stoi(argv[3]) : 128);
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--edit-benchmark")
         {
             editBenchmark();
@@ -959,7 +965,7 @@ int main(int argc, char** argv)
             return 0;
         }
         pressureBalancesGravity();
-        pressureBalancesGravity<fluid::FluidGridHybrid>();
+        pressureBalancesGravity(0);
         multigridPreservesPCGContract();
         multigridPreservesPCGContract(64);
         multigridPreservesPCGContract(1024);
@@ -970,9 +976,9 @@ int main(int argc, char** argv)
         fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGridGPU>();
         commonInterfaceAndDisplay<FluidGrid>();
         commonInterfaceAndDisplay<FluidGridGPU>();
-        commonInterfaceAndDisplay<fluid::FluidGridHybrid>();
+        commonInterfaceAndDisplay<FluidGridGPU>(0);
         projectionMatchesCPU();
-        projectionMatchesCPU<fluid::FluidGridHybrid>();
+        projectionMatchesCPU(0);
         tinyFractionsRemainFinite();
         transportMatchesCPU();
         transportPreservesPureMaterial();
@@ -984,8 +990,9 @@ int main(int argc, char** argv)
         vanishingSliversCannotExportExcessMass();
         zeroTimeAndFailedProjectionAreHandled();
         graphicsStateIsPreserved();
-        graphicsStateIsPreserved<fluid::FluidGridHybrid>();
-        graphicsStateIsPreserved<fluid::FluidGridHybrid>(65, 37);
+        graphicsStateIsPreserved(8, 8, 0);
+        graphicsStateIsPreserved(65, 37);
+        fluid::test::coarsePressureRegressions();
         require(glGetError() == GL_NO_ERROR, "GL error during GPU regressions");
         std::cout << "PASS GPU regressions\n";
         return 0;

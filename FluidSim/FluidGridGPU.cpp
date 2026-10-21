@@ -389,12 +389,6 @@ void FluidGridGPU::Impl::rebuildPressureCoefficients()
     if (use_multigrid) multigrid.rebuild(pressure_coefficients);
 }
 
-void FluidGridGPU::useCPUCoarsePressure(PressureMultigrid* solver, int max_cells)
-{
-    ComputeState guard;
-    gpu->multigrid.useCPUCoarsePressure(solver, max_cells);
-}
-
 void FluidGridGPU::Impl::applyPressureOperator(const Texture& input)
 {
     run(pressure_operator, { &pressure_product }, { {"source", &input}, {"coefficients", &pressure_coefficients} });
@@ -443,7 +437,7 @@ int FluidGridGPU::Impl::solvePressure(int max_iterations, float residual_toleran
     int submitted = 0;
     int batch = use_multigrid ? (refinement ? 2 : std::clamp(previous_solve_iterations + 1, 2, 64)) : 8;
     const bool cpu_coarse = use_multigrid && multigrid.usesCPUCoarsePressure();
-    // Check short GPU solves directly; hybrid cycles carry convergence with their coarse data.
+    // Check short GPU-only solves directly; CPU coarse cycles carry convergence with their coarse data.
     const bool check_each_iteration = use_multigrid && !cpu_coarse && previous_solve_iterations <= 8;
     if (check_each_iteration) batch = 1;
     int extra_batch = 4;
@@ -694,6 +688,7 @@ void FluidGridGPU::upload(const State& state)
     gpu->previous_solve_iterations = 7;
     gpu->cached_outflow = 0;
     gpu->velocity_stats_valid = state.u.empty() && state.v.empty();
+    gpu->multigrid.useCPUCoarsePressure(cpu_pressure_cells);
 }
 
 void FluidGridGPU::commitEdits(detail::CellEditBatch& batch)
