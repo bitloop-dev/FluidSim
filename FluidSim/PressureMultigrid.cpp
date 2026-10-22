@@ -100,9 +100,13 @@ void PressureMultigrid::Level::rebuildDiagonal()
     });
 }
 
-bool PressureMultigrid::rebuild(const std::vector<double>& inv_density_u, const std::vector<double>& inv_density_v)
+bool PressureMultigrid::rebuild(const std::vector<double>& inv_density_u, const std::vector<double>& inv_density_v,
+    bool fixed_top)
 {
+    fixed_top_pressure = fixed_top;
     auto& fine = levels.front();
+    for (int x = 0; x < fine.width; ++x)
+        fine.down[x + 1] = fixed_top ? inv_density_v[x] : 0.0;
     forRows(fine.width, fine.height, [&](int y0, int y1) {
         for (int y = y0; y < y1; ++y)
             for (int x = 0, i = (y + 1) * fine.stride + 1; x < fine.width; ++x, ++i)
@@ -160,6 +164,21 @@ void PressureMultigrid::coarsen(const Level& fine, Level& coarse)
                 coarse.down[(y + 1) * coarse.stride + x + 1] = conductance;
             }
     });
+    // Parallel columns from the coarse centre to the prescribed top pressure.
+    const double distance = fine.height > 1
+        ? (coarse.center_y[0] - fine.center_y[0]) / (fine.center_y[1] - fine.center_y[0]) : 0.0;
+    for (int x = 0; x < coarse.width; ++x)
+    {
+        double conductance = 0.0;
+        for (int fx = 2 * x; fx < std::min(2 * x + 2, fine.width); ++fx)
+            if (fine.down[fx + 1] != 0.0)
+            {
+                double resistance = 1.0 / fine.down[fx + 1];
+                if (distance != 0.0) resistance += distance / fine.down[fine.stride + fx + 1];
+                conductance += 1.0 / resistance;
+            }
+        coarse.down[x + 1] = conductance;
+    }
     coarse.rebuildDiagonal();
 }
 
@@ -245,16 +264,19 @@ void PressureMultigrid::prolongCorrection(const Level& coarse, Level& fine)
 bool PressureMultigrid::factorCoarsest()
 {
     const auto& level = levels.back();
-    const int n = int(coarse_rhs.size());
+    const int first = fixed_top_pressure ? 0 : 1;
+    const int n = level.width * level.height - first;
+    coarse_rhs.resize(n);
+    coarse_factor.resize(size_t(n) * n);
     std::fill(coarse_factor.begin(), coarse_factor.end(), 0.0);
-    // Fix one pressure to zero; this removes the closed tank's constant nullspace.
-    for (int cell = 1; cell <= n; ++cell)
+    // Closed tanks fix one pressure; a prescribed boundary already removes the nullspace.
+    for (int cell = first; cell < n + first; ++cell)
     {
         const int x = cell % level.width, y = cell / level.width;
-        const int i = (y + 1) * level.stride + x + 1, row = cell - 1;
+        const int i = (y + 1) * level.stride + x + 1, row = cell - first;
         coarse_factor[row * n + row] = level.right[i - 1] + level.right[i] + level.down[i - level.stride] + level.down[i];
-        if (x > 0 && cell - 1 > 0) coarse_factor[row * n + row - 1] = -level.right[i - 1];
-        if (y > 0 && cell - level.width > 0) coarse_factor[row * n + row - level.width] = -level.down[i - level.stride];
+        if (x > 0 && cell - 1 >= first) coarse_factor[row * n + row - 1] = -level.right[i - 1];
+        if (y > 0 && cell - level.width >= first) coarse_factor[row * n + row - level.width] = -level.down[i - level.stride];
     }
     // Cholesky is rebuilt once per projection, then reused by every V-cycle.
     for (int row = 0; row < n; ++row)
@@ -278,14 +300,15 @@ void PressureMultigrid::solveCoarsest()
 {
     auto& level = levels.back();
     const int n = int(coarse_rhs.size());
+    const int first = fixed_top_pressure ? 0 : 1;
     double mean = 0.0;
     for (int y = 0; y < level.height; ++y)
         for (int x = 0; x < level.width; ++x)
             mean += level.rhs[(y + 1) * level.stride + x + 1];
-    mean /= n + 1;
+    mean = fixed_top_pressure ? 0.0 : mean / (n + 1);
     for (int row = 0; row < n; ++row)
     {
-        const int cell = row + 1;
+        const int cell = row + first;
         double value = level.rhs[(cell / level.width + 1) * level.stride + cell % level.width + 1] - mean;
         for (int col = 0; col < row; ++col) value -= coarse_factor[row * n + col] * coarse_rhs[col];
         coarse_rhs[row] = value / coarse_factor[row * n + row];
@@ -296,11 +319,11 @@ void PressureMultigrid::solveCoarsest()
         for (int col = row + 1; col < n; ++col) value -= coarse_factor[col * n + row] * coarse_rhs[col];
         coarse_rhs[row] = value / coarse_factor[row * n + row];
     }
-    // Choose a mean-zero gauge before interpolating this solution to finer grids.
-    mean = std::accumulate(coarse_rhs.begin(), coarse_rhs.end(), 0.0) / (n + 1);
-    level.solution[level.stride + 1] = -mean;
-    for (int cell = 1; cell <= n; ++cell)
-        level.solution[(cell / level.width + 1) * level.stride + cell % level.width + 1] = coarse_rhs[cell - 1] - mean;
+    // Choose a mean-zero gauge only for closed domains.
+    mean = fixed_top_pressure ? 0.0 : std::accumulate(coarse_rhs.begin(), coarse_rhs.end(), 0.0) / (n + 1);
+    if (!fixed_top_pressure) level.solution[level.stride + 1] = -mean;
+    for (int cell = first; cell < n + first; ++cell)
+        level.solution[(cell / level.width + 1) * level.stride + cell % level.width + 1] = coarse_rhs[cell - first] - mean;
 }
 
 void PressureMultigrid::cycle(int index)

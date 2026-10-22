@@ -4,7 +4,7 @@ Stage 1 geometric material transport and Stage 2 consistent mass/momentum transp
 
 Both engines use the component system: configure the element catalogue and liquid/gas mixtures, then upload component masses alongside `liquid_fraction`, the total liquid volume fraction. Density, momentum and displayed colours come from those masses. Engine geometry uses liquid/gas terminology; Water, Red, Air and Cloud are scene ingredients. Several miscible ingredients share each phase's geometry; adding an ingredient does not add another interface reconstruction or pressure solve.
 
-The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas ingredient. Air and Cloud share density 0.1; three fixed Perlin scales divide the initial gas volume between them. Noise is evaluated only in `initializePool()`, then ordinary component transport carries the clouds. This visualizes atmospheric flow without adding condensation or evaporation physics.
+The scene catalogue contains blue Water and Red liquid, plus Air and a cyan Cloud gas ingredient. The scene's `red_share` selects the liquid blend. Air and Cloud share density 0.1. The initial atmosphere uses three Perlin scales to divide its unit gas volume between Air and Cloud. These colours are transported normally so they trace motion. `atmosphere_fractions = {0.5, 0.5}` specifies boundary inflow and the mask reference, in gas-mixture order; the mask explicitly treats Air and Cloud as colour variants of the same atmosphere.
 
 ## Where things belong
 
@@ -19,19 +19,25 @@ The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas i
 | `FluidSim/FluidGridTypes.h` | Common state layout and projection result; CPU state uses double, GPU state uses float |
 | `FluidSim/FluidGridEdit.h` | Shared staged material replacements, validation and sparse commit ordering |
 | `FluidSim/FluidGridDisplay.h/.cpp` | Render-thread texture adapter for either engine |
+| `FluidSim/FluidAmbientMaskDisplay.h/.cpp` | Render-thread palette adapter for the CPU ambient mask |
+| `FluidSim/FluidAmbientMask.h/.cpp` | CPU per-cell compatibility with a supplied ambient state, history, buffer and reservoir connectivity |
 | `FluidSim/FluidSim.h/.cpp` | This experiment's initial pool, frame timing, failure reporting, camera, rendering and captures |
 | `tests/FluidGridTests.cpp` | Small engine regression set, independent of scenes and drawing |
+| `tests/FluidAmbientTests.cpp` | CPU gas-damping and prescribed-pressure boundary checks |
+| `tests/FluidAmbientMaskTests.cpp` | Ambient-mask composition, pressure, orientation, connectivity, history and unchanged-physics checks |
 | `tests/FluidGridGPUTests.cpp` | GPU/CPU comparisons and GPU regressions in a hidden graphics context |
 
 `FluidSimEngine` is a local CMake library used by both the scene and tests. It depends on Bitloop's vector type and thread pool, but has no Scene, camera, OpenGL or UI code. Another experiment can include `FluidGrid.h` and link that target. Packaging it as a separate repository is a later decision.
 
 A new `FluidGrid(width, height, cell_size)` starts with zero velocity and zero liquid fraction. Configure its mixtures and populate component masses before advancing physics. The scene creates an initial `State` in `initializePool()` and passes it to `upload()`; that sloped pool is an experiment, not an engine default. Existing CPU public arrays and individual operations remain available for learning. Dimensions and cell size describe a fixed grid; changing them requires constructing another grid.
 
-CPU density, pressure coefficients and the multigrid hierarchy are now cached. After directly editing `liquid_mass`, `gas_mass` or derived density/pressure-coefficient arrays, call `fluid.invalidateCaches()` before the next physics operation. It marks derived data stale; rebuilding happens when needed. `upload()` and engine material transport do this automatically. Direct velocity edits need no cache notification because CPU velocity statistics are recomputed, but transport still requires projected velocity. Mixture membership changes continue to require `upload()`. GPU mass/velocity textures are private and its `upload()` already invalidates its caches; direct CPU-array access is not part of the shared interface.
+CPU density, pressure coefficients and the multigrid hierarchy are now cached. After directly editing `liquid_mass`, `gas_mass` or derived density/pressure-coefficient arrays, call `fluid.invalidateCaches()` before the next physics operation. It marks derived data stale; rebuilding happens when needed. `upload()` and engine material transport do this automatically. Direct velocity edits need no cache notification because CPU velocity statistics are recomputed, but transport still requires projected velocity. Mixture membership changes continue to require `upload()`. GPU textures remain engine-owned. Its `upload()` already invalidates its caches; direct CPU-array access is not part of the shared interface.
 
 ## Switching CPU and GPU
 
 Select the scene backend with `FluidGrid fluid;` or `FluidGridGPU fluid;`. Both accept the same catalogue, mixture definitions and per-cell component masses, and default to multigrid preconditioning.
+
+The current mask and optional gas damping require `FluidGrid`; their controls are available in both CPU scenarios. Selecting `FluidGridGPU` disables the CPU observer and reports damping as unavailable. The CPU scene uses the experiment's explicit prescribed-pressure top boundary; the GPU backend remains closed. There is no alternate experiment scene.
 
 Both engines use the same 3x3 mixed Youngs-centered (MYC) normal estimate. The GPU scales the chosen normal before its float geometry calculations; scaling leaves the reconstructed interface unchanged. CPU/GPU transport comparisons pass with their existing precision tolerances.
 
@@ -81,22 +87,70 @@ The shared operations require no base class or virtual dispatch. Direct CPU vect
 
 Unused dye buffers, `advectDye`, particles and the unused `FluidCell` placeholder have been removed. `sampleVelocity` and `addVortex` remain useful experiment operations.
 
+## CPU ambient eligibility overlay (current experiment)
+
+There is one observer, `FluidAmbientMask`, over the full 256x256 scene. Both CPU wave scenarios use the explicitly prescribed atmosphere at the top, with side and bottom walls closed. No rows are omitted and no physics updates are skipped. The old activity/misses observer, its GPU diagnostic machinery, and the cropped-region scene/benchmark have been removed. Historical captures remain under `.codex/runs`, outside the active code.
+
+**Atmosphere → Gas damping (per second)** is available in every CPU scenario independently of the overlay. `atmosphere_damping = 0.2f` in `FluidSim.h` is the scene default; zero disables it exactly. The engine's `gas_damping_rate` still defaults to zero. Gas-only face velocity is multiplied by `exp(-rate * dt)` after transport and before gravity/pressure projection. Faces touching liquid are not directly damped. All gas ingredients, including enclosed gas, share this rule. It dissipates kinetic energy without adding heat; this is drag toward stillness, not viscosity. GPU damping has not been implemented.
+
+**Ambient eligibility mask → Show ambient eligibility overlay** enables observation and display. **Mask opacity** defaults to **0.35**: the displayed colour is 65% original material and 35% classification colour. Zero opacity shows the original scene while continuing observation; disabling the overlay also stops classification work. Damping remains enabled independently.
+
+**Restart scene** at the top of the scene sidebar restores the current scenario's initial liquid/cloud pattern, zeroes velocities, pressure, elapsed times and capture-frame count, and resets mask history. It preserves the current damping, mask settings, opacity, camera and other options. The reset is scheduled on the simulation worker; GPU upload, if selected, still uses the render owner.
+
+The scene supplies whole-cell ingredient fractions and an affine pressure background (`pressure + pressure_gradient dot world_position`). The gas reference uses `atmosphere_fractions`, also used for boundary inflow. `gas_tracer_elements = {air_element, cloud_element}` declares one group whose total gas volume is compared instead of its internal colour split. Other ingredients are still compared individually; liquid fraction, total volume, density, speed and pressure retain their normal roles. This grouping changes only the observer, never the simulated masses, transport, colours or damping. Thus cloudy and clear cells can both be green/yellow without losing the visible cloud pattern. Scene pressure departure tolerance defaults to **3.0**, and mask opacity remains **0.35**. The top pressure is fixed at zero, matching the observer's pressure origin; the hydrostatic gradient is supplied by the scene. Quiet compatible regions connected to the top reservoir can be green; disconnected patches remain purple. All gas and material transport still runs normally, including enclosed gas.
+
+The earlier cleanup incorrectly switched this experiment to a closed pressure model while retaining an incompatible reference. The prescribed top boundary is restored, and gas initialisation no longer gives both ingredients a whole cell each. Component-volume shares must sum to one. The scene explicitly groups Air and Cloud because their current physical properties are identical; other gases do not become equivalent automatically. Green describes atmospheric activity under that grouping, not permission to erase tracer colours or skip their transport.
+
+`FluidAmbientMask::observe()` runs after each successful CPU physics substep and never mutates the grid. It compares ingredient volumes, liquid fraction, staggered-face speed, pressure departure and neighbouring pressure-departure gradients divided by density. Opposing face velocities cannot cancel. The classifier does not read gravity, element names or the scenario; these only inform the reference chosen by the scene.
+
+Each cell's disturbance wakes at full tolerance and clears below half tolerance. Reset starts conservatively at half tolerance. A separable square maximum buffers the binary disturbance and incompatible-material flags. Orange, waiting and connectivity states never feed back into local disturbance history. Cells outside the buffer must remain quiet for the configured delay; a four-neighbour traversal then distinguishes reservoir-connected candidates from isolated quiet patches.
+
+| Colour | Meaning |
+| --- | --- |
+| Green | Quiet compatible candidate connected to an explicitly configured reservoir |
+| Yellow | Local velocity/pressure disturbance, retained until below half tolerance |
+| Blue | Ingredient/phase content differs from the ambient reference |
+| Orange | Fixed-width buffer around yellow/blue sources |
+| Grey | Waiting for sustained quiet |
+| Purple | Quiet compatible patch without a reservoir connection |
+
+The panel exposes tolerances, quiet time, buffer, opacity, counts and classification time. Speed, pressure and pressure-acceleration counts overlap and use full tolerance; they do not sum to the hysteretic yellow count. A candidate is a proposal, not an error bound for omitting pressure or transport work.
+
+`FluidAmbientMaskDisplay` uploads one byte per cell and caches its palette texture until the observer revision changes. It has no physics sampler, history, audit or statistics readback. Build/run `FluidAmbientMaskTests` for the CPU classification and unchanged-physics checks; `FluidSimGPUTests --mask-display-only` (CTest `FluidAmbientMaskDisplayTests`) checks the display palette, caching and graphics-state preservation.
+
+### Scenario captures
+
+Select `scenario_index` in `FluidSim.h`. Each scenario supplies geometry, `frame_time` and the half-open capture interval `[capture_i0, capture_i1)`. Frame zero follows the first frame of physics. Cosine captures frames 0–49 at 0.04 seconds/frame; crashing-wave captures frames 40–119 at 0.08 seconds/frame.
+
+Headless runs with `BITLOOP_DEV_MODE=ON` request one `grid` snapshot per successful frame in that interval. It is a single native-resolution image of the same translucent overlay shown in the viewport. For explicit pixel classification analysis, `captureTraceSnapshot("ambient-mask", ...)` returns the current categorical mask alone; it is not an alternate experiment or view mode. Trace metrics record all six categories, overlapping disturbance reasons, damping, opacity, and physics/mask CPU times. No fluid fields are downloaded for capture.
+
+```powershell
+Start-Process -FilePath (Resolve-Path build/msvc-release-codex/app/app.exe) -ArgumentList '--headless --project FluidSim --frames 50 --dt 0.04 --surface 256x256 --trace .codex/runs/cosine --trace-format full --snapshots' -WindowStyle Hidden -Wait
+```
+
+Match `--dt` to the selected scenario's `frame_time` for consistent trace timestamps. Use 120 frames and 0.08 seconds for the crashing-wave scenario. Interactive play does not request these captures.
+
+### Prescribed-pressure engine boundary
+
+The CPU scene enables the engine's tested `top_ambient` boundary API with zero pressure and the scene atmosphere fractions. Configure it before upload with pressure at the upper face and gas ingredient fractions. Inflow brings the supplied composition and zero donor velocity; outflow carries interior ingredients and momentum. Boundary exchange counters track mass and advective momentum. `FluidAmbientTests` covers equilibrium, multigrid symmetry/positivity, pressure-reference agreement, gas drag and ingredient exchange. There is no retained crop selector or comparison benchmark in the scene or tests.
+
 ## One physics substep
 
 Read `FluidGrid::step()` first:
 
 ```cpp
 advect(dt);
+dampGasVelocity(dt); // CPU, optional; zero rate returns immediately
 applyGravity(dt);
 return project(dt, max_iterations, divergence_tolerance);
 ```
 
 1. **Transport material and momentum:** reconstruct interfaces, calculate liquid-volume transfers, transport component masses and carry both momentum components through X, then Y. After each material pass, recover velocity by dividing momentum by the new face density. Repeat with smaller transport steps when needed to limit outflow.
-2. **Apply gravity:** add acceleration to interior vertical faces. Both materials receive the same acceleration; density affects their pressure response.
-3. **Project pressure:** rebuild density coefficients from the current component masses, close the tank walls, solve for pressure and correct velocity until cell divergence meets the requested tolerance.
+2. **Apply forces:** the CPU optionally damps gas-only velocities, then gravity adds acceleration to vertical faces, including the optional open face. Damping before gravity preserves the hydrostatic background. Both materials receive the same gravitational acceleration; density affects their pressure response.
+3. **Project pressure:** rebuild density coefficients from the current component masses, apply the selected closed/open boundaries, solve for pressure and correct velocity until cell divergence meets the requested tolerance.
 Transport uses the previous substep's projected velocity. The scene starts with zero velocity, which already satisfies incompressibility. An experiment that directly changes velocities must project them before transport. The final projection handles the transported state and gravity, preparing the next substep.
 
-`viewportProcess()` currently fixes each frame at 0.02 simulated seconds and divides it into five equal steps of 0.004 second. It calls `fluid.step(step, 2000, 1e-3)` for either selected backend. The CPU regression reference retains its double-precision `1e-8` checks; the scene uses the same explicit float-compatible target for comparisons. The engine advances exactly the time passed to it; it does not know about frames or recording. Older measurements below used six 1/120-second steps per frame; compare timing only with matched timestep and simulated duration.
+`viewportProcess()` uses the selected scenario's `frame_time` and divides it into `ceil(frame_time * 60)` equal steps: three for the cosine scenario, five for the crashing wave. It calls `fluid.step(step, 2000, 1e-3)` for either selected backend. The CPU regression reference retains its double-precision `1e-8` checks; the scene uses the same explicit float-compatible target for comparisons. The engine advances exactly the time passed to it; it does not know about frames or recording. Older measurements below used different timesteps; compare timing only with matched timestep and simulated duration.
 
 On failed final projection, `step()` returns an unconverged result after transport and gravity have already run. It does **not** roll back material, velocity or pressure. The scene pauses and reports the failure rather than continuing with that state. A zero timestep leaves state unchanged.
 
@@ -342,7 +396,7 @@ Choose **one** with the user; the list is not a commitment to implement everythi
 | General 2D acceleration | Uniform gravity reproduces today's result; a smooth custom field moves fluid in-plane. Mandelbrot depth can generate that field; it adds no water-depth variable |
 | Colour labels | Two colours travel with the same fluid properties. Colour alone does not require a new physical element or pressure solve |
 | Material-dependent surface tension | A droplet tends towards a round interface when enabled; zero tension preserves the no-tension case |
-| Prescribed ambient exterior | Open liquid surface sees a chosen exterior pressure; resolved-gas mode remains a separate explicit choice |
+| Omit eligible ambient cells | Use the per-cell mask with irregular boundaries, preserving the fine-cell resolution and accounting for material/momentum exchange; compare against the fully simulated reference |
 | Trapped gas pockets | A sealed bubble resists collapse through a pocket-pressure/volume model or resolved gas; connection to the exterior changes its treatment |
 
 Keep the current engine concrete until a second working case needs an abstraction. Start generalising forces where they are applied, material properties where coefficients are built, and exterior conditions where pressure boundaries are imposed. Avoid a feature registry, automatic physics selection or a collection of unused switches now.

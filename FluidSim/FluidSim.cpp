@@ -1,6 +1,8 @@
 #include "FluidSim.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <chrono>
 
 SIM_BEG;
 
@@ -60,6 +62,9 @@ void FluidSim_Project::projectPrepare(Layout& layout)
 
 void FluidSim_Scene::UI::sidebar()
 {
+    if (ImGui::Button("Restart scene"))
+        bl_schedule([](FluidSim_Scene& scene) { scene.restartSimulation(); });
+
     if (ImGui::CollapsingHeaderBox("View", true))
     {
         bl_scoped(camera);
@@ -67,12 +72,66 @@ void FluidSim_Scene::UI::sidebar()
         camera.populateUI();
         ImGui::EndCollapsingHeaderBox();
     }
+    if (ImGui::CollapsingHeaderBox("Atmosphere", true))
+    {
+        bl_scoped(atmosphere_damping);
+        bl_view(last_physics_ms);
+        ImGui::Text("Physics: %.2f ms / frame", last_physics_ms);
+        if constexpr (!decltype(FluidSim_Scene::fluid)::requires_render_thread)
+        {
+            ImGui::SliderFloat("Gas damping (per second)", &atmosphere_damping, 0.0f, 2.0f, "%.2f");
+            ImGui::TextWrapped("Zero disables damping. Applies to gas-only velocities in every scenario, with or without the overlay.");
+        }
+        else ImGui::TextUnformatted("Gas damping currently requires the CPU backend.");
+        ImGui::EndCollapsingHeaderBox();
+    }
+    if constexpr (!decltype(FluidSim_Scene::fluid)::requires_render_thread)
+    {
+        if (ImGui::CollapsingHeaderBox("Ambient eligibility mask", true))
+        {
+            bl_scoped(ambient_mask_enabled, ambient_mask_settings, mask_opacity);
+            bl_view(ambient_mask_statistics, last_mask_ms);
+            ImGui::Checkbox("Show ambient eligibility overlay", &ambient_mask_enabled);
+            ImGui::TextWrapped("Clouds trace the atmosphere's motion. Air and Cloud count as the same atmosphere for this mask; both still move normally. Full physics runs everywhere.");
+            auto& s = ambient_mask_settings;
+            ImGui::SliderFloat("Speed tolerance", &s.speed_tolerance, 0.01f, 100.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Pressure departure tolerance", &s.pressure_tolerance, 0.01f, 100.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Pressure acceleration tolerance", &s.acceleration_tolerance, 0.01f, 1000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Composition tolerance", &s.composition_tolerance, 0.00001f, 0.1f, "%.5f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Required quiet time", &s.quiet_seconds, 0.0f, 2.0f);
+            ImGui::SliderInt("Disturbance buffer (cells)", &s.halo_cells, 0, 8);
+            ImGui::SliderFloat("Mask opacity", &mask_opacity, 0.0f, 1.0f);
+            const auto& counts = ambient_mask_statistics;
+            ImGui::Text("Candidates: %d / %d (%.1f%%)", counts.candidates, counts.cells,
+                100.0 * counts.candidates / std::max(1, counts.cells));
+            ImGui::Text("CPU mask: %.3f ms / frame", last_mask_ms);
+            ImGui::Text("Above full tolerance (overlapping):");
+            ImGui::Text("Speed %d | Pressure %d | Acceleration %d", counts.speed, counts.pressure, counts.acceleration);
+            ImGui::TextWrapped("Green: reservoir-connected candidate. Yellow: disturbed. Blue: different material. Orange: buffer. Grey: waiting. Purple: quiet but disconnected.");
+            ImGui::TextWrapped("Pressure is compared with the supplied ambient background. Each cell wakes at full tolerance and clears below half. Orange buffers these states; quiet time follows.");
+            ImGui::EndCollapsingHeaderBox();
+        }
+    }
+}
 
+void FluidSim_Scene::observeAmbientMask(double dt)
+{
+    const auto started = std::chrono::steady_clock::now();
+    [&]<class Grid>(const Grid& grid) {
+        if constexpr (!Grid::requires_render_thread)
+            ambient_mask.observe(grid, dt, ambient_mask_settings);
+    }(fluid);
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    mask_seconds += elapsed;
+    last_mask_ms += elapsed * 1000;
+    ambient_mask_statistics = ambient_mask.statistics;
+    observed_ambient_mask_settings = ambient_mask_settings;
+    ambient_mask_observed = true;
 }
 
 void FluidSim_Scene::initializePool(double amplitude)
 {
-    constexpr double pi = 3.14159265358979323846;
+    //constexpr double pi = 3.14159265358979323846;
     const size_t cell_count = size_t(fluid.width) * fluid.height;
 
     using FluidGridType = decltype(fluid);
@@ -90,13 +149,28 @@ void FluidSim_Scene::initializePool(double amplitude)
     initial.gas_mass.assign(fluid.gas_mixture.components.size(),
         std::vector<Scalar>(cell_count, 0.0));
 
+    (void)amplitude;
+
     for (int y = 0; y < fluid.height; ++y)
     {
         for (int x = 0; x < fluid.width; ++x)
         {
             // the experiment starts with a sloped, rippled surface
-            const double surface =
-                x + fluid.height * (0.5 + amplitude * std::cos(pi * (x*3 + 0.5) / fluid.width));
+            const double tx = double(x) / double(fluid.width);
+
+            //const double surface = (fluid.height * 0.7) + (std::cos(tx * 20.0) * double(fluid.height) * 0.02);
+            double surface;
+
+            switch (scenario.type)
+            {
+                case ScenarioType::COSINE_WAVES:
+                    surface = (grid_h * 0.7) + (std::cos(tx * 20.0) * double(grid_h) * 0.02);
+                    break;
+
+                case ScenarioType::CRASHING_WAVE:
+                    surface = (double(grid_h) * 0.7) + tx * (double(grid_h) * 0.5);
+                    break;
+            }
 
             // measure how much of this cell lies below the liquid surface
             const int i = y * fluid.width + x;
@@ -105,7 +179,7 @@ void FluidSim_Scene::initializePool(double amplitude)
             initial.liquid_fraction[i] = Scalar(fraction);
 
             // Fill the left quarter's liquid with Red; use Water elsewhere.
-            const double red_share = x < fluid.width / 4 ? 1.0 : 0.0;
+            const double red_share = 0.0;// x < fluid.width / 4 ? 1.0 : 0.0;
 
             for (size_t k = 0; k < fluid.liquid_mixture.components.size(); ++k)
             {
@@ -159,6 +233,24 @@ void FluidSim_Scene::sceneStart()
     surface.setFragmentSource(fluid_shader_src);
 }
 
+void FluidSim_Scene::restartSimulation()
+{
+    // Refill the current scenario; keep controls, camera and engine options intact.
+    initializePool();
+    simulation_failed = false;
+    simulation_time = real_time = 0;
+    physics_seconds = last_physics_ms = 0;
+    mask_seconds = last_mask_ms = 0;
+    ambient_mask.reset();
+    ambient_mask_observed = false;
+    ambient_mask_statistics = {};
+#ifdef BITLOOP_DEV_MODE
+    processed_frames = 0;
+#endif
+    if (ambient_mask_enabled) observeAmbientMask(0);
+    requestRedraw(true);
+}
+
 void FluidSim_Scene::sceneMounted([[maybe_unused]] Viewport* ctx)
 {
     /// Initialize viewport.
@@ -182,6 +274,7 @@ void FluidSim_Scene::sceneDestroy()
 {
     renderThreadQueue().post([this]()
     {
+        mask_display.destroy();
         fluid.destroy();
         fluid_display.destroy();
         surface.destroy();
@@ -195,6 +288,9 @@ void FluidSim_Scene::sceneProcess(
     [[maybe_unused]] double dt
 )
 {
+    if (!ambient_mask_enabled) ambient_mask_observed = false;
+    else if (!ambient_mask_observed || observed_ambient_mask_settings != ambient_mask_settings)
+        observeAmbientMask(0);
     // redraw the scene every frame
     requestRedraw(true);
 }
@@ -207,7 +303,8 @@ void FluidSim_Scene::viewportProcess(
         return;
 
     // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
-    const double frame_time = 0.02;// std::min(dt, 0.05);
+    //const double frame_time = 0.04;// std::min(dt, 0.05);
+    const double frame_time = scenario.frame_time;
     const int steps_per_frame = 60;
     //const double play_speed = 0.8;
 
@@ -235,10 +332,19 @@ void FluidSim_Scene::viewportProcess(
         ///}
         ///rain.commit();
 
+        last_physics_ms = 0;
+        last_mask_ms = 0;
+        [&]<class Grid>(Grid& grid) {
+            if constexpr (!Grid::requires_render_thread) grid.gas_damping_rate = atmosphere_damping;
+        }(fluid);
         for (int substep = 0; substep < step_count; ++substep)
         {
             // use one float-compatible tolerance for backend comparisons
+            const auto started = std::chrono::steady_clock::now();
             const auto result = fluid.step(step, 2000, 1e-3);
+            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            physics_seconds += elapsed;
+            last_physics_ms += elapsed * 1000;
 
             if (!result.converged)
             {
@@ -248,15 +354,28 @@ void FluidSim_Scene::viewportProcess(
                 simulation_failed = true;
                 return;
             }
+            if (ambient_mask_enabled) observeAmbientMask(step);
         }
     });
+#ifdef BITLOOP_DEV_MODE
+    if (!simulation_failed)
+    {
+        if (getProject().isHeadless() && processed_frames >= scenario.capture_i0 && processed_frames < scenario.capture_i1)
+            traceSnapshot("grid", "scenario capture interval");
+        ++processed_frames;
+    }
+#endif
 }
 
 void FluidSim_Scene::renderFluidSurface() const
 {
-    surface.render(fluid.width, fluid.height, [&](const ShaderSurface& shader)
+    surface.render(grid_w, grid_h, [&](const ShaderSurface& shader)
     {
-        shader.bindTexture2D("u_color", fluid_display.texture(fluid));
+        const auto colour = fluid_display.texture(fluid);
+        shader.bindTexture2D("u_color", colour);
+        const auto overlay = ambient_mask_enabled ? mask_display.texture(ambient_mask) : 0;
+        shader.bindTexture2D("u_mask", overlay ? overlay : colour);
+        shader.setUniform1f("u_mask_opacity", overlay ? mask_opacity : 0.0f);
     });
 }
 
@@ -267,10 +386,7 @@ void FluidSim_Scene::viewportDraw(Viewport* ctx) const
     renderFluidSurface();
 
     DQuad bounds{
-        fluid.origin.x,
-        fluid.origin.y,
-        fluid.origin.x + fluid.width * fluid.cell_size,
-        fluid.origin.y + fluid.height * fluid.cell_size
+        0.0, 0.0, world_w, world_h
     };
 
     ctx->worldMode();
@@ -297,22 +413,52 @@ void FluidSim_Scene::onEvent(Event e)
 // void FluidSim_Scene::onKeyUp(KeyEvent e) {}
 
 #ifdef BITLOOP_DEV_MODE
-void FluidSim_Scene::traceFrame([[maybe_unused]] SimTraceFrame& frame) const
+void FluidSim_Scene::traceFrame(SimTraceFrame& frame) const
 {
+    frame.metric("scenario_index", scenario_index);
+    frame.metric("simulation_time", simulation_time);
+    frame.metric("frame_time", scenario.frame_time);
+    frame.metric("simulation_failed", simulation_failed);
+    frame.metric("simulated_cells", fluid.width * fluid.height);
+    frame.metric("physics_seconds", physics_seconds);
+    frame.metric("last_physics_ms", last_physics_ms);
+    frame.metric("atmosphere_damping", atmosphere_damping);
+    frame.metric("mask_opacity", ambient_mask_enabled ? mask_opacity : 0.0f);
+    frame.metric("mask_seconds", mask_seconds);
+    frame.metric("last_mask_ms", last_mask_ms);
+    const auto& m = ambient_mask_statistics;
+    frame.metric("ambient_cells", m.cells);
+    frame.metric("ambient_candidates", m.candidates);
+    frame.metric("ambient_material", m.material);
+    frame.metric("ambient_disturbed", m.disturbed);
+    frame.metric("ambient_buffer", m.buffer);
+    frame.metric("ambient_waiting", m.waiting);
+    frame.metric("ambient_isolated", m.isolated);
+    frame.metric("ambient_speed_exceeded", m.speed);
+    frame.metric("ambient_pressure_exceeded", m.pressure);
+    frame.metric("ambient_acceleration_exceeded", m.acceleration);
 }
 
 bool FluidSim_Scene::captureTraceSnapshot(std::string_view route, SimSnapshotImage& image) const
 {
-    if (route != "grid")
-        return false;
-
-    renderFluidSurface();
-    image.resolution = IVec2(fluid.width, fluid.height);
+    std::uint32_t texture;
+    if (route == "ambient-mask" && ambient_mask_enabled)
+    {
+        image.resolution = IVec2(fluid.width, fluid.height);
+        texture = mask_display.texture(ambient_mask);
+    }
+    else if (route == "grid")
+    {
+        renderFluidSurface();
+        image.resolution = IVec2(grid_w, grid_h);
+        texture = surface.texture();
+    }
+    else return false;
     CapturePreprocessParams params;
     params.src_resolution = params.dst_resolution = image.resolution;
     // texture row zero already represents the top grid row
     params.flip_y = false;
-    return snapshot_preprocessor.preprocessToFrame(surface.texture(), params, image.pixels);
+    return snapshot_preprocessor.preprocessToFrame(texture, params, image.pixels);
 }
 
 bool FluidSim_Scene::saveCheckpoint(SimCheckpointWriter& writer) const

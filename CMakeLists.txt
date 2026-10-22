@@ -14,6 +14,7 @@ file(GLOB_RECURSE SIM_SOURCES CONFIGURE_DEPENDS
     "${SRC_DIR}/*.hpp"
 )
 list(REMOVE_ITEM SIM_SOURCES 
+    "${SRC_DIR}/FluidAmbientMask.cpp"
     "${SRC_DIR}/FluidGrid.cpp" 
     "${SRC_DIR}/PressureMultigrid.cpp"
     "${SRC_DIR}/FluidGridGPU.cpp"
@@ -24,7 +25,7 @@ bitloop_new_project(FluidSim ${SIM_SOURCES})
 bitloop_finalize()
 
 if(NOT BITLOOP_DISCOVERY)
-    add_library(FluidSimEngine STATIC "${SRC_DIR}/FluidGrid.cpp" "${SRC_DIR}/PressureMultigrid.cpp")
+    add_library(FluidSimEngine STATIC "${SRC_DIR}/FluidGrid.cpp" "${SRC_DIR}/PressureMultigrid.cpp" "${SRC_DIR}/FluidAmbientMask.cpp")
     target_include_directories(FluidSimEngine PUBLIC "${SRC_DIR}")
     target_compile_features(FluidSimEngine PUBLIC cxx_std_23)
     target_link_libraries(FluidSimEngine PUBLIC bitloop::bitloop)
@@ -44,10 +45,18 @@ if(NOT BITLOOP_DISCOVERY)
         add_executable(FluidSimTests tests/FluidGridTests.cpp)
         target_link_libraries(FluidSimTests PRIVATE FluidSimEngine)
         add_test(NAME FluidGridTests COMMAND FluidSimTests)
+        add_executable(FluidAmbientTests tests/FluidAmbientTests.cpp)
+        target_link_libraries(FluidAmbientTests PRIVATE FluidSimEngine)
+        add_test(NAME FluidAmbientTests COMMAND FluidAmbientTests)
+        add_executable(FluidAmbientMaskTests tests/FluidAmbientMaskTests.cpp)
+        target_link_libraries(FluidAmbientMaskTests PRIVATE FluidSimEngine)
+        add_test(NAME FluidAmbientMaskTests COMMAND FluidAmbientMaskTests)
         if(NOT EMSCRIPTEN)
-            add_executable(FluidSimGPUTests tests/FluidGridGPUTests.cpp tests/FluidGridGPUCoarseTests.cpp "${SRC_DIR}/FluidGridDisplay.cpp")
+            add_executable(FluidSimGPUTests tests/FluidGridGPUTests.cpp tests/FluidGridGPUCoarseTests.cpp
+                tests/FluidAmbientMaskDisplayTests.cpp "${SRC_DIR}/FluidGridDisplay.cpp" "${SRC_DIR}/FluidAmbientMaskDisplay.cpp")
             target_link_libraries(FluidSimGPUTests PRIVATE FluidSimEngineGPU FluidSimEngine)
             add_test(NAME FluidGridGPUTests COMMAND FluidSimGPUTests)
+            add_test(NAME FluidAmbientMaskDisplayTests COMMAND FluidSimGPUTests --mask-display-only)
         endif()
     endif()
 endif()

@@ -3,6 +3,7 @@
 #include "FluidGridEditTests.h"
 #include "FluidGridGPU.h"
 #include "FluidGridGPUCoarseTests.h"
+#include "FluidAmbientMaskDisplayTests.h"
 #include "FluidGridDisplay.h"
 #include "PressureMultigridGPU.h"
 #include <SDL3/SDL.h>
@@ -927,6 +928,11 @@ int main(int argc, char** argv)
         std::cout << std::unitbuf;
         std::cerr << std::unitbuf;
         Context context;
+        if (argc == 2 && std::string(argv[1]) == "--mask-display-only")
+        {
+            fluid::test::ambientMaskDisplayRegressions();
+            return 0;
+        }
         if (argc >= 2 && (std::string(argv[1]) == "--coarse-benchmark" || std::string(argv[1]) == "--coarse-compare"))
         {
             fluid::test::coarsePressureBenchmark(argc > 2 ? std::stoi(argv[2]) : 512, argc > 3 ? std::stoi(argv[3]) : 0,
@@ -993,6 +999,7 @@ int main(int argc, char** argv)
         graphicsStateIsPreserved(8, 8, 0);
         graphicsStateIsPreserved(65, 37);
         fluid::test::coarsePressureRegressions();
+        fluid::test::ambientMaskDisplayRegressions();
         require(glGetError() == GL_NO_ERROR, "GL error during GPU regressions");
         std::cout << "PASS GPU regressions\n";
         return 0;

@@ -3,6 +3,8 @@
 #include "FluidGrid.h"
 #include "FluidGridGPU.h"
 #include "FluidGridDisplay.h"
+#include "FluidAmbientMaskDisplay.h"
+#include "FluidAmbientMask.h"
 #include <utility>
 
 SIM_BEG;
@@ -13,14 +15,36 @@ using fluid::ElementId;
 using fluid::FluidGridGPU;
 using fluid::FluidGridDisplay;
 
+enum ScenarioType
+{
+    COSINE_WAVES,
+    CRASHING_WAVE
+};
+
+struct Scenario
+{
+    ScenarioType type;
+    int capture_i0; // inclusive, zero-based post-step frame
+    int capture_i1; // exclusive
+    double frame_time;
+};
+
 struct FluidSim_Scene : public Scene<FluidSim_Scene>
 {
     CameraInfo       camera;
     CameraNavigator  navigator;
 
     /// ─────── Variables ───────
-    int grid_w = 1024;
-    int grid_h = 1024;
+    int grid_w = 256;
+    int grid_h = 256;
+
+    std::vector<Scenario> scenarios = {
+        {COSINE_WAVES, 0, 50, 0.04},
+        {CRASHING_WAVE, 40, 120, 0.08}
+    };
+
+    const int scenario_index = 1;
+    Scenario scenario = scenarios[scenario_index];
 
     double cell_size = 1.0;
 
@@ -33,6 +57,11 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     double world_h = double(grid_h) * cell_size;
 
     FluidGrid fluid;
+    double physics_seconds = 0, last_physics_ms = 0;
+    float atmosphere_damping = 0.2f; // s^-1, every scenario; zero disables damping
+
+    // Reservoir gas shares, in mixture order; the initial cloud pattern varies their split.
+    const std::vector<double> atmosphere_fractions = {0.5, 0.5}; // Air + Cloud, summing to one
 
     ElementId air_element{};
     ElementId water_element{};
@@ -43,20 +72,30 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
         #version 300 es
         precision highp float;
 
-        uniform sampler2D u_color;
-        
+        uniform sampler2D u_color, u_mask;
+        uniform float u_mask_opacity;
         in vec2 v_uv;
         out vec4 outColor;
-
         void main()
         {
             outColor = texture(u_color, v_uv);
+            if (u_mask_opacity > 0.0)
+                outColor.rgb = mix(outColor.rgb, texture(u_mask, v_uv).rgb, u_mask_opacity);
         }
     )";
 
     ShaderSurface surface;
     FluidGridDisplay fluid_display;
+    fluid::FluidAmbientMaskDisplay mask_display;
+    fluid::FluidAmbientMask ambient_mask;
+    fluid::FluidAmbientMask::Settings ambient_mask_settings, observed_ambient_mask_settings;
+    fluid::FluidAmbientMask::Statistics ambient_mask_statistics;
+    bool ambient_mask_enabled = !decltype(fluid)::requires_render_thread, ambient_mask_observed = false;
+    float mask_opacity = 0.35f;
+    double mask_seconds = 0, last_mask_ms = 0;
+    void observeAmbientMask(double dt);
     void initializePool(double amplitude = 0.04);
+    void restartSimulation();
     void renderFluidSurface() const;
 
     // GPU work belongs to the render owner; CPU physics stays on the simulation worker
@@ -69,6 +108,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
             operation();
     }
 #ifdef BITLOOP_DEV_MODE
+    int processed_frames = 0;
     mutable CapturePreprocessor snapshot_preprocessor;
 #endif
 
@@ -107,6 +147,19 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
             {air_element, atmosphere_density},
             {cloud_element, atmosphere_density}
         };
+        ambient_mask_settings.liquid_fractions = {0, 0};
+        ambient_mask_settings.gas_fractions = atmosphere_fractions;
+        // Air and Cloud have identical physics here; their colours trace atmospheric motion.
+        ambient_mask_settings.gas_tracer_elements = {air_element, cloud_element};
+        ambient_mask_settings.pressure_tolerance = 3.0f;
+        // The scene supplies its background; the classifier knows neither gravity nor Air.
+        ambient_mask_settings.pressure_gradient.y = atmosphere_density * fluid.gravity_y;
+        // Restore the experiment's explicit ambient boundary and its anchored pressure gauge.
+        [&]<class Grid>(Grid& grid) {
+            if constexpr (!Grid::requires_render_thread)
+                grid.top_ambient = FluidGrid::AmbientBoundary{0, atmosphere_fractions};
+        }(fluid);
+        ambient_mask_settings.reservoir_edges = fluid::FluidAmbientMask::Top;
     }
 
     struct UI : BufferedInterfaceModel

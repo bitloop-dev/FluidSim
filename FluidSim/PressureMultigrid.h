@@ -10,9 +10,10 @@ class PressureMultigrid
 {
 public:
     PressureMultigrid(int width, int height);
-    bool rebuild(const std::vector<double>& inv_density_u, const std::vector<double>& inv_density_v);
+    bool rebuild(const std::vector<double>& inv_density_u, const std::vector<double>& inv_density_v,
+        bool fixed_top_pressure = false);
 
-    // Apply one fixed V-cycle; the caller removes the correction's arbitrary constant.
+    // Apply one fixed V-cycle. Only closed domains have an arbitrary pressure constant.
     void apply(const std::vector<double>& residual, std::vector<double>& correction, double residual_mean);
 
 private:
@@ -31,7 +32,7 @@ private:
     {
         int width, height, stride;
         std::vector<double> center_x, center_y;
-        // Cell-aligned right/bottom face weights; wall weights and the padded halo stay zero.
+        // Cell-aligned face weights; prescribed-pressure faces couple to the zero correction halo.
         std::vector<double> right, down, inverse_diagonal;
         std::vector<double> rhs, solution, residual;
         std::vector<Interpolation> prolong_x, prolong_y;
@@ -43,6 +44,7 @@ private:
 
     std::vector<Level> levels;
     std::vector<double> coarse_factor, coarse_rhs;
+    bool fixed_top_pressure = false;
 
     static void buildTransfers(Level& fine, const Level& coarse);
     static void coarsen(const Level& fine, Level& coarse);

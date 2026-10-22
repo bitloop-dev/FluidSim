@@ -4,6 +4,7 @@
 #include "PressureMultigrid.h"
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
+#include <optional>
 
 #include <bitloop/core/types.h>
 
@@ -32,6 +33,21 @@ struct FluidGrid
     bl::DVec2 origin = {};
 
     double gravity_y = 100.0;
+    double gas_damping_rate = 0.0; // per second; zero disables optional drag toward stillness
+
+    // Opt-in stationary gas reservoir at the upper face. Configure before upload().
+    // Pressure is prescribed at that face; fractions follow gas_mixture order.
+    struct AmbientBoundary
+    {
+        double pressure = 0.0;
+        std::vector<double> gas_volume_fractions;
+    };
+    std::optional<AmbientBoundary> top_ambient;
+
+    // Cumulative exchange into the domain, reset by upload(). Momentum here is
+    // advective exchange only; pressure forces and wall impulses are separate.
+    std::vector<double> boundary_liquid_mass, boundary_gas_mass;
+    bl::DVec2 boundary_momentum{};
 
     enum class PressurePreconditioner { Diagonal, Multigrid };
     PressurePreconditioner pressure_preconditioner = PressurePreconditioner::Multigrid;
@@ -73,6 +89,7 @@ struct FluidGrid
 
     // transport requires a divergence-free velocity field; step() supplies the previous projection
     void advect(double dt);
+    void dampGasVelocity(double dt);
     void applyGravity(double dt);
 
     // divergence_tolerance is the maximum permitted cell divergence, in inverse seconds
@@ -143,7 +160,7 @@ private:
         double step, const std::vector<Scalar>& mass, bool is_liquid);
 
     void rebuildComponentTransfersY(
-        double step, const std::vector<Scalar>& mass, bool is_liquid);
+        double step, const std::vector<Scalar>& mass, bool is_liquid, double ambient_mass);
 
     void freezeComponentCorrections();
     void advectComponents(double step, bool horizontal);
