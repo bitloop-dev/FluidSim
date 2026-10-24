@@ -1,0 +1,13 @@
+# Current work: adaptive fluid performance — CPU extraction complete
+
+**Parent / return:** [adaptive fluid performance](WORK_STACK.md#adaptive-fluid-performance). The long-term target remains worthwhile automatic resolution for general gas/liquid mixtures, with desktop and browser equally important for GPU work.
+
+**Completed scope:** all production adaptive CPU simulation now uses our strictly 2D code: patch storage, ghost/face exchange, conservative transfers/regrid, clustering and both pressure paths. AMReX/Hydro are isolated in the optional reference project; production has no backend selector, headers, linkage or runtime initialization. The normal executable and a standalone CPU library without AMReX, Bitloop or OpenMP build successfully. [Numerical/source contract](reference/engine/README.md).
+
+**Latest evidence:** matched cloud-free 512² CRASHING_WAVE, max32, relaxed 10/10/.5/.5 selection, damping2, two 60-frame pairs. Complete simulation cost including setup/copies/selection/regrid averages 20.73 → 13.06 s versus the upstream engine (37% lower); transport 28% and pressure 48% lower. Setup alone is slightly higher. Our mean active-cell count is slightly higher, so fewer simulated cells do not explain the gain. Material and committed-grid captures at 1/20/40/60 show close surfaces and finest liquid; small droplet and gas-patch differences remain. Source settings and projection cadence are preserved; capture hooks removed. [Report, timings and visuals](.codex/runs/run0100_20261024_cpu_extraction/findings.md).
+
+**Validation / limits:** upstream comparisons cover clustering/splitting, poisoned ghost refill, conservative remaps, both transport branches and pressure through six levels. Transfers/transport match exactly on identical inputs; projected fields agree within 3e-14 relative error. Fourteen pressure oracle cases and short production preview/CFL/liquid/selection checks pass. Independent evolving trajectories are not bitwise identical; short-run comparison does not establish long-time impact/bubble behavior, the older optimized-uniform performance target, or GPU gains.
+
+**Next unresolved question (proposal, not authorization):** agree whether to begin a desktop/browser GPU implementation gate using this CPU reference, or return first to the matched cloud-free 1024² liquid-versus-old-uniform performance/quality gate. Read the parent resume point before changing scope. No additional implementation is currently agreed.
+
+**Guardrails:** retain source-derived numerics, real coarse/fine state, one physical engine, current quality policy and visual checks; no hidden full-fine simulation or ambient substitution. Enduring instructions are in AGENTS.md and DEVELOPMENT.md.

@@ -160,7 +160,8 @@ void explicitCacheInvalidationMatchesFreshState()
             require(edited.step(0.004, 2000, 1e-8).converged && forced.step(0.004, 2000, 1e-8).converged,
                 "cached/forced-refresh transport failed");
             require(edited.u == forced.u && edited.v == forced.v && edited.pressure == forced.pressure &&
-                edited.liquid_fraction == forced.liquid_fraction && edited.liquid_mass == forced.liquid_mass && edited.gas_mass == forced.gas_mass,
+                edited.liquid_fraction == forced.liquid_fraction && edited.liquid_mass == forced.liquid_mass && edited.gas_mass == forced.gas_mass &&
+                edited.density == forced.density,
                 "automatic transport invalidation differs from forced cache refresh");
         }
     }
@@ -406,6 +407,118 @@ void miscibleComponentsConserveMassAndVolume()
     std::cout << "component mass drift=" << largest_mass_drift << " phase-volume error=" << largest_volume_error << '\n';
 }
 
+void purePhasesAcceptNewMaterial()
+{
+    // A previously absent phase must resume transport, even for a tiny new trace.
+    for (bool liquid_background : {false, true})
+    for (double trace : {1e-14, 0.25})
+    {
+        FluidGrid grid(32, 24, 1);
+        std::fill(grid.liquid_fraction.begin(), grid.liquid_fraction.end(), liquid_background ? 1.0 : 0.0);
+        initializeTestMaterials(grid, 1, 1);
+        grid.advect(0.1);
+        for (int y = 0; y < grid.height; ++y)
+        {
+            const int i = y * grid.width + 10;
+            const double f = grid.liquid_fraction[i] = liquid_background ? 1 - trace : trace;
+            grid.liquid_mass[0][i] = f;
+            grid.gas_mass[0][i] = 1 - f;
+        }
+        grid.invalidateCaches();
+        auto& introduced = liquid_background ? grid.gas_mass[0] : grid.liquid_mass[0];
+        const double initial_mass = std::accumulate(introduced.begin(), introduced.end(), 0.0);
+        // Translate toward the side occupied by this reconstructed thin strip.
+        std::fill(grid.u.begin(), grid.u.end(), liquid_background ? 0.5 : -0.5);
+        grid.advect(1.0);
+        const double final_mass = std::accumulate(introduced.begin(), introduced.end(), 0.0);
+        require(std::abs(final_mass - initial_mass) < initial_mass * 1e-10, "new phase trace was lost or created");
+        double outside = 0;
+        for (int y = 0; y < grid.height; ++y)
+            for (int x = 0; x < grid.width; ++x)
+                if (x != 10) outside += introduced[y * grid.width + x];
+        require(outside > 0, "previously absent phase did not start moving");
+    }
+
+    FluidGrid open(16, 12, 1);
+    open.top_ambient = FluidGrid::AmbientBoundary{0, {1}};
+    std::fill(open.liquid_fraction.begin(), open.liquid_fraction.end(), 1.0);
+    initializeTestMaterials(open, 1, 1);
+    open.advect(0.1);
+    // Discrete curl exchanges liquid for gas at the top while keeping zero divergence.
+    auto psi = [&](int x, int y) { return 0.01 * x * (open.width - x) * (open.height - y) / open.height; };
+    for (int y = 0; y < open.height; ++y)
+        for (int x = 0; x <= open.width; ++x) open.u[open.uIndex(x, y)] = psi(x, y + 1) - psi(x, y);
+    for (int y = 0; y <= open.height; ++y)
+        for (int x = 0; x < open.width; ++x) open.v[open.vIndex(x, y)] = psi(x, y) - psi(x + 1, y);
+    open.advect(0.25);
+    const double gas = std::accumulate(open.gas_mass[0].begin(), open.gas_mass[0].end(), 0.0);
+    const double liquid = std::accumulate(open.liquid_mass[0].begin(), open.liquid_mass[0].end(), 0.0);
+    require(gas > 0 && std::abs(gas - open.boundary_gas_mass[0]) < 1e-12, "absent gas failed to enter through the ambient boundary");
+    require(std::abs(liquid - 16 * 12 - open.boundary_liquid_mass[0]) < 1e-11, "pure-liquid outflow budget changed");
+}
+
+void ingredientLabelsPreserveBulkMotion()
+{
+    // Splitting a material into differently coloured ingredients must not change its physics.
+    for (bool open : {false, true})
+    {
+        FluidGrid reference(32, 24, 0.7);
+        reference.gravity_y = 0.5;
+        if (open) reference.top_ambient = FluidGrid::AmbientBoundary{0, {1}};
+        for (int y = 0; y < reference.height; ++y)
+            for (int x = 0; x < reference.width; ++x)
+                reference.liquid_fraction[y * reference.width + x] = std::clamp(y + 1.0 - (9.0 + 0.2 * x), 0.0, 1.0);
+        initializeTestMaterials(reference, 100, 1);
+        for (size_t i = 0; i < reference.u.size(); ++i) reference.u[i] = 0.2 * std::sin(i * 0.03);
+        for (size_t i = 0; i < reference.v.size(); ++i) reference.v[i] = 0.2 * std::cos(i * 0.07);
+        require(reference.project(0.01, 2000, 1e-10).converged, "label reference projection failed");
+        FluidGrid labelled = reference;
+        labelled.liquid_mixture.components.assign(4, reference.liquid_mixture.components[0]);
+        labelled.gas_mixture.components.assign(5, reference.gas_mixture.components[0]);
+        if (open) labelled.top_ambient->gas_volume_fractions = {0.1, 0.2, 0.3, 0.4, 0};
+        auto state = reference.download();
+        state.liquid_mass.assign(4, std::vector<double>(32 * 24, 0));
+        state.gas_mass.assign(5, std::vector<double>(32 * 24, 0));
+        for (int i = 0; i < 32 * 24; ++i)
+        {
+            const double share = 0.5 + 0.4 * std::sin(i * 0.13);
+            const double liquid_shares[] = {0.1, 0.9 * share, 0.9 * (1 - share), 0};
+            const double gas_shares[] = {0.1, 0.2, 0.7 * share, 0.7 * (1 - share), 0};
+            for (int k = 0; k < 4; ++k) state.liquid_mass[k][i] = reference.liquid_mass[0][i] * liquid_shares[k];
+            for (int k = 0; k < 5; ++k) state.gas_mass[k][i] = reference.gas_mass[0][i] * gas_shares[k];
+        }
+        labelled.upload(state);
+        auto agree = [](const auto& a, const auto& b) {
+            for (size_t i = 0; i < a.size(); ++i)
+                require(std::abs(a[i] - b[i]) < 2e-8, "ingredient labels changed bulk motion/geometry");
+        };
+        auto check_mass = [](const auto& fields, const auto& initial, const auto& exchange, const auto& bulk) {
+            for (size_t k = 0; k < fields.size(); ++k)
+            {
+                const double before = std::accumulate(initial[k].begin(), initial[k].end(), 0.0);
+                const double after = std::accumulate(fields[k].begin(), fields[k].end(), 0.0);
+                require(std::abs(after - before - exchange[k]) < 1e-9 * std::max(1.0, before), "label ingredient budget changed");
+            }
+            for (size_t i = 0; i < bulk.size(); ++i)
+            {
+                double mass = 0;
+                for (const auto& field : fields) mass += field[i];
+                require(std::abs(mass - bulk[i]) < 2e-6, "ingredient labels changed bulk mass");
+                require(fields.back()[i] == 0, "absent label gained material");
+            }
+        };
+        for (int tick = 0; tick < 80; ++tick)
+        {
+            require(reference.step(0.01, 2000, 1e-10).converged && labelled.step(0.01, 2000, 1e-10).converged,
+                "label transport projection failed");
+            agree(reference.u, labelled.u); agree(reference.v, labelled.v);
+            agree(reference.liquid_fraction, labelled.liquid_fraction);
+            check_mass(labelled.liquid_mass, state.liquid_mass, labelled.boundary_liquid_mass, reference.liquid_mass[0]);
+            check_mass(labelled.gas_mass, state.gas_mass, labelled.boundary_gas_mass, reference.gas_mass[0]);
+        }
+    }
+}
+
 void multigridPreservesPCGContract()
 {
     for (const auto size : {bl::IVec2{1, 1}, {1, 129}, {131, 1}, {2, 67}, {13, 9}, {64, 64}, {65, 37}, {512, 512}})
@@ -562,6 +675,8 @@ int main()
         {"uniform motion across density changes", transportPreservesUniformMotionAcrossDensityChanges},
         {"zero timestep and projection failure", zeroTimeAndFailedProjectionAreHandled},
         {"miscible component conservation and phase volumes", miscibleComponentsConserveMassAndVolume},
+        {"pure phases accept new traces and boundary inflow", purePhasesAcceptNewMaterial},
+        {"ingredient labels preserve bulk motion and boundary budgets", ingredientLabelsPreserveBulkMotion},
         {"multigrid linearity, symmetry and positivity", multigridPreservesPCGContract},
         {"multigrid and diagonal pressure agreement", multigridMatchesDiagonalProjection},
         {"large mixed-density pressure convergence", largeMixedPressureConvergesWithinDefaultBudget},

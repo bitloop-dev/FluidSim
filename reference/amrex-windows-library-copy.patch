@@ -1,0 +1,12 @@
+diff --git a/Src/CMakeLists.txt b/Src/CMakeLists.txt
+--- a/Src/CMakeLists.txt
++++ b/Src/CMakeLists.txt
+@@ -28,7 +28,7 @@
+ 
+ # legacy symlink for build directory: libamrex.[so|a] / amrex.[dll.lib]
+ add_custom_command(TARGET amrex_${AMReX_SPACEDIM_LAST}d POST_BUILD
+-    COMMAND ${CMAKE_COMMAND} -E create_symlink
++    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+         $<TARGET_FILE_NAME:amrex_${AMReX_SPACEDIM_LAST}d>
+         $<TARGET_FILE_DIR:amrex_${AMReX_SPACEDIM_LAST}d>/$<TARGET_FILE_PREFIX:amrex_${AMReX_SPACEDIM_LAST}d>amrex$<TARGET_FILE_SUFFIX:amrex_${AMReX_SPACEDIM_LAST}d>
+ )

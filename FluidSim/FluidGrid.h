@@ -84,8 +84,13 @@ struct FluidGrid
     // CPU storage is released by the destructor; there are no device resources to destroy
     void destroy() {}
 
-    // one physics substep: transport material and momentum, apply forces, then project
-    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6);
+    struct StepTimings
+    {
+        double transport_ms = 0, forces_ms = 0, pressure_ms = 0;
+    };
+
+    // Optional timings observe the same ordered substep; null performs no clock reads.
+    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr);
 
     // transport requires a divergence-free velocity field; step() supplies the previous projection
     void advect(double dt);
@@ -123,6 +128,7 @@ private:
     std::vector<bl::DVec2> interface_normals;
     std::vector<double>    interface_offsets;
     std::vector<unsigned char> split_weights;
+    bool transport_has_liquid = true, transport_has_gas = true;
 
     std::vector<std::vector<Scalar>> liquid_correction_weights;
     std::vector<std::vector<Scalar>> gas_correction_weights;
@@ -164,6 +170,8 @@ private:
 
     void freezeComponentCorrections();
     void advectComponents(double step, bool horizontal);
+    double transportStepLimit(double dt) const;
+    void advectDirection(double step, bool horizontal);
 
     void rebuildDensity();
     void rebuildMomentum();

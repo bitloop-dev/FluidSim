@@ -1,0 +1,11 @@
+{
+  "name": "fluid-amrex",
+  "version-string": "26.10",
+  "description": "FluidSim's pinned CPU 2D double-precision AMReX and AMReX-Hydro",
+  "homepage": "https://amrex-codes.github.io/amrex/",
+  "license": "BSD-3-Clause",
+  "dependencies": [
+    { "name": "vcpkg-cmake", "host": true },
+    { "name": "vcpkg-cmake-config", "host": true }
+  ]
+}

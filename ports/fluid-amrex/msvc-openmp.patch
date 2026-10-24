@@ -1,0 +1,140 @@
+diff --git a/Src/Base/AMReX_BLBackTrace.H b/Src/Base/AMReX_BLBackTrace.H
+index cf07698..5e7e5c1 100644
+--- a/Src/Base/AMReX_BLBackTrace.H
++++ b/Src/Base/AMReX_BLBackTrace.H
+@@ -67,10 +67,7 @@ struct BLBackTrace
+      */
+     static void print_backtrace_info (const std::string& filename);
+ 
+-    static std::stack<std::pair<std::string, std::string> > bt_stack;
+-#ifdef AMREX_BT_STACK_THREADPRIVATE
+-#pragma omp threadprivate(bt_stack)
+-#endif
++    static thread_local std::stack<std::pair<std::string, std::string> > bt_stack;
+ };
+ 
+ class BLBTer
+diff --git a/Src/Base/AMReX_BLBackTrace.cpp b/Src/Base/AMReX_BLBackTrace.cpp
+index 1ff6eaf..001ae99 100644
+--- a/Src/Base/AMReX_BLBackTrace.cpp
++++ b/Src/Base/AMReX_BLBackTrace.cpp
+@@ -44,7 +44,7 @@
+ 
+ namespace amrex {
+ 
+-std::stack<std::pair<std::string, std::string> >  BLBackTrace::bt_stack;
++thread_local std::stack<std::pair<std::string, std::string> >  BLBackTrace::bt_stack;
+ 
+ void
+ BLBackTrace::handler(int s)
+diff --git a/Src/Base/AMReX_BaseFab.H b/Src/Base/AMReX_BaseFab.H
+index ea0339d..697b14c 100644
+--- a/Src/Base/AMReX_BaseFab.H
++++ b/Src/Base/AMReX_BaseFab.H
+@@ -50,16 +50,10 @@ extern std::atomic<Long> atomic_total_bytes_allocated_in_fabs;
+ extern std::atomic<Long> atomic_total_bytes_allocated_in_fabs_hwm;
+ extern std::atomic<Long> atomic_total_cells_allocated_in_fabs;
+ extern std::atomic<Long> atomic_total_cells_allocated_in_fabs_hwm;
+-extern Long private_total_bytes_allocated_in_fabs;     //!< total bytes at any given time
+-extern Long private_total_bytes_allocated_in_fabs_hwm; //!< high-water-mark over a given interval
+-extern Long private_total_cells_allocated_in_fabs;     //!< total cells at any given time
+-extern Long private_total_cells_allocated_in_fabs_hwm; //!< high-water-mark over a given interval
+-#ifdef AMREX_USE_OMP
+-#pragma omp threadprivate(private_total_bytes_allocated_in_fabs)
+-#pragma omp threadprivate(private_total_bytes_allocated_in_fabs_hwm)
+-#pragma omp threadprivate(private_total_cells_allocated_in_fabs)
+-#pragma omp threadprivate(private_total_cells_allocated_in_fabs_hwm)
+-#endif
++extern thread_local Long private_total_bytes_allocated_in_fabs;     //!< total bytes at any given time
++extern thread_local Long private_total_bytes_allocated_in_fabs_hwm; //!< high-water-mark over a given interval
++extern thread_local Long private_total_cells_allocated_in_fabs;     //!< total cells at any given time
++extern thread_local Long private_total_cells_allocated_in_fabs_hwm; //!< high-water-mark over a given interval
+ 
+ /// \endcond
+ 
+diff --git a/Src/Base/AMReX_BaseFab.cpp b/Src/Base/AMReX_BaseFab.cpp
+index ea6778a..e1cdb41 100644
+--- a/Src/Base/AMReX_BaseFab.cpp
++++ b/Src/Base/AMReX_BaseFab.cpp
+@@ -15,10 +15,10 @@ std::atomic<Long> atomic_total_bytes_allocated_in_fabs     {0L};
+ std::atomic<Long> atomic_total_bytes_allocated_in_fabs_hwm {0L};
+ std::atomic<Long> atomic_total_cells_allocated_in_fabs     {0L};
+ std::atomic<Long> atomic_total_cells_allocated_in_fabs_hwm {0L};
+-Long private_total_bytes_allocated_in_fabs     = 0L;
+-Long private_total_bytes_allocated_in_fabs_hwm = 0L;
+-Long private_total_cells_allocated_in_fabs     = 0L;
+-Long private_total_cells_allocated_in_fabs_hwm = 0L;
++thread_local Long private_total_bytes_allocated_in_fabs     = 0L;
++thread_local Long private_total_bytes_allocated_in_fabs_hwm = 0L;
++thread_local Long private_total_cells_allocated_in_fabs     = 0L;
++thread_local Long private_total_cells_allocated_in_fabs_hwm = 0L;
+ /// \endcond
+ 
+ namespace
+diff --git a/Src/Base/AMReX_FabArrayCommI.H b/Src/Base/AMReX_FabArrayCommI.H
+index bca7449..4fe2c14 100644
+--- a/Src/Base/AMReX_FabArrayCommI.H
++++ b/Src/Base/AMReX_FabArrayCommI.H
+@@ -475,12 +475,13 @@ FabArray<FAB>::ParallelCopy_nowait (const FabArray<FAB>& src,
+                 {
+                     auto const& lo = amrex::lbound(box);
+                     auto const& hi = amrex::ubound(box);
++                    const int klo = lo.z, khi = hi.z, jlo = lo.y, jhi = hi.y;
+ #ifdef AMREX_USE_OMP
+ #pragma omp parallel for collapse(3)
+ #endif
+                     for (int n = 0; n < ncomp; ++n) {
+-                    for (int k = lo.z; k <= hi.z; ++k) {
+-                    for (int j = lo.y; j <= hi.y; ++j) {
++                    for (int k = klo; k <= khi; ++k) {
++                    for (int j = jlo; j <= jhi; ++j) {
+                     AMREX_PRAGMA_SIMD
+                     for (int i = lo.x; i <= hi.x; ++i) {
+                         da(i,j,k,n) = sa(i,j,k,n);
+@@ -501,12 +502,13 @@ FabArray<FAB>::ParallelCopy_nowait (const FabArray<FAB>& src,
+                 {
+                     auto const& lo = amrex::lbound(box);
+                     auto const& hi = amrex::ubound(box);
++                    const int klo = lo.z, khi = hi.z, jlo = lo.y, jhi = hi.y;
+ #ifdef AMREX_USE_OMP
+ #pragma omp parallel for collapse(3)
+ #endif
+                     for (int n = 0; n < ncomp; ++n) {
+-                    for (int k = lo.z; k <= hi.z; ++k) {
+-                    for (int j = lo.y; j <= hi.y; ++j) {
++                    for (int k = klo; k <= khi; ++k) {
++                    for (int j = jlo; j <= jhi; ++j) {
+                     AMREX_PRAGMA_SIMD
+                     for (int i = lo.x; i <= hi.x; ++i) {
+                         da(i,j,k,n) += sa(i,j,k,n);
+diff --git a/Src/CMakeLists.txt b/Src/CMakeLists.txt
+index 1f1eac7..4fa6ac2 100644
+--- a/Src/CMakeLists.txt
++++ b/Src/CMakeLists.txt
+@@ -28,7 +28,7 @@ add_library(AMReX::amrex ALIAS amrex_${AMReX_SPACEDIM_LAST}d)
+ 
+ # legacy symlink for build directory: libamrex.[so|a] / amrex.[dll.lib]
+ add_custom_command(TARGET amrex_${AMReX_SPACEDIM_LAST}d POST_BUILD
+-    COMMAND ${CMAKE_COMMAND} -E create_symlink
++    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+         $<TARGET_FILE_NAME:amrex_${AMReX_SPACEDIM_LAST}d>
+         $<TARGET_FILE_DIR:amrex_${AMReX_SPACEDIM_LAST}d>/$<TARGET_FILE_PREFIX:amrex_${AMReX_SPACEDIM_LAST}d>amrex$<TARGET_FILE_SUFFIX:amrex_${AMReX_SPACEDIM_LAST}d>
+ )
+diff --git a/Tools/CMake/AMReXInstallHelpers.cmake b/Tools/CMake/AMReXInstallHelpers.cmake
+index def6162..d44b4dc 100644
+--- a/Tools/CMake/AMReXInstallHelpers.cmake
++++ b/Tools/CMake/AMReXInstallHelpers.cmake
+@@ -78,10 +78,9 @@ function (install_amrex_targets)
+            set(symlink_manifest_name
+                \"\${CMAKE_INSTALL_PREFIX}/lib/$<TARGET_FILE_PREFIX:amrex_${AMReX_SPACEDIM_LAST}d>amrex$<TARGET_FILE_SUFFIX:amrex_${AMReX_SPACEDIM_LAST}d>\")
+ 
+-           file(CREATE_LINK
+-                $<TARGET_FILE_NAME:amrex_${AMReX_SPACEDIM_LAST}d>
+-                \"\${symlink_name}\"
+-                COPY_ON_ERROR SYMBOLIC)
++           file(COPY_FILE
++                \"\${ABS_INSTALL_LIB_DIR}/$<TARGET_FILE_NAME:amrex_${AMReX_SPACEDIM_LAST}d>\"
++                \"\${symlink_name}\" ONLY_IF_DIFFERENT)
+            list(APPEND CMAKE_INSTALL_MANIFEST_FILES \"\${symlink_manifest_name}\")"
+        )
+ 

@@ -1,7 +1,10 @@
 #include "FluidGrid.h"
+#include "FluidCpuExecution.h"
+#include "FluidInterfaceGeometry.h"
 #include <bitloop/core/threads.h>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <numeric>
 #include <stdexcept>
 #include <utility>
@@ -23,7 +26,7 @@ int batchWorkers(int count)
 template<typename Operation>
 void forBatches(int count, Operation&& operation, int work_per_item = 1)
 {
-    const int workers = batchWorkers(count * work_per_item);
+    const int workers = detail::updateWorkers(count * work_per_item);
     if (workers > 1)
         Thread::forEachBatch(count, std::forward<Operation>(operation), workers);
     else
@@ -77,92 +80,6 @@ double sampleScalar(
 
     return std::lerp(a, b, ty);
 }
-}
-
-double liquidArea(
-    DVec2 normal,
-    double offset,
-    DVec2 rect_min,
-    DVec2 rect_max)
-{
-    const double width = rect_max.x - rect_min.x;
-    const double height = rect_max.y - rect_min.y;
-    const double area = width * height;
-
-    // measure the line from the rectangle's furthest liquid-side corner
-    const double min_projection =
-        normal.x * (normal.x >= 0.0 ? rect_min.x : rect_max.x) +
-        normal.y * (normal.y >= 0.0 ? rect_min.y : rect_max.y);
-
-    const double cut = offset - min_projection;
-
-    // measure how far each rectangle edge extends along the normal
-    const double span_x = std::abs(normal.x) * width;
-    const double span_y = std::abs(normal.y) * height;
-    const double small_span = std::min(span_x, span_y);
-    const double large_span = std::max(span_x, span_y);
-
-    if (cut <= 0.0)
-        return 0.0;
-
-    if (cut >= small_span + large_span)
-        return area;
-
-    // an axis-aligned interface cuts out a rectangular strip
-    if (small_span == 0.0)
-        return area * cut / large_span;
-
-    // the liquid occupies a triangle near the liquid-side corner
-    if (cut < small_span)
-        return area * cut * cut / (2.0 * small_span * large_span);
-
-    // after reaching one edge, the liquid region becomes a trapezoid
-    if (cut < large_span)
-        return area * (cut - 0.5 * small_span) / large_span;
-
-    // near full coverage, subtract the remaining dry triangle
-    const double dry_cut = small_span + large_span - cut;
-    return area * (1.0 -
-        dry_cut * dry_cut / (2.0 * small_span * large_span));
-}
-
-double interfaceOffset(DVec2 normal, double fraction)
-{
-    // find the smallest projection inside the local unit square
-    const double min_projection =
-        std::min(normal.x, 0.0) +
-        std::min(normal.y, 0.0);
-
-    const double span_x = std::abs(normal.x);
-    const double span_y = std::abs(normal.y);
-    const double small_span = std::min(span_x, span_y);
-    const double large_span = std::max(span_x, span_y);
-
-    // liquid fraction where the liquid triangle first becomes a trapezoid
-    const double triangle_fraction =
-        0.5 * small_span / large_span;
-
-    double cut;
-
-    if (fraction < triangle_fraction)
-    {
-        // reverse the liquid-triangle area formula
-        cut = std::sqrt(
-            2.0 * small_span * large_span * fraction);
-    }
-    else if (fraction <= 1.0 - triangle_fraction)
-    {
-        // reverse the trapezoid area formula
-        cut = large_span * fraction + 0.5 * small_span;
-    }
-    else
-    {
-        // position the line using the remaining dry triangle
-        cut = small_span + large_span - std::sqrt(
-            2.0 * small_span * large_span * (1.0 - fraction));
-    }
-
-    return min_projection + cut;
 }
 
 FluidGrid::FluidGrid(int w, int h, double cell_size) :
@@ -291,25 +208,38 @@ FluidGrid::State FluidGrid::download() const
 FluidGrid::ProjectionResult FluidGrid::step(
     double dt,
     int max_iterations,
-    double divergence_tolerance)
+    double divergence_tolerance,
+    StepTimings* timings)
 {
+    if (timings) *timings = {};
     if (dt <= 0.0)
         return {};
 
+    using Clock = std::chrono::steady_clock;
+    auto previous = timings ? Clock::now() : Clock::time_point{};
+    auto elapsed = [&] {
+        const auto now = Clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - previous).count();
+        previous = now;
+        return ms;
+    };
+
     // carry material and momentum using the previous projected velocity
     advect(dt);
+    if (timings) timings->transport_ms = elapsed();
 
     dampGasVelocity(dt);
     applyGravity(dt);
+    if (timings) timings->forces_ms = elapsed();
 
     // correct the transported velocity after applying forces
-    return project(dt, max_iterations, divergence_tolerance);
+    const auto result = project(dt, max_iterations, divergence_tolerance);
+    if (timings) timings->pressure_ms = elapsed();
+    return result;
 }
 
-void FluidGrid::advect(double dt)
+double FluidGrid::transportStepLimit(double dt) const
 {
-    rebuildMomentum();
-
     const double max_outflow = reduceBatches(height, [&](int y0, int y1)
     {
         double maximum = 0.0;
@@ -328,19 +258,26 @@ void FluidGrid::advect(double dt)
     }, [](double a, double b) { return std::max(a, b); }, width);
 
     // Limit transport so no cell exports more than half its volume per substep.
-    const double max_step =
-        max_outflow > 0.0 ? 0.5 * cell_size / max_outflow : dt;
+    return max_outflow > 0.0 ? 0.5 * cell_size / max_outflow : dt;
+}
 
-    double remaining = dt;
-
-    while (remaining > 0.0)
+void FluidGrid::advectDirection(double step, bool horizontal)
+{
+    if (!transport_has_liquid)
     {
-        const double step = std::min(remaining, max_step);
-        const double scale = step / cell_size;
-
-        // keep the same correction weights throughout both directional passes
-        freezeComponentCorrections();
-
+        // The optional external boundary supplies gas only. An exactly empty liquid
+        // phase stays empty through both passes, without reconstruction or a fraction update.
+        auto& transfer = horizontal ? liquid_transfer_u : liquid_transfer_v;
+        std::fill(transfer.begin(), transfer.end(), 0.0);
+        advectComponents(step, horizontal);
+        if (horizontal) advectMomentumX(step, u);
+        else advectMomentumY(step, v);
+        recoverVelocity();
+        return;
+    }
+    const double scale = step / cell_size;
+    if (horizontal)
+    {
         // reconstruct the current interface before horizontal transport
         rebuildInterfaces();
         rebuildTransfersX(step);
@@ -372,8 +309,9 @@ void FluidGrid::advect(double dt)
         }, width);
 
         liquid_fraction.swap(next_liquid_fraction);
-        recoverVelocity();
-
+    }
+    else
+    {
         // horizontal transport changed the fractions, so reconstruct before vertical transport
         rebuildInterfaces();
         rebuildTransfersY(step);
@@ -402,11 +340,23 @@ void FluidGrid::advect(double dt)
         }, width);
 
         liquid_fraction.swap(next_liquid_fraction);
-        recoverVelocity();
+    }
+    recoverVelocity();
+}
 
+void FluidGrid::advect(double dt)
+{
+    rebuildMomentum();
+    const double max_step = transportStepLimit(dt);
+    double remaining = dt;
+    while (remaining > 0.0)
+    {
+        const double step = std::min(remaining, max_step);
+        freezeComponentCorrections();
+        advectDirection(step, true);
+        advectDirection(step, false);
         remaining -= step;
     }
-
     u.swap(next_u);
     v.swap(next_v);
 }
@@ -424,48 +374,11 @@ DVec2 FluidGrid::sampleVelocity(DVec2 pos) const
 
 DVec2 FluidGrid::interfaceNormal(int x, int y) const
 {
-    // use the nearest boundary cell when a neighbour lies outside the grid
-    const int left_x = std::max(x - 1, 0), right_x = std::min(x + 1, width - 1);
-    const double* above = liquid_fraction.data() + std::max(y - 1, 0) * width;
-    const double* row = liquid_fraction.data() + y * width;
-    const double* below = liquid_fraction.data() + std::min(y + 1, height - 1) * width;
-    const double top_left = above[left_x], top = above[x], top_right = above[right_x];
-    const double left = row[left_x], right = row[right_x];
-    const double bottom_left = below[left_x], bottom = below[x], bottom_right = below[right_x];
-
-    // Column/row totals measure surface height rather than one cell's abrupt fraction jump.
-    const double left_sum = top_left + left + bottom_left;
-    const double right_sum = top_right + right + bottom_right;
-    const double top_sum = top_left + top + top_right;
-    const double bottom_sum = bottom_left + bottom + bottom_right;
-    DVec2 centered{0.5 * (left_sum - right_sum), 0.5 * (top_sum - bottom_sum)};
-
-    // Youngs' weighted gradient supplies the alternative estimate near corners and thin features.
-    const DVec2 youngs{
-        left_sum + left - right_sum - right,
-        top_sum + top - bottom_sum - bottom
-    };
-
-    // A symmetric neighbourhood (such as an isolated cell) has no unique interface direction.
-    if (centered.x == 0.0 && centered.y == 0.0)
-        return youngs.x == 0.0 && youngs.y == 0.0 ? DVec2{1.0, 0.0} : youngs;
-
-    // MYC chooses the dominant height direction, then the steeper of its two slope estimates.
-    if (std::abs(centered.x) <= std::abs(centered.y))
-    {
-        centered.y = std::copysign(1.0, centered.y);
-        if (std::abs(youngs.x) > std::abs(centered.x * youngs.y))
-            return youngs;
-    }
-    else
-    {
-        centered.x = std::copysign(1.0, centered.x);
-        if (std::abs(youngs.y) > std::abs(centered.y * youngs.x))
-            return youngs;
-    }
-    return centered;
+    const auto normal=interface_geometry::normal([&](int dx,int dy) {
+        return liquid_fraction[std::clamp(y+dy,0,height-1)*width+std::clamp(x+dx,0,width-1)];
+    });
+    return {normal.x,normal.y};
 }
-
 void FluidGrid::rebuildInterfaces()
 {
     forBatches(height, [&](int y0, int y1)
@@ -477,7 +390,7 @@ void FluidGrid::rebuildInterfaces()
             if (fraction <= 0.0 || fraction >= 1.0) continue;
             const DVec2 normal = interfaceNormal(x, y);
             interface_normals[i] = normal;
-            interface_offsets[i] = interfaceOffset(normal, fraction);
+            interface_offsets[i] = interface_geometry::offset(normal, fraction);
         }
     }, width);
 }
@@ -810,7 +723,7 @@ double FluidGrid::liquidTransferX(int x, int y, double step) const
     const DVec2 rect_min{ (speed > 0.0 ? 1.0 - strip_width : 0.0), 0.0 };
     const DVec2 rect_max{ (speed > 0.0 ? 1.0 : strip_width),       1.0 };
 
-    const double area = liquidArea(
+    const double area = interface_geometry::area(
         interface_normals[donor],
         interface_offsets[donor],
         rect_min,
@@ -862,7 +775,7 @@ double FluidGrid::liquidTransferY(int x, int y, double step) const
         speed > 0.0 ? 1.0 : strip_height
     };
 
-    const double area = liquidArea(
+    const double area = interface_geometry::area(
         interface_normals[donor],
         interface_offsets[donor],
         rect_min,
@@ -1225,6 +1138,18 @@ void FluidGrid::rebuildComponentTransfersY(
 
 void FluidGrid::freezeComponentCorrections()
 {
+    // Recheck every transport substep, including after edits/remaps. Exact mass checks
+    // preserve traces even when the geometric fraction has rounded to a pure phase.
+    auto phaseAbsent = [&](double fraction, const auto& fields)
+    {
+        return std::all_of(liquid_fraction.begin(), liquid_fraction.end(), [=](double f) { return f == fraction; }) &&
+            std::all_of(fields.begin(), fields.end(), [](const auto& mass) {
+                return std::all_of(mass.begin(), mass.end(), [](double value) { return value == 0.0; });
+            });
+    };
+    transport_has_liquid = !phaseAbsent(0.0, liquid_mass);
+    transport_has_gas = top_ambient.has_value() || !phaseAbsent(1.0, gas_mass);
+
     const double inverse_cell_volume = 1.0 / (cell_size * cell_size);
     forBatches(width * height, [&](int i0, int i1)
     {
@@ -1325,8 +1250,8 @@ void FluidGrid::advectComponents(double step, bool horizontal)
         }
     };
 
-    advect_mixture(liquid_mass, liquid_correction_weights, true);
-    advect_mixture(gas_mass, gas_correction_weights, false);
+    if (transport_has_liquid) advect_mixture(liquid_mass, liquid_correction_weights, true);
+    if (transport_has_gas) advect_mixture(gas_mass, gas_correction_weights, false);
     invalidateCaches();
 }
 
@@ -1440,11 +1365,11 @@ double FluidGrid::applyPressureOperator(
         const double center = input[i];
 
         double value = 0.0;
-        if (x > 0)          value += inv_density_u[uIndex(x, y)]     * (center - input[i - 1]);
-        if (x + 1 < width)  value += inv_density_u[uIndex(x + 1, y)] * (center - input[i + 1]);
-        if (y > 0)          value += inv_density_v[i]                * (center - input[i - width]);
+        if (x > 0)            value += inv_density_u[uIndex(x, y)]     * (center - input[i - 1]);
+        if (x + 1 < width)    value += inv_density_u[uIndex(x + 1, y)] * (center - input[i + 1]);
+        if (y > 0)            value += inv_density_v[i]                * (center - input[i - width]);
         else if (top_ambient) value += inv_density_v[i] * center;
-        if (y + 1 < height) value += inv_density_v[i + width]        * (center - input[i + width]);
+        if (y + 1 < height)   value += inv_density_v[i + width]        * (center - input[i + width]);
 
         output[i] = value;
         return center * value;
