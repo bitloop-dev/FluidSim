@@ -187,7 +187,7 @@ void FluidSim_Scene::viewportProcess(
         return;
 
     // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
-    const int steps_per_frame = 60;
+    const int steps_per_frame = 40;
     //const double play_speed = 0.8;
 
     //const int step_count = int(play_speed / frame_time);
@@ -230,6 +230,7 @@ void FluidSim_Scene::viewportProcess(
                     return;
                 }
             }
+
             // Observe on the simulation/device owner; render only the derived image.
             fluid.writeColorPixels(display_pixels);
         });

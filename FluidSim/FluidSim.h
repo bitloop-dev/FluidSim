@@ -18,7 +18,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
 
     /// ─────── Variables ───────
     int grid_w = 1024;
-    int grid_h = 1024;
+    int grid_h = 720;
 
     double cell_size = 1.0;
 
@@ -34,6 +34,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     fluid::FluidDevice fluid_device = fluid::FluidDevice::GPU;
     fluid::AdaptiveMode adaptive_mode = fluid::AdaptiveMode::DISABLED;
     fluid::FluidAdaptiveSettings adaptive_settings;
+
     static constexpr double frame_time = 0.02;
 
     ElementId air_element{};
