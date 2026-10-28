@@ -110,11 +110,18 @@ double FluidGrid::getGravityY() const { return backend->getGravityY(); }
 void FluidGrid::setGravityY(double acceleration) { backend->setGravityY(acceleration); }
 void FluidGrid::upload(const State& state) { backend->upload(state); initialized = true; }
 FluidGrid::State FluidGrid::download() const { return backend->download(); }
+bool FluidGrid::saveCheckpoint(FluidCheckpoint& checkpoint) const { return backend->saveCheckpoint(checkpoint); }
+bool FluidGrid::loadCheckpoint(const FluidCheckpoint& checkpoint)
+{
+    if (!backend->loadCheckpoint(checkpoint)) return false;
+    initialized = true;
+    return true;
+}
 void FluidGrid::destroy() { backend->destroy(); initialized = false; }
 
-FluidGrid::ProjectionResult FluidGrid::step(double dt, int max_iterations, double divergence_tolerance)
+FluidGrid::ProjectionResult FluidGrid::step(double dt, int max_iterations, double divergence_tolerance, StepTimings* timings)
 {
-    return backend->step(dt, max_iterations, divergence_tolerance);
+    return backend->step(dt, max_iterations, divergence_tolerance, timings);
 }
 
 double FluidGrid::maxDivergence() const { return backend->maxDivergence(); }

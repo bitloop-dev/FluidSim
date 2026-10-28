@@ -12,6 +12,7 @@ public:
     const Field& apply(const Field& residual, const Field& residual_stats);
 
 private:
+    friend struct PressureMultigridGPUTestAccess;
     static constexpr int smoothing_sweeps = 5;
     struct Level
     {

@@ -30,7 +30,7 @@ public:
     void upload(const State& state) override;
     State download() const override;
     void destroy() override;
-    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6) override;
+    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr) override;
     double maxDivergence() const override;
     void writeColorPixels(std::vector<float>& pixels) const override;
 

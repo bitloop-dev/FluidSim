@@ -1,6 +1,8 @@
 #include "FluidSim.h"
+#include "FluidCheckpointIO.h"
 #include <cmath>
 #include <cstdint>
+#include <chrono>
 
 #include "noise.h"
 
@@ -21,13 +23,101 @@ void FluidSim_Project::UI::sidebar()
 void FluidSim_Project::projectPrepare(Layout& layout)
 {
     for (int i = 0; i < viewport_count; i++)
-        layout << create<FluidSim_Scene>();
+    {
+        auto scene = create<FluidSim_Scene>("scene-" + std::to_string(i));
+        scene.setLaunchConfigParser([](FluidSim_Scene::Config& config, const JSON::json& values)
+        {
+            for (const auto& [key, value] : values.items())
+            {
+                if (key == "resume_image")
+                {
+                    config.resume_image = value.get<std::string>();
+                    continue;
+                }
+                if (key != "checkpoint_brotli_quality")
+                    throw std::invalid_argument("Unknown FluidSim config field: " + key);
+                if (!value.is_number_integer() || value < -1 || value > 11)
+                    throw std::invalid_argument("checkpoint_brotli_quality must be -1 (off) or an integer 0..11");
+                config.checkpoint_brotli_quality = value.get<int>();
+            }
+        });
+        layout << scene;
+    }
 }
 
 /// ────────────────────────── scene ──────────────────────────
 
 void FluidSim_Scene::UI::sidebar()
 {
+    ImGui::TextDisabled("Drop a saved FluidSim WebP onto the viewport to resume.");
+    bl_view(snapshot_error);
+    if (!snapshot_error.empty()) ImGui::TextWrapped("%s", snapshot_error.c_str());
+    if (ImGui::Button("Restart Simulation"))
+        bl_schedule([](FluidSim_Scene& scene) { scene.restartSimulation(); });
+
+    bl_pull(projection_tolerance);
+    const double before_input = projection_tolerance;
+    ImGui::InputDouble("Pressure Quality", &projection_tolerance, 0., 0., "%.6g");
+    if (ImGui::IsItemActivated())
+        pressure_tolerance_before_edit = before_input;
+    if (ImGui::IsItemDeactivatedAfterEdit())
+    {
+        // Commit completed edits only: clearing/typing the number must not change the live solver target.
+        if (std::isfinite(projection_tolerance) && projection_tolerance > 0.)
+        {
+            bl_push(projection_tolerance);
+        }
+        else
+            projection_tolerance = pressure_tolerance_before_edit;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Positive maximum cell divergence (per second).\nLarger values trade accuracy for speed.\nPress Enter or leave the field to apply.");
+
+    if (ImGui::CollapsingHeaderBox("Frame statistics", true))
+    {
+        bl_scoped(profile_stages);
+        bl_view(frame_statistics);
+        const auto& stats = frame_statistics;
+        const double render_ms = __target.last_render_ms;
+
+        ImGui::Checkbox("Detailed stage timings", &profile_stages);
+        if (ImGui::BeginTable("Frame timings", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH))
+        {
+            ImGui::TableSetupColumn("Stage", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("ms / frame", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+            ImGui::TableHeadersRow();
+            auto row = [](const char* label, double ms, bool available = true)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(label);
+                ImGui::TableSetColumnIndex(1);
+                if (available) ImGui::Text("%.3f", ms);
+                else ImGui::TextUnformatted("--");
+            };
+            row("Total frame time", stats.update_ms + render_ms);
+            row("Render (CPU submission)", render_ms);
+            row("Fluid processing", stats.fluid_ms);
+            row("    Transport", stats.stages.transport_ms, stats.detailed);
+            if (!stats.adaptive)
+                row("    Forces", stats.stages.forces_ms, stats.detailed);
+            row(stats.adaptive ? "    Projection + forces" : "    Projection", stats.stages.pressure_ms, stats.detailed);
+            if (stats.adaptive)
+            {
+                row("    Refinement selection", stats.stages.selection_ms, stats.detailed);
+                row("    Regrid + restoration", stats.stages.regrid_ms, stats.detailed);
+            }
+            row("Display colour/readback", stats.colour_ms);
+            row("Other frame work", std::max(0., stats.update_ms - stats.fluid_ms - stats.colour_ms));
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("Fluid stages sum %d physics substep(s).", stats.substeps);
+        ImGui::TextDisabled("GPU profiling adds completion waits.");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Disable detailed timings for normal throughput.\nTotal = scene update + latest render CPU time.\nUI/presentation and GPU draw completion are excluded.");
+        ImGui::EndCollapsingHeaderBox();
+    }
+
     if (ImGui::CollapsingHeaderBox("View", true))
     {
         bl_scoped(camera);
@@ -135,8 +225,19 @@ void FluidSim_Scene::initializePool(double amplitude)
 
 void FluidSim_Scene::sceneStart()
 {
-    initializePool();
+    if (resume_image.empty()) restartSimulation();
+    else resumeFromImage(resume_image);
     surface.setFragmentSource(fluid_shader_src);
+}
+
+void FluidSim_Scene::restartSimulation()
+{
+    simulation_failed = false;
+    simulation_time = real_time = 0.;
+    frame_statistics = {};
+    frame_statistics.projection_tolerance = projection_tolerance;
+    initializePool();
+    requestRedraw(true);
 }
 
 void FluidSim_Scene::sceneMounted([[maybe_unused]] Viewport* ctx)
@@ -165,9 +266,6 @@ void FluidSim_Scene::sceneDestroy()
     {
         fluid_display.destroy();
         surface.destroy();
-#ifdef BITLOOP_DEV_MODE
-        snapshot_preprocessor.destroyGL();
-#endif
     });
 }
 
@@ -186,8 +284,14 @@ void FluidSim_Scene::viewportProcess(
     if (simulation_failed || dt <= 0.0)
         return;
 
+    using Clock = std::chrono::steady_clock;
+    const auto frame_started = Clock::now();
+    frame_statistics = {};
+    frame_statistics.detailed = profile_stages;
+    frame_statistics.adaptive = fluid.getAdaptiveMode() != fluid::AdaptiveMode::DISABLED;
+    frame_statistics.projection_tolerance = projection_tolerance;
+
     // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
-    const int steps_per_frame = 40;
     //const double play_speed = 0.8;
 
     //const int step_count = int(play_speed / frame_time);
@@ -218,8 +322,17 @@ void FluidSim_Scene::viewportProcess(
 
             for (int substep = 0; substep < step_count; ++substep)
             {
+                FluidGrid::StepTimings timings;
+                const auto started = Clock::now();
                 // use one float-compatible tolerance for backend comparisons
-                const auto result = fluid.step(step, 2000, 1e-3);
+                const auto result = fluid.step(step, projection_max_iterations, frame_statistics.projection_tolerance, profile_stages ? &timings : nullptr);
+                frame_statistics.fluid_ms += std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+                frame_statistics.stages.transport_ms += timings.transport_ms;
+                frame_statistics.stages.forces_ms += timings.forces_ms;
+                frame_statistics.stages.pressure_ms += timings.pressure_ms;
+                frame_statistics.stages.selection_ms += timings.selection_ms;
+                frame_statistics.stages.regrid_ms += timings.regrid_ms;
+                ++frame_statistics.substeps;
 
                 if (!result.converged)
                 {
@@ -232,7 +345,9 @@ void FluidSim_Scene::viewportProcess(
             }
 
             // Observe on the simulation/device owner; render only the derived image.
+            const auto colour_started = Clock::now();
             fluid.writeColorPixels(display_pixels);
+            frame_statistics.colour_ms = std::chrono::duration<double, std::milli>(Clock::now() - colour_started).count();
         });
     }
     catch (const std::runtime_error& error)
@@ -240,6 +355,7 @@ void FluidSim_Scene::viewportProcess(
         simulation_failed = true;
         blPrint() << error.what();
     }
+    frame_statistics.update_ms = std::chrono::duration<double, std::milli>(Clock::now() - frame_started).count();
 }
 
 void FluidSim_Scene::renderFluidSurface() const
@@ -254,6 +370,7 @@ void FluidSim_Scene::renderFluidSurface() const
 
 void FluidSim_Scene::viewportDraw(Viewport* ctx) const
 {
+    const auto started = std::chrono::steady_clock::now();
     /// Draw the Scene on this viewport without modifying simulation state.
     ctx->transform(camera);
     renderFluidSurface();
@@ -273,12 +390,127 @@ void FluidSim_Scene::viewportDraw(Viewport* ctx) const
     ctx->setFontSize(12.0);
     ctx->fillText<double>("Sim Time: " + std::to_string(simulation_time), {10.0, 10.0});
     ctx->fillText<double>("Real Time: " + std::to_string(real_time), {10.0, 30.0});
+    last_render_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
 
 void FluidSim_Scene::onEvent(Event e)
 {
+    if (e.type() == EventType::DROP_FILE)
+    {
+        const auto target = e.ctx_hovered() ? e.ctx_hovered() : e.ctx_focused();
+        const auto& mounted = mountedToViewports();
+        if ((target && std::find(mounted.begin(), mounted.end(), target) != mounted.end()) ||
+            (!target && getProject().scenes().size() == 1))
+        {
+            try
+            {
+                resumeFromImage(e.data().drop.data);
+                snapshot_error.clear();
+            }
+            catch (const std::exception& error)
+            {
+                snapshot_error = error.what();
+            }
+        }
+        return;
+    }
     if (e.ownedBy(this))
         navigator.handleWorldNavigation(e, true);
+}
+
+JSON::json FluidSim_Scene::captureSceneState() const
+{
+    return {
+        {"version", 1}, {"simulation_time", simulation_time}, {"real_time", real_time},
+        {"simulation_failed", simulation_failed}, {"projection_tolerance", projection_tolerance},
+        {"profile_stages", profile_stages}, {"frame_time", frame_time},
+        {"steps_per_frame", steps_per_frame}, {"projection_max_iterations", projection_max_iterations},
+        {"device", int(fluid.getDevice())}, {"adaptive_mode", int(fluid.getAdaptiveMode())},
+        {"scene_elements", {air_element, water_element, red_element, cloud_element}}
+    };
+}
+
+bool FluidSim_Scene::captureSnapshot(SnapshotFrame& output) const
+{
+    fluid::FluidSnapshot snapshot;
+    snapshot.width = fluid.getWidth();
+    snapshot.height = fluid.getHeight();
+    snapshot.cell_size = fluid.getCellSize();
+    snapshot.scene = captureSceneState();
+    bool saved = false;
+    withFluidContext([&] { saved = fluid.saveCheckpoint(snapshot.checkpoint); });
+    if (!saved) throw std::runtime_error("This fluid engine does not support resumable snapshots");
+    output.resolution = {snapshot.width, snapshot.height};
+    output.frame.data = fluid::fluidSnapshotPixels(display_pixels);
+    output.frame.payload = fluid::encodeFluidSnapshot(snapshot);
+    return true;
+}
+
+void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::FluidCheckpoint& checkpoint,
+    int width, int height, double spacing)
+{
+    if (scene.at("version") != 1 || scene.at("frame_time") != frame_time ||
+        scene.at("steps_per_frame") != steps_per_frame || scene.at("projection_max_iterations") != projection_max_iterations)
+        throw std::runtime_error("Snapshot scene timestep/solver policy does not match this build");
+    const int device = scene.at("device").get<int>();
+    const int mode = scene.at("adaptive_mode").get<int>();
+    if ((device != int(fluid::FluidDevice::CPU) && device != int(fluid::FluidDevice::GPU)) ||
+        (mode != 0 && mode != 2 && mode != 4 && mode != 8 && mode != 16 && mode != 32))
+        throw std::runtime_error("Unknown saved fluid backend");
+    const double saved_simulation_time = scene.at("simulation_time").get<double>();
+    const double saved_real_time = scene.at("real_time").get<double>();
+    const double saved_tolerance = scene.at("projection_tolerance").get<double>();
+    if (!std::isfinite(saved_tolerance) || saved_tolerance <= 0)
+        throw std::runtime_error("Invalid saved pressure quality");
+    const bool saved_failure = scene.at("simulation_failed").get<bool>();
+    const bool saved_profiling = scene.at("profile_stages").get<bool>();
+    const auto ids = scene.at("scene_elements").get<std::array<ElementId, 4>>();
+
+    // Build and validate a replacement before releasing the current simulation.
+    FluidGrid restored(width, height, spacing);
+    restored.setDevice(fluid::FluidDevice(device));
+    restored.setAdaptiveMode(fluid::AdaptiveMode(mode));
+    if (!restored.loadCheckpoint(checkpoint))
+        throw std::runtime_error("The saved fluid backend does not support checkpoints");
+    for (const auto id : ids)
+        if (id >= restored.getElements().size()) throw std::runtime_error("Invalid saved scene element");
+    std::vector<float> pixels;
+    restored.writeColorPixels(pixels);
+    withFluidContext([&]
+    {
+        fluid.destroy();
+        fluid = std::move(restored);
+    });
+    display_pixels = std::move(pixels);
+    grid_w = width;
+    grid_h = height;
+    cell_size = spacing;
+    world_w = width * spacing;
+    world_h = height * spacing;
+    fluid_device = fluid.getDevice();
+    adaptive_mode = fluid.getAdaptiveMode();
+    simulation_time = saved_simulation_time;
+    real_time = saved_real_time;
+    projection_tolerance = saved_tolerance;
+    simulation_failed = saved_failure;
+    profile_stages = saved_profiling;
+    air_element = ids[0];
+    water_element = ids[1];
+    red_element = ids[2];
+    cloud_element = ids[3];
+    frame_statistics = {};
+    frame_statistics.projection_tolerance = projection_tolerance;
+    requestRedraw(true);
+}
+
+void FluidSim_Scene::resumeFromImage(const std::filesystem::path& image)
+{
+    const auto snapshot = fluid::readFluidSnapshot(image);
+    restoreSceneState(snapshot.scene, snapshot.checkpoint, snapshot.width, snapshot.height, snapshot.cell_size);
+    const auto origin = fluid.getOrigin();
+    for (auto* viewport : mountedToViewports())
+        camera.focusWorldRect(*viewport, origin.x, origin.y, origin.x + world_w, origin.y + world_h);
+    snapshot_error.clear();
 }
 
 // void FluidSim_Scene::onPointerDown(PointerEvent e) {}
@@ -289,8 +521,25 @@ void FluidSim_Scene::onEvent(Event e)
 // void FluidSim_Scene::onKeyUp(KeyEvent e) {}
 
 #ifdef BITLOOP_DEV_MODE
-void FluidSim_Scene::traceFrame([[maybe_unused]] SimTraceFrame& frame) const
+void FluidSim_Scene::traceFrame(SimTraceFrame& frame) const
 {
+    frame.metric("simulation_time", simulation_time);
+    frame.metric("real_time", real_time);
+    frame.metric("update_ms", frame_statistics.update_ms);
+    frame.metric("fluid_ms", frame_statistics.fluid_ms);
+    frame.metric("colour_ms", frame_statistics.colour_ms);
+    frame.metric("physics_substeps", frame_statistics.substeps);
+    frame.metric("phase_timings_available", frame_statistics.detailed);
+    frame.metric("projection_tolerance", frame_statistics.projection_tolerance);
+    if (frame_statistics.detailed)
+    {
+        frame.metric("transport_ms", frame_statistics.stages.transport_ms);
+        frame.metric("forces_ms", frame_statistics.stages.forces_ms);
+        frame.metric("projection_ms", frame_statistics.stages.pressure_ms);
+        frame.metric("selection_ms", frame_statistics.stages.selection_ms);
+        frame.metric("regrid_ms", frame_statistics.stages.regrid_ms);
+    }
+    frame.metric("simulation_failed", simulation_failed);
 }
 
 bool FluidSim_Scene::captureTraceSnapshot(std::string_view route, SimSnapshotImage& image) const
@@ -298,25 +547,31 @@ bool FluidSim_Scene::captureTraceSnapshot(std::string_view route, SimSnapshotIma
     if (route != "grid" || display_pixels.empty())
         return false;
 
-    renderFluidSurface();
-    image.resolution = IVec2(fluid.getWidth(), fluid.getHeight());
-    CapturePreprocessParams params;
-    params.src_resolution = params.dst_resolution = image.resolution;
-    // texture row zero already represents the top grid row
-    params.flip_y = false;
-    return snapshot_preprocessor.preprocessToFrame(surface.texture(), params, image.pixels);
+    SnapshotFrame snapshot;
+    captureSnapshot(snapshot);
+    image.resolution = snapshot.resolution;
+    image.pixels = std::move(snapshot.frame.data);
+    image.payload = std::move(snapshot.frame.payload);
+    return true;
 }
 
 bool FluidSim_Scene::saveCheckpoint(SimCheckpointWriter& writer) const
 {
-    (void)writer;
-    return false;
+    fluid::FluidCheckpoint checkpoint;
+    bool saved = false;
+    withFluidContext([&] { saved = fluid.saveCheckpoint(checkpoint); });
+    if (!saved) return false;
+
+    writer.writeJson("scene", captureSceneState());
+    fluid::writeFluidCheckpoint(writer, checkpoint, checkpoint_brotli_quality);
+    return true;
 }
 
 bool FluidSim_Scene::loadCheckpoint(const SimCheckpointReader& reader)
 {
-    (void)reader;
-    return false;
+    restoreSceneState(reader.readJson("scene"), fluid::readFluidCheckpoint(reader),
+        fluid.getWidth(), fluid.getHeight(), fluid.getCellSize());
+    return true;
 }
 #endif
 

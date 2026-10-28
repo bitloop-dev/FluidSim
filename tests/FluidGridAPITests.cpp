@@ -70,6 +70,43 @@ FluidGridBase::State configure(FluidGridBase& grid)
     return state;
 }
 
+void timingsPreserveAllBackends()
+{
+    for (const auto device : {FluidDevice::CPU, FluidDevice::GPU})
+    for (const auto mode : {AdaptiveMode::DISABLED, AdaptiveMode::MAX_4})
+    {
+        FluidGrid plain(32, 32, 1.), measured(32, 32, 1.);
+        FluidAdaptiveSettings settings;
+        settings.check_interval = .02;
+        settings.stability.quiet_seconds = 0.;
+        for (auto* grid : {&plain, &measured})
+        {
+            grid->setAdaptiveSettings(settings);
+            grid->setDevice(device);
+            grid->setAdaptiveMode(mode);
+            configure(*grid);
+        }
+        FluidGridBase& api = measured;
+        FluidGridBase::StepTimings timings;
+        for (int tick = 0; tick < 8; ++tick)
+        {
+            const auto a = plain.step(.01, 2000, 1e-3);
+            const auto b = api.step(.01, 2000, 1e-3, &timings);
+            require(a.converged && b.converged, "Timed comparison did not converge");
+            sameResult(a, b);
+            require(sameState(plain.download(), api.download()), "Timing changed backend state or adaptive observation");
+            require(timings.transport_ms > 0. && timings.pressure_ms >= 0., "Missing completed stage measurements");
+            // A skipped policy check must clear the previous substep's selection cost.
+            if (mode != AdaptiveMode::DISABLED && tick == 1)
+                require(timings.selection_ms == 0. && timings.regrid_ms == 0., "Skipped refinement retained stale timings");
+        }
+        api.step(0., 2000, 1e-3, &timings);
+        require(timings.transport_ms == 0. && timings.forces_ms == 0. && timings.pressure_ms == 0. &&
+                timings.selection_ms == 0. && timings.regrid_ms == 0., "Zero-time step retained stale timings");
+        std::cout << "PASS timed/untimed exact state/results: device=" << int(device) << " adaptive=" << int(mode) << '\n';
+    }
+}
+
 void configurationAndSelection()
 {
     FluidGrid grid(33, 25, 2.5);
@@ -184,6 +221,7 @@ int main()
         configurationAndSelection(); std::cout << "PASS common configuration and explicit CPU selection\n";
         steppingMatchesDirectCPU(); std::cout << "PASS exact polymorphic CPU step/state/failure parity\n";
         editingAndColorsUseCommonAPI(); std::cout << "PASS common staged edits, history and colour output\n";
+        timingsPreserveAllBackends();
         return 0;
     }
     catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }

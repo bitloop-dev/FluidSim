@@ -1,6 +1,7 @@
 #include "FluidGridCPU.h"
 #include <bitloop/core/threads.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
@@ -284,18 +285,34 @@ FluidGridCPU::State FluidGridCPU::download() const
 FluidGridCPU::ProjectionResult FluidGridCPU::step(
     double dt,
     int max_iterations,
-    double divergence_tolerance)
+    double divergence_tolerance,
+    StepTimings* timings)
 {
+    if (timings) *timings = {};
     if (dt <= 0.0)
         return {};
 
+    using Clock = std::chrono::steady_clock;
+    auto previous = timings ? Clock::now() : Clock::time_point{};
+    auto elapsed = [&]
+    {
+        const auto now = Clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - previous).count();
+        previous = now;
+        return ms;
+    };
+
     // carry material and momentum using the previous projected velocity
     advect(dt);
+    if (timings) timings->transport_ms = elapsed();
 
     applyGravity(dt);
+    if (timings) timings->forces_ms = elapsed();
 
     // correct the transported velocity after applying forces
-    return project(dt, max_iterations, divergence_tolerance);
+    const auto result = project(dt, max_iterations, divergence_tolerance);
+    if (timings) timings->pressure_ms = elapsed();
+    return result;
 }
 
 void FluidGridCPU::advect(double dt)

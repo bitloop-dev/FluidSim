@@ -25,8 +25,9 @@ PressureMultigridGPU::PressureMultigridGPU(Compute& compute, int width, int heig
     {
         int count=0;
         for (int l=i; l<int(levels.size()); ++l) count+=levels[l].width*levels[l].height;
+        // The shared shader bit-shifts X indexing; odd/truncated heights use the stored maps normally.
         if (levels[i].width*levels[i].height<=1024 && levels.size()-i<=4 && count<=1360 &&
-            (levels[i].width&(levels[i].width-1))==0 && (levels[i].height&(levels[i].height-1))==0)
+            (levels[i].width&(levels[i].width-1))==0)
         {
             tile_level=i; tile_cells=count;
             int offset=0;

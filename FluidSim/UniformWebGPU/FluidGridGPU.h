@@ -3,6 +3,7 @@
 #include "FluidGridEdit.h"
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
+#include "FluidCheckpoint.h"
 #include <bitloop/core/types.h>
 #include <cstdint>
 #include <memory>
@@ -42,11 +43,14 @@ public:
     // Upload, stepping, readback and destruction stay on the device's owning thread.
     void upload(const State& state);
     State download() const;
+    bool saveCheckpoint(FluidCheckpoint& checkpoint) const;
+    bool loadCheckpoint(const FluidCheckpoint& checkpoint);
     // Staging needs no device; commit requires the owning thread after upload().
     Edit beginEdit() { return Edit(*this); }
     void destroy();
 
-    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-3);
+    // Optional completed-work stage timings add GPU synchronization.
+    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-3, FluidStepTimings* timings = nullptr);
     void advect(double dt);
     void dampGasVelocity(double dt);
     void applyGravity(double dt);

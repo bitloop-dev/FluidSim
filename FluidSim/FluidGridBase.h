@@ -3,6 +3,7 @@
 #include "FluidGridEdit.h"
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
+#include "FluidCheckpoint.h"
 #include <bitloop/core/types.h>
 
 namespace fluid
@@ -15,6 +16,7 @@ public:
     using Scalar           = double;
     using State            = FluidGridState<Scalar>;
     using ProjectionResult = FluidProjectionResult;
+    using StepTimings      = FluidStepTimings;
     using Edit             = FluidGridEdit<FluidGridBase>;
 
     virtual ~FluidGridBase() = default;
@@ -39,11 +41,17 @@ public:
     virtual void upload(const State& state) = 0;
     virtual State download() const = 0;
 
+    // Completed-step snapshots on the simulation owner. False means unsupported;
+    // incompatible/corrupt checkpoints throw before applying state. No backend migration.
+    virtual bool saveCheckpoint(FluidCheckpoint&) const { return false; }
+    virtual bool loadCheckpoint(const FluidCheckpoint&) { return false; }
+
     Edit beginEdit() { return Edit(*this); }
 
     virtual void destroy() = 0;
 
-    virtual ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6) = 0;
+    // Optional timings observe this substep; GPU stages include completion waits.
+    virtual ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr) = 0;
     virtual double maxDivergence() const = 0;
 
     // Derived RGBA display output; reuse caller storage without downloading the physical state.

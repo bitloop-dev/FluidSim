@@ -3,7 +3,7 @@
 
 namespace fluid::webgpu {
 
-// Three 1360-float planes fit in 16 KiB: 32² + 16² + 8² + 4² cells.
+// Three 1360-float planes fit in 16 KiB; the packed tail may also have truncated heights.
 inline constexpr std::string_view coarse_cycle_shader=R"wgsl(
 var<workgroup> solution: array<f32,1360>;
 var<workgroup> scratch: array<f32,1360>;
@@ -48,14 +48,13 @@ fn smoothLevel(l: i32,lane: i32,reverse: bool,fromZero: bool) {
     }
 }
 fn solveBottom(l: i32) {
+    // Match the generic solve: DXC can miscompile an early return inside the factor loop.
     let size=shape(l); let count=size.x*size.y; let n=count-1;
-    let offset=index(l,vec2i(0)); var values: array<f32,15>; var mean=0.0;
+    let offset=index(l,vec2i(0)); var values: array<f32,15>; var mean=0.0; var valid=true;
     for (var i=0; i<count; i++) { mean+=forcing[offset+i]; } mean/=f32(count);
     for (var row=0; row<n; row++) {
         let diagonal=factor(vec2i(row,row)).x;
-        if (diagonal<=0.0 || !finite(diagonal)) {
-            for (var i=0; i<count; i++) { solution[offset+i]=0.0; } return;
-        }
+        valid = valid && diagonal>0.0 && finite(diagonal);
         var value=forcing[offset+row+1]-mean;
         for (var col=0; col<row; col++) { value-=factor(vec2i(col,row)).x*values[col]; }
         values[row]=value/diagonal;
@@ -66,8 +65,8 @@ fn solveBottom(l: i32) {
         values[row]=value/factor(vec2i(row,row)).x;
     }
     mean=0.0; for (var i=0; i<n; i++) { mean+=values[i]; } mean/=f32(count);
-    solution[offset]=-mean;
-    for (var i=1; i<count; i++) { solution[offset+i]=values[i-1]-mean; }
+    solution[offset]=select(0.0,-mean,valid);
+    for (var i=1; i<count; i++) { solution[offset+i]=select(0.0,values[i-1]-mean,valid); }
 }
 fn execute() {
     let lane=cell().y*16+cell().x; let size=shape(0); let last=params.grid.w-1;

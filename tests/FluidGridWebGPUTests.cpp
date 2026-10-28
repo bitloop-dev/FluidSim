@@ -14,6 +14,23 @@
 #include <string>
 #include <type_traits>
 
+namespace fluid::webgpu
+{
+// Keep the generic control out of the production API and normal dispatch path.
+struct PressureMultigridGPUTestAccess
+{
+    static int sharedLevel(const PressureMultigridGPU& solver) { return solver.tile_level; }
+    static const Field& applyGeneric(PressureMultigridGPU& solver, const Field& rhs, const Field& stats)
+    {
+        const int shared_level = solver.tile_level;
+        solver.tile_level = -1;
+        const auto& result = solver.apply(rhs, stats);
+        solver.tile_level = shared_level;
+        return result;
+    }
+};
+}
+
 namespace {
 using fluid::FluidGridCPU;
 using fluid::FluidGridGPU;
@@ -219,6 +236,68 @@ void multigridPreservesPCGContract()
                   << " constant_error=" << constant_error << " scale=" << scale << '\n';
         require(constant_error <= 5e-6 * std::max(1.0, scale), "GPU multigrid did not remove its nullspace within float accuracy");
     }
+}
+
+void rectangularSharedMultigridMatchesGeneric()
+{
+    using namespace fluid::webgpu;
+    Compute runner;
+    bool matched = true;
+    for (const auto [w, h] : {std::pair{32, 32}, {1, 129}, {2, 67}, {16, 23}, {32, 23}, {32, 31},
+                              {128, 90}, {256, 180}, {1024, 720}, {65, 37}})
+    {
+        PressureMultigridGPU solver(runner, w, h);
+        const int shared_level = PressureMultigridGPUTestAccess::sharedLevel(solver);
+        require(w == 65 ? shared_level == -1 : shared_level >= 0,
+                "Rectangular shared-tail selection or non-power-of-two width fallback is wrong");
+        auto coefficients = runner.field(w, h, 4), rhs = runner.field(w, h), stats = runner.field(1, 1, 4);
+        std::vector<float> weights(size_t(w) * h * 4), input(w * h);
+        for (int refresh = 0; refresh < 2; ++refresh)
+        {
+            auto density = [=](int x, int y)
+            {
+                return refresh == 0 ? ((x / 3 + y / 4) % 2 ? .1f : 100.f)
+                                    : 1.f + .3f * float((x + 2 * y) % 5);
+            };
+            for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+            {
+                float* face = weights.data() + (y * w + x) * 4;
+                const float center = density(x, y);
+                if (x > 0) face[0] = 2.f / (center + density(x - 1, y));
+                if (x + 1 < w) face[1] = 2.f / (center + density(x + 1, y));
+                if (y > 0) face[2] = 2.f / (center + density(x, y - 1));
+                if (y + 1 < h) face[3] = 2.f / (center + density(x, y + 1));
+            }
+            runner.write(coefficients, weights);
+            solver.rebuild(coefficients);
+            for (int field = 0; field < 3; ++field)
+            {
+                for (int i = 0; i < w * h; ++i)
+                    input[i] = field == 2 ? 7.f : float(std::sin(i * .31 + field) + std::cos(i * .073));
+                const float reduction[] = {float(std::accumulate(input.begin(), input.end(), 0.0)), 0, 0, 0};
+                runner.write(rhs, input);
+                runner.write(stats, reduction);
+                const auto shared = runner.read(solver.apply(rhs, stats));
+                const auto generic = runner.read(PressureMultigridGPUTestAccess::applyGeneric(solver, rhs, stats));
+                const double shared_mean = std::accumulate(shared.begin(), shared.end(), 0.) / shared.size();
+                const double generic_mean = std::accumulate(generic.begin(), generic.end(), 0.) / generic.size();
+                double error = 0., scale = 0., centered_error = 0.;
+                for (size_t i = 0; i < shared.size(); ++i)
+                {
+                    require(std::isfinite(shared[i]) && std::isfinite(generic[i]), "Nonfinite rectangular MG correction");
+                    error = std::max(error, std::abs(double(shared[i]) - generic[i]));
+                    scale = std::max(scale, std::abs(double(generic[i])));
+                    centered_error = std::max(centered_error, std::abs((double(shared[i]) - shared_mean) - (generic[i] - generic_mean)));
+                }
+                std::cout << "rectangular MG " << w << 'x' << h << " shared_level=" << shared_level
+                          << " refresh=" << refresh << " field=" << field << " relative_error=" << error / std::max(1., scale)
+                          << " centered_error=" << centered_error / std::max(1., scale) << " mean_delta=" << shared_mean - generic_mean << '\n';
+                matched = matched && error <= 2e-5 * std::max(1., scale);
+            }
+        }
+    }
+    require(matched, "Shared rectangular MG differs from its generic V-cycle");
 }
 
 void largeMixedPressureConvergesWithinDefaultBudget()
@@ -775,6 +854,7 @@ int main(int argc,char** argv)
         if (argc==2 && std::string(argv[1])=="--multigrid")
         {
             multigridPreservesPCGContract();
+            rectangularSharedMultigridMatchesGeneric();
             std::cout<<"PASS WebGPU multigrid\n"; return 0;
         }
         if (argc==2 && std::string(argv[1])=="--projection")
@@ -792,6 +872,7 @@ int main(int argc,char** argv)
         pressureReductionsMatchHost();
         pressureBalancesGravity();
         multigridPreservesPCGContract();
+        rectangularSharedMultigridMatchesGeneric();
         largeMixedPressureConvergesWithinDefaultBudget();
         cachedVelocityStatsRemainCurrent();
         commonStateAndColorReadback();

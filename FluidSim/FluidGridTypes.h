@@ -35,6 +35,12 @@ FluidGridState<To> convertFluidState(const FluidGridState<From>& source)
     return result;
 }
 
+struct FluidStepTimings
+{
+    double transport_ms = 0, forces_ms = 0, pressure_ms = 0;
+    double selection_ms = 0, regrid_ms = 0;
+};
+
 struct FluidProjectionResult
 {
     int iterations = 0;

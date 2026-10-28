@@ -4,6 +4,7 @@
 #include "Adaptive/FluidAdaptiveRaster.h"
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -43,16 +44,22 @@ void FluidGridAdaptiveWebGPU::destroy()
     selector.reset(); engine.reset();
     simulation_time = next_refinement_time = 0.; refinement_checks = 0;
 }
-FluidGridBase::ProjectionResult FluidGridAdaptiveWebGPU::step(double dt, int max_iterations, double tolerance)
+FluidGridBase::ProjectionResult FluidGridAdaptiveWebGPU::step(double dt, int max_iterations, double tolerance, StepTimings* timings)
 {
+    if (timings) *timings = {};
     native();
     if (dt == 0.) return engine->step(0., tolerance).projection;
     projection_tolerance = tolerance;
     if (settings.automatic_refinement && simulation_time >= next_refinement_time)
     {
+        using Clock = std::chrono::steady_clock;
+        const auto selection_started = timings ? Clock::now() : Clock::time_point{};
         selector->update(*engine, settings.tolerances, settings.stability, simulation_time,
                          settings.prediction_horizon, max_cell_scale);
         const auto layout = selector->proposeLayout(*engine);
+        if (timings)
+            timings->selection_ms = std::chrono::duration<double, std::milli>(Clock::now() - selection_started).count();
+        const auto regrid_started = timings ? Clock::now() : Clock::time_point{};
         next_refinement_time = simulation_time + settings.check_interval; ++refinement_checks;
         if (engine->regrid(layout))
         {
@@ -66,9 +73,23 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveWebGPU::step(double dt, int max
                 return {failure.iterations, engine->maxDivergence(), false};
             }
         }
+        if (timings)
+        {
+            engine->synchronize();
+            timings->regrid_ms = std::chrono::duration<double, std::milli>(Clock::now() - regrid_started).count();
+        }
     }
     ProjectionResult result;
-    try { result = engine->step(dt, tolerance, 0., {0., gravity_y}, max_iterations).projection; }
+    try
+    {
+        const auto stepped = engine->step(dt, tolerance, 0., {0., gravity_y}, max_iterations, timings != nullptr);
+        result = stepped.projection;
+        if (timings)
+        {
+            timings->transport_ms = stepped.transportMs;
+            timings->pressure_ms = stepped.projectionMs;
+        }
+    }
     catch (const FluidAdaptiveGPUProjectionFailure& failure)
     {
         result = {failure.iterations, engine->maxDivergence(), false};

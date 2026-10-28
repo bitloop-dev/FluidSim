@@ -39,6 +39,7 @@ bitloop_new_project(FluidSim ${SIM_SOURCES})
 bitloop_finalize()
 
 if(NOT BITLOOP_DISCOVERY)
+    find_package(unofficial-brotli CONFIG REQUIRED)
     add_library(FluidAdaptiveCore STATIC
         "${SRC_DIR}/Adaptive/AmrField2D.cpp" "${SRC_DIR}/Adaptive/AmrTransfer2D.cpp"
         "${SRC_DIR}/Adaptive/AmrPressure2D.cpp" "${SRC_DIR}/Adaptive/AmrPressureTopology2D.cpp"
@@ -76,6 +77,7 @@ if(NOT BITLOOP_DISCOVERY)
     target_compile_features(FluidSimEngine PUBLIC cxx_std_23)
     target_link_libraries(FluidSimEngine PUBLIC bitloop::bitloop FluidAdaptiveCore FluidUniformWebGPUCore FluidAdaptiveWebGPUCore)
     target_link_libraries(FluidSim PRIVATE FluidSimEngine)
+    target_link_libraries(FluidSim PRIVATE unofficial::brotli::brotlienc unofficial::brotli::brotlidec)
     bitloop_deploy_webgpu_runtime(FluidSim)
 
     add_library(FluidSimEngineWebGL STATIC "${SRC_DIR}/FluidGridWebGL.cpp" "${SRC_DIR}/PressureMultigridGPU.cpp")
@@ -89,6 +91,23 @@ if(NOT BITLOOP_DISCOVERY)
     option(FLUIDSIM_BUILD_TESTS "Build the fluid engine regression tests" OFF)
     if(FLUIDSIM_BUILD_TESTS)
         enable_testing()
+        if(BITLOOP_DEV_MODE)
+            add_executable(FluidCheckpointTests tests/FluidCheckpointTests.cpp
+                "${SRC_DIR}/FluidCheckpointIO.cpp" "${SRC_DIR}/FluidSnapshot.cpp")
+            target_include_directories(FluidCheckpointTests PRIVATE "${SRC_DIR}")
+            target_compile_features(FluidCheckpointTests PRIVATE cxx_std_23)
+            target_link_libraries(FluidCheckpointTests PRIVATE bitloop::bitloop unofficial::brotli::brotlienc unofficial::brotli::brotlidec)
+            add_test(NAME FluidCheckpointTests COMMAND FluidCheckpointTests)
+            add_executable(FluidSnapshotSceneTests tests/FluidSnapshotSceneTests.cpp
+                "${SRC_DIR}/FluidSim.cpp" "${SRC_DIR}/FluidGridDisplay.cpp"
+                "${SRC_DIR}/FluidCheckpointIO.cpp" "${SRC_DIR}/FluidSnapshot.cpp")
+            target_compile_definitions(FluidSnapshotSceneTests PRIVATE SIM_NAME=FluidSim)
+            target_include_directories(FluidSnapshotSceneTests PRIVATE "${SRC_DIR}")
+            target_link_libraries(FluidSnapshotSceneTests PRIVATE FluidSimEngine
+                unofficial::brotli::brotlienc unofficial::brotli::brotlidec)
+            bitloop_deploy_webgpu_runtime(FluidSnapshotSceneTests)
+            add_test(NAME FluidSnapshotSceneTests COMMAND FluidSnapshotSceneTests)
+        endif()
         add_executable(FluidSimTests tests/FluidGridTests.cpp)
         target_link_libraries(FluidSimTests PRIVATE FluidSimEngine)
         add_test(NAME FluidGridTests COMMAND FluidSimTests)

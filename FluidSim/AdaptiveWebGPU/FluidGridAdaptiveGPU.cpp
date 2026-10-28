@@ -5,6 +5,7 @@
 #include "AmrPressureGPU.h"
 #include "../UniformWebGPU/FluidWebGPUShaders.h"
 #include <bit>
+#include <chrono>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -703,7 +704,7 @@ void FluidGridAdaptiveGPU::writeColorPixels(std::vector<float>& pixels) const {
 void FluidGridAdaptiveGPU::synchronize() const {
     impl->runner.read(impl->data.front()->conserved, 0, sizeof(float));
 }
-GasStepResult FluidGridAdaptiveGPU::step(double dt, double tolerance, double damping, std::array<double, 2> acceleration, int maxIterations) {
+GasStepResult FluidGridAdaptiveGPU::step(double dt, double tolerance, double damping, std::array<double, 2> acceleration, int maxIterations, bool measureTimings) {
     GasStepResult result;
     auto& g = *impl;
     if (dt == 0.) {
@@ -711,6 +712,9 @@ GasStepResult FluidGridAdaptiveGPU::step(double dt, double tolerance, double dam
         result.projection = {0, divergence, std::isfinite(divergence) && divergence <= tolerance};
         return result;
     }
+    using Clock = std::chrono::steady_clock;
+    if (measureTimings) synchronize();
+    auto started = measureTimings ? Clock::now() : Clock::time_point{};
     const double limit = stableTimeStep();
     double remaining = dt;
     while (remaining > 0.) {
@@ -725,10 +729,18 @@ GasStepResult FluidGridAdaptiveGPU::step(double dt, double tolerance, double dam
             p.value[3] = float(std::exp(-damping * dt));
             g.runner.run(g.dampingKernel, {&l->conserved}, {{"metadata", &l->storage->metadata}}, p, g.extent(*l));
         }
-    // Completion belongs to the whole step; phase timing would require an extra queue barrier.
     result.transportMs = result.projectionMs = -1.;
+    if (measureTimings)
+    {
+        synchronize();
+        const auto now = Clock::now();
+        result.transportMs = std::chrono::duration<double, std::milli>(now - started).count();
+        started = now;
+    }
     result.projection = project(tolerance, dt, acceleration, maxIterations);
     synchronize();
+    if (measureTimings)
+        result.projectionMs = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
     return result;
 }
 GasTotals FluidGridAdaptiveGPU::totals() const {

@@ -155,6 +155,134 @@ void evolvingParity()
     }
     std::cout<<"PASS 512x512 first 200 frames, 2 x .01-second steps per frame, exact native/common state/result parity\n";
 }
+void checkpointParity()
+{
+    for (bool extra_component : {false, true})
+    {
+        Fixture fixture;
+        FluidGrid original(33, 25, 2.5);
+        original.setDevice(FluidDevice::GPU);
+        auto initial = fixture.configure(original);
+        if (extra_component)
+        {
+            fixture.gas.components.push_back({fixture.elements.add({"Extra gas", {.7f, .2f, .4f}}), .1});
+            initial.gas_mass.push_back(initial.gas_mass[1]);
+            for (size_t i = 0; i < initial.gas_mass[1].size(); ++i)
+            {
+                initial.gas_mass[1][i] *= .6;
+                initial.gas_mass[2][i] *= .4;
+            }
+            original.configureMaterials(fixture.elements, fixture.liquid, fixture.gas);
+            original.upload(initial);
+        }
+        original.setGravityY(73.);
+        original.setOrigin({-7., 4.});
+        for (int tick = 0; tick < 50; ++tick)
+            require(original.step(.004, 2000, .01).converged, "Checkpoint warmup failed");
+        if (extra_component)
+        {
+            auto edit = original.beginEdit();
+            edit.setCell(3, 2, Phase::Liquid, fixture.liquid.components[0].element);
+            edit.setCell(4, 2, Phase::Gas, fixture.gas.components[2].element);
+            edit.commit(); // Capture with stale derived density/colour caches as well as warm pressure history.
+        }
+
+        const auto before = original.download();
+        FluidCheckpoint saved;
+        require(original.saveCheckpoint(saved), "Uniform WebGPU checkpoint unsupported");
+        require(same(before, original.download()), "Saving a checkpoint changed physical state");
+        const size_t groups = extra_component ? 2 : 1;
+        require(saved.data.size() == ((3 + 4 * groups) * 33 * 25 + 34 * 25 + 33 * 26) * sizeof(float), "Checkpoint contains the wrong native fields");
+        saved.metadata = bl::JSON::json::parse(saved.metadata.dump()); // Exercise the on-disk numeric round trip.
+
+        FluidGrid resumed(33, 25, 2.5);
+        resumed.setDevice(FluidDevice::GPU);
+        require(resumed.loadCheckpoint(saved), "Loading uniform WebGPU checkpoint failed");
+        require(same(before, resumed.download()), "Checkpoint restore changed physical fields");
+        FluidCheckpoint observed;
+        resumed.saveCheckpoint(observed);
+        require(saved.metadata == observed.metadata && saved.data == observed.data, "Checkpoint restore lost native configuration/history");
+        bool rejected = false;
+        try { resumed.setDevice(FluidDevice::CPU); }
+        catch (const std::logic_error&) { rejected = true; }
+        require(rejected, "Checkpoint load did not mark the wrapper initialized");
+
+        for (int tick = 0; tick < 200; ++tick)
+        {
+            const auto a = original.step(.004, 2000, .01);
+            const auto b = resumed.step(.004, 2000, .01);
+            require(a.converged && b.converged && a.iterations == b.iterations && a.max_divergence == b.max_divergence,
+                "Resumed pressure solve differs from uninterrupted solve");
+            require(same(original.download(), resumed.download()), "Resumed trajectory differs from uninterrupted state");
+        }
+        original.saveCheckpoint(saved);
+        resumed.saveCheckpoint(observed);
+        require(saved.metadata == observed.metadata && saved.data == observed.data, "Continued checkpoint history differs");
+        std::vector<float> a, b;
+        original.writeColorPixels(a);
+        resumed.writeColorPixels(b);
+        require(a == b, "Resumed material colours differ");
+
+        for (int corruption = 0; corruption < 8; ++corruption)
+        {
+            auto invalid = saved;
+            switch (corruption)
+            {
+            case 0: invalid.metadata["version"] = 2; break;
+            case 1: invalid.metadata["backend"] = "another-engine"; break;
+            case 2: invalid.metadata["width"] = 34; break;
+            case 3: invalid.metadata["scalar"] = "float64"; break;
+            case 4: invalid.metadata["byte_order"] = "unsupported"; break;
+            case 5: invalid.data.pop_back(); break;
+            case 6: invalid.metadata["liquid_mixture"][0]["element"] = 999; break;
+            case 7: invalid.metadata.erase("cached_outflow"); break;
+            }
+            rejected = false;
+            try { resumed.loadCheckpoint(invalid); }
+            catch (const std::exception&) { rejected = true; }
+            resumed.saveCheckpoint(observed);
+            require(rejected && saved.metadata == observed.metadata && saved.data == observed.data,
+                "Rejected checkpoint mutated the live grid");
+        }
+        std::cout << "PASS checkpoint exact state/history/configuration/colour continuation for200 ticks, ingredients="
+                  << (extra_component ? 5 : 4) << ", eight incompatible/corrupt loads rejected without mutation\n";
+    }
+
+    Fixture fixture;
+    FluidGrid setup(17, 13, 1.);
+    auto initial = fixture.configure(setup);
+    FluidGridGPU native(17, 13, 1.);
+    fixture.configureNative(native, initial);
+    native.gas_damping_rate = .3;
+    native.gravity_y = 11.;
+    native.pressure_preconditioner = FluidGridGPU::PressurePreconditioner::Diagonal;
+    FluidCheckpoint checkpoint;
+    native.saveCheckpoint(checkpoint); // Initial state, before the first pressure solve.
+    FluidGridGPU loaded(17, 13, 1.);
+    loaded.loadCheckpoint(checkpoint);
+    require(loaded.gas_damping_rate == .3 && loaded.gravity_y == 11. &&
+        loaded.pressure_preconditioner == FluidGridGPU::PressurePreconditioner::Diagonal, "Checkpoint lost native physical/solver settings");
+    for (int tick = 0; tick < 200; ++tick)
+    {
+        const auto a = native.step(.004, 2000, .01);
+        const auto b = loaded.step(.004, 2000, .01);
+        require(a.converged && b.converged && a.iterations == b.iterations && a.max_divergence == b.max_divergence &&
+            same(native.download(), loaded.download()), "Initial-state checkpoint changed diagonal/damped evolution");
+    }
+    std::cout << "PASS initial-state checkpoint, diagonal solver and nonzero damping exact continuation for200 ticks\n";
+
+    for (const auto device : {FluidDevice::CPU, FluidDevice::GPU})
+    for (const auto mode : {AdaptiveMode::DISABLED, AdaptiveMode::MAX_4})
+    {
+        if (device == FluidDevice::GPU && mode == AdaptiveMode::DISABLED) continue;
+        FluidGrid unsupported(32, 24, 1.);
+        unsupported.setDevice(device);
+        unsupported.setAdaptiveMode(mode);
+        FluidCheckpoint checkpoint;
+        require(!unsupported.saveCheckpoint(checkpoint) && !unsupported.loadCheckpoint(checkpoint), "Unimplemented backend silently accepted checkpointing");
+    }
+}
+
 #ifndef __EMSCRIPTEN__
 void workerImageToRender()
 {
@@ -191,7 +319,7 @@ int main(int argc,char** argv)
     {
         std::cout<<std::unitbuf;
         if(argc>1 && std::string(argv[1])=="--evolving"){evolvingParity();return 0;}
-        selection();commonParity();
+        selection();commonParity();checkpointParity();
 #ifndef __EMSCRIPTEN__
         workerImageToRender();
 #endif

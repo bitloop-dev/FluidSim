@@ -84,7 +84,7 @@ struct FluidGridCPU final : FluidGridBase
     void destroy() override {}
 
     // one physics substep: transport material and momentum, apply forces, then project
-    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6) override;
+    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr) override;
 
     // transport requires a divergence-free velocity field; step() supplies the previous projection
     void advect(double dt);

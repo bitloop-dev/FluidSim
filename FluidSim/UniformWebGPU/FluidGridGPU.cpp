@@ -4,7 +4,10 @@
 #include "PressureMultigridGPU.h"
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 
@@ -209,17 +212,161 @@ FluidGridGPU::State FluidGridGPU::download() const
     return state;
 }
 
+bool FluidGridGPU::saveCheckpoint(FluidCheckpoint& checkpoint) const
+{
+    if (!gpu) throw std::logic_error("Upload before saving a WebGPU checkpoint");
+    using bl::JSON::json;
+    json catalogue = json::array();
+    for (ElementId id = 0; id < elements.size(); ++id)
+        catalogue.push_back({{"name", elements[id].name}, {"color", elements[id].color}});
+    auto mixtureMetadata = [](const FluidMixture& mixture)
+    {
+        json result = json::array();
+        for (const auto& component : mixture.components)
+            result.push_back({{"element", component.element}, {"density", component.density}});
+        return result;
+    };
+
+    checkpoint.metadata = {
+        {"backend", "webgpu-uniform"}, {"version", 1}, {"scalar", "float32"},
+        {"byte_order", std::endian::native == std::endian::little ? "little" : "big"},
+        {"width", width}, {"height", height}, {"cell_size", cell_size},
+        {"origin", {origin.x, origin.y}}, {"gravity_y", gravity_y}, {"gas_damping_rate", gas_damping_rate},
+        {"preconditioner", int(pressure_preconditioner)}, {"elements", std::move(catalogue)},
+        {"liquid_mixture", mixtureMetadata(liquid_mixture)}, {"gas_mixture", mixtureMetadata(gas_mixture)},
+        {"previous_solve_iterations", gpu->previous_solve_iterations}, {"solver_tolerance", gpu->tolerance},
+        {"cached_outflow", gpu->cached_outflow}, {"velocity_stats_valid", gpu->velocity_stats_valid}
+    };
+
+    // Fixed order: fraction, face velocities, two pressure histories, packed component groups.
+    // Density, momentum, colour and pressure workspaces are derived at the next operation.
+    const size_t cells = size_t(width) * height;
+    const size_t values = (3 + 4 * gpu->components.size()) * cells + size_t(width + 1) * height + size_t(width) * (height + 1);
+    checkpoint.data.resize(values * sizeof(float));
+    size_t offset = 0;
+    auto append = [&](const Field& field)
+    {
+        const auto values = gpu->runner.read(field);
+        const size_t bytes = values.size() * sizeof(float);
+        std::memcpy(checkpoint.data.data() + offset, values.data(), bytes);
+        offset += bytes;
+    };
+    append(gpu->liquid_fraction);
+    append(gpu->u);
+    append(gpu->v);
+    append(gpu->pressure);
+    append(gpu->previous_pressure);
+    for (const auto& group : gpu->components) append(group.mass);
+    return true;
+}
+
+bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
+{
+    const auto& meta = checkpoint.metadata;
+    const char* byte_order = std::endian::native == std::endian::little ? "little" : "big";
+    if (meta.at("backend") != "webgpu-uniform" || meta.at("version") != 1 ||
+        meta.at("scalar") != "float32" || meta.at("byte_order") != byte_order)
+        throw std::runtime_error("Incompatible uniform WebGPU checkpoint format");
+    if (meta.at("width") != width || meta.at("height") != height || meta.at("cell_size") != cell_size)
+        throw std::runtime_error("Checkpoint geometry does not match the fluid grid");
+
+    // Validate file structure before replacing live state. Physical model inputs keep their normal contract.
+    ElementCatalogue restored_elements;
+    for (const auto& element : meta.at("elements"))
+        restored_elements.add({element.at("name").get<std::string>(), element.at("color").get<std::array<float, 3>>()});
+    auto readMixture = [&](const bl::JSON::json& entries)
+    {
+        FluidMixture result;
+        for (const auto& entry : entries)
+        {
+            const auto element = entry.at("element").get<ElementId>();
+            if (element >= restored_elements.size())
+                throw std::runtime_error("Checkpoint mixture references a missing element");
+            result.components.push_back({element, entry.at("density").get<double>()});
+        }
+        return result;
+    };
+    auto liquid = readMixture(meta.at("liquid_mixture"));
+    auto gas = readMixture(meta.at("gas_mixture"));
+    const auto restored_origin = meta.at("origin").get<std::array<double, 2>>();
+    const double restored_gravity = meta.at("gravity_y").get<double>();
+    const double restored_damping = meta.at("gas_damping_rate").get<double>();
+    const int preconditioner = meta.at("preconditioner").get<int>();
+    if (preconditioner != int(PressurePreconditioner::Diagonal) && preconditioner != int(PressurePreconditioner::Multigrid))
+        throw std::runtime_error("Unknown checkpoint pressure preconditioner");
+    const int iterations = meta.at("previous_solve_iterations").get<int>();
+    const float tolerance = meta.at("solver_tolerance").get<float>();
+    const float outflow = meta.at("cached_outflow").get<float>();
+    const bool stats_valid = meta.at("velocity_stats_valid").get<bool>();
+    const size_t groups = (liquid.components.size() + gas.components.size() + 3) / 4;
+    const size_t cells = size_t(width) * height;
+    const size_t count = (3 + 4 * groups) * cells + size_t(width + 1) * height + size_t(width) * (height + 1);
+    if (checkpoint.data.size() != count * sizeof(float))
+        throw std::runtime_error("Checkpoint fluid payload has the wrong size");
+    std::vector<float> values(count);
+    std::memcpy(values.data(), checkpoint.data.data(), checkpoint.data.size());
+
+    elements = std::move(restored_elements);
+    liquid_mixture = std::move(liquid);
+    gas_mixture = std::move(gas);
+    origin = {restored_origin[0], restored_origin[1]};
+    gravity_y = restored_gravity;
+    gas_damping_rate = restored_damping;
+    pressure_preconditioner = PressurePreconditioner(preconditioner);
+    upload({}); // Allocate/reuse fields and rebuild component masks for the saved mixtures.
+
+    size_t offset = 0;
+    auto restore = [&](const Field& field)
+    {
+        const size_t count = size_t(field.width) * field.height * field.channels;
+        gpu->runner.write(field, std::span<const float>(values.data() + offset, count));
+        offset += count;
+    };
+    restore(gpu->liquid_fraction);
+    restore(gpu->u);
+    restore(gpu->v);
+    restore(gpu->pressure);
+    restore(gpu->previous_pressure);
+    for (const auto& group : gpu->components) restore(group.mass);
+    gpu->previous_solve_iterations = iterations;
+    gpu->tolerance = tolerance;
+    gpu->cached_outflow = outflow;
+    gpu->velocity_stats_valid = stats_valid;
+    gpu->density_valid = false;
+    gpu->runner.flush();
+    return true;
+}
+
 void FluidGridGPU::destroy() { gpu.reset(); }
 
-FluidGridGPU::ProjectionResult FluidGridGPU::step(double dt, int max_iterations, double divergence_tolerance)
+FluidGridGPU::ProjectionResult FluidGridGPU::step(double dt, int max_iterations, double divergence_tolerance, FluidStepTimings* timings)
 {
+    if (timings) *timings = {};
     if (dt<=0.0) return {};
+
+    using Clock = std::chrono::steady_clock;
+    if (timings) synchronize(); // Exclude earlier queued work from this substep's stages.
+    auto previous = timings ? Clock::now() : Clock::time_point{};
+    auto elapsed = [&]
+    {
+        synchronize();
+        const auto now = Clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(now - previous).count();
+        previous = now;
+        return ms;
+    };
+
     gpu->configure(*this);
     gpu->advect(dt);
+    if (timings) timings->transport_ms = elapsed();
+
     gpu->dampGasVelocity(dt);
     gpu->applyGravity(dt);
+    if (timings) timings->forces_ms = elapsed();
+
     const auto result=gpu->project(dt,max_iterations,divergence_tolerance);
     gpu->runner.flush();
+    if (timings) timings->pressure_ms = elapsed();
     return result;
 }
 

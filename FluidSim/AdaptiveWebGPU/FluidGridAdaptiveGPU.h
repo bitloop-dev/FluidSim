@@ -35,8 +35,9 @@ public:
     FluidGridAdaptiveGPU& operator=(const FluidGridAdaptiveGPU&) = delete;
     void upload(const State& state, double tolerance = 1.e-4);
     bool regrid(GasLayout layout);
-    // Returns completed work. GPU phase timings are -1; time the combined step at the caller.
-    GasStepResult step(double dt, double tolerance, double damping = 0., std::array<double, 2> acceleration = {}, int maxIterations = -1);
+    // Returns completed work. Optional stage timings add GPU completion waits;
+    // transportMs/projectionMs are -1 without measurement for a nonzero step.
+    GasStepResult step(double dt, double tolerance, double damping = 0., std::array<double, 2> acceleration = {}, int maxIterations = -1, bool measureTimings = false);
     FluidProjectionResult project(double tolerance, double dt = 0., std::array<double, 2> acceleration = {}, int maxIterations = -1);
     void transport(double dt);
     double stableTimeStep() const;
