@@ -1,5 +1,5 @@
-#include "FluidGridGPU.h"
-#include "FluidGridGPUInternal.h"
+#include "FluidGridWebGL.h"
+#include "FluidGridWebGLInternal.h"
 #include "PressureMultigridGPU.h"
 #include <algorithm>
 #include <array>
@@ -24,7 +24,7 @@ namespace fluid
 using namespace gpu_detail;
 
 
-struct FluidGridGPU::Impl
+struct FluidGridWebGL::Impl
 {
     const int width, height;
     float cell_size = 1, gravity_y = 100, tolerance = 0;
@@ -64,12 +64,12 @@ struct FluidGridGPU::Impl
     Program reconstruct, freeze_weights, transfers, transport_momentum, transport_liquid, momentum;
 
     Impl(int w, int h);
-    void configure(const FluidGridGPU& grid)
+    void configure(const FluidGridWebGL& grid)
     {
         if (cell_size != float(grid.cell_size)) density_valid = false;
         cell_size = float(grid.cell_size);
         gravity_y = float(grid.gravity_y);
-        use_multigrid = grid.pressure_preconditioner == FluidGridGPU::PressurePreconditioner::Multigrid;
+        use_multigrid = grid.pressure_preconditioner == FluidGridWebGL::PressurePreconditioner::Multigrid;
     }
     using Input = std::pair<const char*, const Texture*>;
     void run(Program& program, std::initializer_list<const Texture*> outputs,
@@ -109,9 +109,9 @@ struct FluidGridGPU::Impl
         run(subtract_mean, { &scratch }, { {"source", &field}, {"stats", &residual_stats} });
         field.swap(scratch);
     }
-    void uploadComponents(const FluidGridGPU& grid, const State& state);
+    void uploadComponents(const FluidGridWebGL& grid, const State& state);
     void rebuildDensity();
-    void rebuildColor(const FluidGridGPU& grid);
+    void rebuildColor(const FluidGridWebGL& grid);
     void sumGroups(Program& program, Texture& result, Texture& scratch, size_t first);
     void advectComponents(double dt, int direction);
     void rebuildPressureCoefficients();
@@ -119,7 +119,7 @@ struct FluidGridGPU::Impl
     void rebuildResidual();
     void applyPreconditioner(bool restart);
     int solvePressure(int max_iterations, float residual_tolerance, bool refinement);
-    FluidGridGPU::ProjectionResult project(double dt, int max_iterations, double divergence_tolerance);
+    FluidGridWebGL::ProjectionResult project(double dt, int max_iterations, double divergence_tolerance);
     double maxDivergence();
     void applyGravity(double dt);
     void buildTransportPrograms();
@@ -133,7 +133,7 @@ struct FluidGridGPU::Impl
     void advect(double dt);
 };
 
-FluidGridGPU::Impl::Impl(int w, int h) :
+FluidGridWebGL::Impl::Impl(int w, int h) :
     width(w), height(h),
     u(w + 1, h), v(w, h + 1), next_u(w + 1, h), next_v(w, h + 1),
     liquid_fraction(w, h), next_liquid_fraction(w, h), density(w, h, 2), next_density(w, h, 2),
@@ -154,7 +154,7 @@ FluidGridGPU::Impl::Impl(int w, int h) :
     {
         runner.target({ texture });
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-            throw std::runtime_error("FluidGridGPU requires renderable R32F, RG32F and RGBA32F textures");
+            throw std::runtime_error("FluidGridWebGL requires renderable R32F, RG32F and RGBA32F textures");
     }
     auto build = [&](Program& p, const char* name, const char* body) { runner.build(p, name, common, body); };
     build(fill, "fill", R"(
@@ -382,26 +382,26 @@ FluidGridGPU::Impl::Impl(int w, int h) :
     buildTransportPrograms();
 }
 
-void FluidGridGPU::Impl::rebuildPressureCoefficients()
+void FluidGridWebGL::Impl::rebuildPressureCoefficients()
 {
     rebuildDensity();
     run(pressure_coefficient, { &pressure_coefficients }, { {"density", &density} });
     if (use_multigrid) multigrid.rebuild(pressure_coefficients);
 }
 
-void FluidGridGPU::Impl::applyPressureOperator(const Texture& input)
+void FluidGridWebGL::Impl::applyPressureOperator(const Texture& input)
 {
     run(pressure_operator, { &pressure_product }, { {"source", &input}, {"coefficients", &pressure_coefficients} });
 }
 
-void FluidGridGPU::Impl::rebuildResidual()
+void FluidGridWebGL::Impl::rebuildResidual()
 {
     applyPressureOperator(pressure);
     run(residual, { &pressure_residual }, { {"rhs", &pressure_rhs}, {"product", &pressure_product} });
     reduce(pressure_residual, residual_stats);
 }
 
-void FluidGridGPU::Impl::applyPreconditioner(bool restart)
+void FluidGridWebGL::Impl::applyPreconditioner(bool restart)
 {
     const Texture* correction = &pressure_correction;
     if (use_multigrid)
@@ -421,7 +421,7 @@ void FluidGridGPU::Impl::applyPreconditioner(bool restart)
     solver_state.swap(next_solver_state);
 }
 
-int FluidGridGPU::Impl::solvePressure(int max_iterations, float residual_tolerance, bool refinement)
+int FluidGridWebGL::Impl::solvePressure(int max_iterations, float residual_tolerance, bool refinement)
 {
     tolerance = residual_tolerance;
     // solve a correction from zero so small updates are not added to a large warm-start pressure
@@ -483,7 +483,7 @@ int FluidGridGPU::Impl::solvePressure(int max_iterations, float residual_toleran
     return int(state[3] + 0.5f);
 }
 
-FluidGridGPU::ProjectionResult FluidGridGPU::Impl::project(double dt, int max_iterations, double divergence_tolerance)
+FluidGridWebGL::ProjectionResult FluidGridWebGL::Impl::project(double dt, int max_iterations, double divergence_tolerance)
 {
     velocity_stats_valid = false;
     rebuildPressureCoefficients();
@@ -523,7 +523,7 @@ FluidGridGPU::ProjectionResult FluidGridGPU::Impl::project(double dt, int max_it
     return result;
 }
 
-double FluidGridGPU::Impl::maxDivergence()
+double FluidGridWebGL::Impl::maxDivergence()
 {
     if (reduction_levels.empty())
         run(velocity_stats, { &residual_stats }, { {"u", &u}, {"v", &v} });
@@ -538,18 +538,18 @@ double FluidGridGPU::Impl::maxDivergence()
     return velocity_stats_valid ? result[1] : std::numeric_limits<double>::infinity();
 }
 
-void FluidGridGPU::Impl::applyGravity(double dt)
+void FluidGridWebGL::Impl::applyGravity(double dt)
 {
     velocity_stats_valid = false;
     run(gravity, { &next_v }, { {"velocity", &v} }, float(gravity_y * dt));
     v.swap(next_v);
 }
 
-FluidGridGPU::FluidGridGPU(int width, int height, double cell_size) : width(width), height(height), cell_size(cell_size) {}
-FluidGridGPU::~FluidGridGPU() = default;
-void FluidGridGPU::destroy() { gpu.reset(); }
-std::uint32_t FluidGridGPU::liquidFractionTexture() const { return gpu->liquid_fraction.id; }
-std::uint32_t FluidGridGPU::colorTexture() const
+FluidGridWebGL::FluidGridWebGL(int width, int height, double cell_size) : width(width), height(height), cell_size(cell_size) {}
+FluidGridWebGL::~FluidGridWebGL() = default;
+void FluidGridWebGL::destroy() { gpu.reset(); }
+std::uint32_t FluidGridWebGL::liquidFractionTexture() const { return gpu->liquid_fraction.id; }
+std::uint32_t FluidGridWebGL::colorTexture() const
 {
     ComputeState guard;
     gpu->configure(*this);
@@ -557,7 +557,7 @@ std::uint32_t FluidGridGPU::colorTexture() const
     return gpu->color.id;
 }
 
-void FluidGridGPU::Impl::uploadComponents(const FluidGridGPU& grid, const State& state)
+void FluidGridWebGL::Impl::uploadComponents(const FluidGridWebGL& grid, const State& state)
 {
     liquid_count = grid.liquid_mixture.components.size();
     gas_count = grid.gas_mixture.components.size();
@@ -565,10 +565,10 @@ void FluidGridGPU::Impl::uploadComponents(const FluidGridGPU& grid, const State&
     auto validate = [&](const auto& fields, size_t count)
     {
         if (!fields.empty() && fields.size() != count)
-            throw std::invalid_argument("FluidGridGPU upload component count does not match the mixture");
+            throw std::invalid_argument("FluidGridWebGL upload component count does not match the mixture");
         for (const auto& field : fields)
             if (!field.empty() && field.size() != cell_count)
-                throw std::invalid_argument("FluidGridGPU upload component dimensions do not match the grid");
+                throw std::invalid_argument("FluidGridWebGL upload component dimensions do not match the grid");
     };
     validate(state.liquid_mass, liquid_count);
     validate(state.gas_mass, gas_count);
@@ -598,7 +598,7 @@ void FluidGridGPU::Impl::uploadComponents(const FluidGridGPU& grid, const State&
     density_valid = false;
 }
 
-void FluidGridGPU::Impl::rebuildDensity()
+void FluidGridWebGL::Impl::rebuildDensity()
 {
     if (density_valid) return;
     if (components.empty()) run(fill, { &density });
@@ -618,7 +618,7 @@ void FluidGridGPU::Impl::rebuildDensity()
     density_valid = true;
 }
 
-void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid)
+void FluidGridWebGL::Impl::rebuildColor(const FluidGridWebGL& grid)
 {
     if (components.empty()) run(fill, { &color }, {}, 0, 1);
     for (size_t first = 0; first < components.size(); first += 4)
@@ -643,7 +643,7 @@ void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid)
     }
 }
 
-void FluidGridGPU::Impl::sumGroups(Program& program, Texture& result, Texture& scratch, size_t first)
+void FluidGridWebGL::Impl::sumGroups(Program& program, Texture& result, Texture& scratch, size_t first)
 {
     // Four RGBA inputs cover sixteen ingredients per draw without exceeding sampler limits.
     const size_t count = std::min(size_t(4), components.size() - first);
@@ -655,17 +655,17 @@ void FluidGridGPU::Impl::sumGroups(Program& program, Texture& result, Texture& s
     result.swap(scratch);
 }
 
-void FluidGridGPU::upload(const State& state)
+void FluidGridWebGL::upload(const State& state)
 {
 #ifdef __EMSCRIPTEN__
     if (!emscripten_webgl_get_current_context())
-        throw std::runtime_error("FluidGridGPU requires a current graphics context");
+        throw std::runtime_error("FluidGridWebGL requires a current graphics context");
     if (!emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "EXT_color_buffer_float"))
-        throw std::runtime_error("FluidGridGPU requires EXT_color_buffer_float");
+        throw std::runtime_error("FluidGridWebGL requires EXT_color_buffer_float");
 #else
     // numeric-only headless runs do not create a GL context; --snapshots enables one
     if (!glad_glGetString || !glGetString(GL_VERSION))
-        throw std::runtime_error("FluidGridGPU requires a current graphics context; use --snapshots when running headlessly");
+        throw std::runtime_error("FluidGridWebGL requires a current graphics context; use --snapshots when running headlessly");
 #endif
     ComputeState guard;
     if (!gpu) gpu = std::make_unique<Impl>(width, height);
@@ -675,7 +675,7 @@ void FluidGridGPU::upload(const State& state)
         if (values.empty()) { gpu->run(gpu->fill, { &field }); return; }
         // host-provided arrays must match the destination to avoid reading past their storage
         if (values.size() != size_t(field.width) * field.height)
-            throw std::invalid_argument("FluidGridGPU upload dimensions do not match the grid");
+            throw std::invalid_argument("FluidGridWebGL upload dimensions do not match the grid");
         glBindTexture(GL_TEXTURE_2D, field.id);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, field.width, field.height, GL_RED, GL_FLOAT, values.data());
     };
@@ -691,7 +691,7 @@ void FluidGridGPU::upload(const State& state)
     gpu->multigrid.useCPUCoarsePressure(cpu_pressure_cells);
 }
 
-void FluidGridGPU::commitEdits(detail::CellEditBatch& batch)
+void FluidGridWebGL::commitEdits(detail::CellEditBatch& batch)
 {
     batch.prepare(width, height, cell_size * cell_size, liquid_mixture, gas_mixture);
     if (!gpu || gpu->liquid_count != liquid_mixture.components.size() || gpu->gas_count != gas_mixture.components.size())
@@ -741,7 +741,7 @@ void FluidGridGPU::commitEdits(detail::CellEditBatch& batch)
     gpu->density_valid = false;
 }
 
-FluidGridGPU::State FluidGridGPU::download() const
+FluidGridWebGL::State FluidGridWebGL::download() const
 {
     ComputeState guard;
     auto read = [&](const Texture& field)
@@ -777,7 +777,7 @@ FluidGridGPU::State FluidGridGPU::download() const
     return state;
 }
 
-FluidGridGPU::ProjectionResult FluidGridGPU::step(double dt, int max_iterations, double divergence_tolerance)
+FluidGridWebGL::ProjectionResult FluidGridWebGL::step(double dt, int max_iterations, double divergence_tolerance)
 {
     if (dt <= 0.0) return {};
     ComputeState guard;
@@ -787,7 +787,7 @@ FluidGridGPU::ProjectionResult FluidGridGPU::step(double dt, int max_iterations,
     return gpu->project(dt, max_iterations, divergence_tolerance);
 }
 
-void FluidGridGPU::advect(double dt)
+void FluidGridWebGL::advect(double dt)
 {
     if (dt <= 0.0) return;
     ComputeState guard;
@@ -795,14 +795,14 @@ void FluidGridGPU::advect(double dt)
     gpu->advect(dt);
 }
 
-void FluidGridGPU::applyGravity(double dt)
+void FluidGridWebGL::applyGravity(double dt)
 {
     ComputeState guard;
     gpu->configure(*this);
     gpu->applyGravity(dt);
 }
 
-FluidGridGPU::ProjectionResult FluidGridGPU::project(double dt, int max_iterations, double divergence_tolerance)
+FluidGridWebGL::ProjectionResult FluidGridWebGL::project(double dt, int max_iterations, double divergence_tolerance)
 {
     if (dt <= 0.0) return {};
     ComputeState guard;
@@ -810,14 +810,14 @@ FluidGridGPU::ProjectionResult FluidGridGPU::project(double dt, int max_iteratio
     return gpu->project(dt, max_iterations, divergence_tolerance);
 }
 
-double FluidGridGPU::maxDivergence() const
+double FluidGridWebGL::maxDivergence() const
 {
     ComputeState guard;
     gpu->configure(*this);
     return gpu->maxDivergence();
 }
 
-void FluidGridGPU::Impl::buildTransportPrograms()
+void FluidGridWebGL::Impl::buildTransportPrograms()
 {
     const std::string geometry = common + R"(
         float liquidArea(vec2 normal, float offset, vec2 rect_min, vec2 rect_max)
@@ -1075,22 +1075,22 @@ void FluidGridGPU::Impl::buildTransportPrograms()
 
 }
 
-void FluidGridGPU::Impl::rebuildInterfaces()
+void FluidGridWebGL::Impl::rebuildInterfaces()
 {
     run(reconstruct, { &interfaces }, { {"liquid", &liquid_fraction} });
 }
 
-void FluidGridGPU::Impl::rebuildTransfersX(double dt)
+void FluidGridWebGL::Impl::rebuildTransfersX(double dt)
 {
     run(transfers, { &transfers_u }, { {"liquid", &liquid_fraction}, {"interfaces", &interfaces}, {"flow", &u}, {"density", &density} }, float(dt));
 }
 
-void FluidGridGPU::Impl::rebuildTransfersY(double dt)
+void FluidGridWebGL::Impl::rebuildTransfersY(double dt)
 {
     run(transfers, { &transfers_v }, { {"liquid", &liquid_fraction}, {"interfaces", &interfaces}, {"flow", &v}, {"density", &density} }, float(dt), 1);
 }
 
-void FluidGridGPU::Impl::advectComponents(double dt, int direction)
+void FluidGridWebGL::Impl::advectComponents(double dt, int direction)
 {
     const bool single_group = components.size() == 1;
     Program& program = single_group ? (direction == 0 ? transport_single_x : transport_single_y)
@@ -1121,7 +1121,7 @@ void FluidGridGPU::Impl::advectComponents(double dt, int direction)
     density_valid = single_group;
 }
 
-void FluidGridGPU::Impl::rebuildMomentum()
+void FluidGridWebGL::Impl::rebuildMomentum()
 {
     rebuildDensity();
     // Initialize donor velocities alongside momentum, without multiplying and dividing them by density.
@@ -1129,14 +1129,14 @@ void FluidGridGPU::Impl::rebuildMomentum()
     run(momentum, { &momentum_v, &next_v }, { {"density", &density}, {"source", &v} }, 0, 1);
 }
 
-void FluidGridGPU::Impl::recoverVelocity()
+void FluidGridWebGL::Impl::recoverVelocity()
 {
     rebuildDensity();
     run(momentum, { &next_u }, { {"density", &density}, {"source", &momentum_u} }, 0, 2);
     run(momentum, { &next_v }, { {"density", &density}, {"source", &momentum_v} }, 0, 3);
 }
 
-void FluidGridGPU::Impl::advectMomentumX(double dt)
+void FluidGridWebGL::Impl::advectMomentumX(double dt)
 {
     run(transport_momentum, { &next_momentum_u }, {
         {"momentum", &momentum_u}, {"donor_velocity", &next_u}, {"original_velocity", &u},
@@ -1148,7 +1148,7 @@ void FluidGridGPU::Impl::advectMomentumX(double dt)
     momentum_v.swap(next_momentum_v);
 }
 
-void FluidGridGPU::Impl::advectMomentumY(double dt)
+void FluidGridWebGL::Impl::advectMomentumY(double dt)
 {
     run(transport_momentum, { &next_momentum_u }, {
         {"momentum", &momentum_u}, {"donor_velocity", &next_u}, {"original_velocity", &u},
@@ -1160,11 +1160,11 @@ void FluidGridGPU::Impl::advectMomentumY(double dt)
     momentum_v.swap(next_momentum_v);
 }
 
-void FluidGridGPU::Impl::advect(double dt)
+void FluidGridWebGL::Impl::advect(double dt)
 {
     rebuildMomentum();
     if (!velocity_stats_valid && !std::isfinite(maxDivergence()))
-        throw std::runtime_error("FluidGridGPU encountered non-finite transport velocity");
+        throw std::runtime_error("FluidGridWebGL encountered non-finite transport velocity");
     const double max_outflow = cached_outflow;
     const double max_step = max_outflow > 0.0 ? 0.5 * cell_size / max_outflow : dt;
 

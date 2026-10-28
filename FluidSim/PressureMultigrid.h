@@ -5,7 +5,7 @@
 namespace fluid
 {
 
-// CPU pressure preconditioner; the fine equation still belongs to FluidGrid.
+// CPU pressure preconditioner; the fine equation still belongs to FluidGridCPU.
 class PressureMultigrid
 {
 public:

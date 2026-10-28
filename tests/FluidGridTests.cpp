@@ -1,4 +1,4 @@
-#include "FluidGrid.h"
+#include "FluidGridCPU.h"
 #include "FluidTestSetup.h"
 #include "FluidGridEditTests.h"
 #include <bitloop/core/threads.h>
@@ -8,7 +8,7 @@
 #include <numeric>
 #include <stdexcept>
 
-using fluid::FluidGrid;
+using fluid::FluidGridCPU;
 using fluid::test::initializeTestMaterials;
 
 namespace
@@ -20,12 +20,12 @@ void require(bool condition, const char* message)
         throw std::runtime_error(message);
 }
 
-double liquidVolume(const FluidGrid& grid)
+double liquidVolume(const FluidGridCPU& grid)
 {
     return std::accumulate(grid.liquid_fraction.begin(), grid.liquid_fraction.end(), 0.0) * grid.cell_size * grid.cell_size;
 }
 
-void requireValidState(const FluidGrid& grid, double initial_volume)
+void requireValidState(const FluidGridCPU& grid, double initial_volume)
 {
     for (double value : grid.u)
         require(std::isfinite(value), "non-finite horizontal velocity");
@@ -43,7 +43,7 @@ void requireValidState(const FluidGrid& grid, double initial_volume)
 
 void samplesStaggeredVelocityInWorldSpace()
 {
-    FluidGrid grid(9, 7, 2.5);
+    FluidGridCPU grid(9, 7, 2.5);
     grid.origin = {-7.0, 11.0};
     auto horizontal = [](double x, double y) { return 0.3 * x + 0.7 * y - 2.0; };
     auto vertical = [](double x, double y) { return -0.4 * x + 0.2 * y + 1.0; };
@@ -66,7 +66,7 @@ void samplesStaggeredVelocityInWorldSpace()
 
 void stateTransferPreservesCPUBehaviour()
 {
-    FluidGrid direct(32, 24, 4), uploaded(32, 24, 4);
+    FluidGridCPU direct(32, 24, 4), uploaded(32, 24, 4);
     for (int y = 0; y < 24; ++y)
     for (int x = 0; x < 32; ++x)
         direct.liquid_fraction[y * 32 + x] = std::clamp(y + 1.0 - (x + 12.0), 0.0, 1.0);
@@ -89,7 +89,7 @@ void stateTransferPreservesCPUBehaviour()
     require(state.liquid_mass == uploaded.liquid_mass && state.gas_mass == uploaded.gas_mass,
             "CPU download omitted component masses");
     uploaded.upload(initial);
-    FluidGrid restarted(32, 24, 4);
+    FluidGridCPU restarted(32, 24, 4);
     initializeTestMaterials(restarted);
     restarted.upload(initial);
     require(uploaded.step(1.0 / 120, 2000, 1e-8).converged && restarted.step(1.0 / 120, 2000, 1e-8).converged,
@@ -102,7 +102,7 @@ void stateTransferPreservesCPUBehaviour()
 
 void pressureBalancesGravity()
 {
-    FluidGrid grid(12, 10, 2.0);
+    FluidGridCPU grid(12, 10, 2.0);
     std::fill(grid.liquid_fraction.begin(), grid.liquid_fraction.end(), 1.0);
     initializeTestMaterials(grid);
     const double initial_volume = liquidVolume(grid);
@@ -120,9 +120,9 @@ void pressureBalancesGravity()
 
 void explicitCacheInvalidationMatchesFreshState()
 {
-    for (const auto preconditioner : {FluidGrid::PressurePreconditioner::Multigrid, FluidGrid::PressurePreconditioner::Diagonal})
+    for (const auto preconditioner : {FluidGridCPU::PressurePreconditioner::Multigrid, FluidGridCPU::PressurePreconditioner::Diagonal})
     {
-        FluidGrid edited(33, 25, 2.0);
+        FluidGridCPU edited(33, 25, 2.0);
         edited.pressure_preconditioner = preconditioner;
         initializeTestMaterials(edited);
         edited.applyGravity(0.01);
@@ -138,7 +138,7 @@ void explicitCacheInvalidationMatchesFreshState()
             edited.gas_mass[0][i] = 0.4 * (1.0 - f);
         }
         edited.invalidateCaches();
-        FluidGrid fresh(edited.width, edited.height, edited.cell_size);
+        FluidGridCPU fresh(edited.width, edited.height, edited.cell_size);
         initializeTestMaterials(fresh);
         fresh.pressure_preconditioner = preconditioner;
         fresh.upload(edited.download());
@@ -153,7 +153,7 @@ void explicitCacheInvalidationMatchesFreshState()
         for (size_t i = 0; i < edited.v.size(); ++i)
             require(std::abs(edited.v[i] - fresh.v[i]) < 2e-7, "edited vertical pressure solution differs from fresh upload");
 
-        FluidGrid forced = edited;
+        FluidGridCPU forced = edited;
         for (int tick = 0; tick < 20; ++tick)
         {
             forced.invalidateCaches();
@@ -168,7 +168,7 @@ void explicitCacheInvalidationMatchesFreshState()
 
 void transportConservesLiquidAndMovesItsCentroid()
 {
-    FluidGrid grid(64, 32, 1.0);
+    FluidGridCPU grid(64, 32, 1.0);
     std::fill(grid.u.begin(), grid.u.end(), 1.0);
     for (int y = 6; y < 18; ++y)
         for (int x = 8; x < 16; ++x)
@@ -196,7 +196,7 @@ void transportConservesLiquidAndMovesItsCentroid()
 
 void transportKeepsStraightInterfacesSharp()
 {
-    FluidGrid grid(40, 8, 1.0);
+    FluidGridCPU grid(40, 8, 1.0);
     std::fill(grid.u.begin(), grid.u.end(), 1.0);
     for (int y = 0; y < grid.height; ++y)
         for (int x = 8; x < 16; ++x)
@@ -222,7 +222,7 @@ void transportKeepsShallowInterfacesStraight()
     for (double slope : {0.0, -0.1, -0.05, 0.05, 0.1})
     for (double speed : {-1.0, 1.0})
     {
-        FluidGrid grid(96, 96, 1.0);
+        FluidGridCPU grid(96, 96, 1.0);
         auto& flow = vertical ? grid.v : grid.u;
         std::fill(flow.begin(), flow.end(), speed);
 
@@ -257,7 +257,7 @@ void transportKeepsShallowInterfacesStraight()
 
 void closedPoolRemainsValidOverRepeatedMotion()
 {
-    FluidGrid grid(32, 32, 4.0);
+    FluidGridCPU grid(32, 32, 4.0);
     for (int y = 0; y < grid.height; ++y)
         for (int x = 0; x < grid.width; ++x)
         {
@@ -282,7 +282,7 @@ void transportPreservesUniformMotionAcrossDensityChanges()
     for (const bl::DVec2 velocity : {bl::DVec2{1.0, 0.75}, bl::DVec2{-1.0, 0.75},
                                     bl::DVec2{1.0, -0.75}, bl::DVec2{-1.0, -0.75}})
     {
-        FluidGrid grid(48, 48, 1.0);
+        FluidGridCPU grid(48, 48, 1.0);
         std::fill(grid.u.begin(), grid.u.end(), velocity.x);
         std::fill(grid.v.begin(), grid.v.end(), velocity.y);
 
@@ -311,7 +311,7 @@ void transportPreservesUniformMotionAcrossDensityChanges()
 
 void zeroTimeAndFailedProjectionAreHandled()
 {
-    FluidGrid grid(8, 8, 1.0);
+    FluidGridCPU grid(8, 8, 1.0);
     grid.gravity_y = 1.0;
     grid.liquid_fraction[3 * grid.width + 3] = 1.0;
     initializeTestMaterials(grid);
@@ -336,7 +336,7 @@ void zeroTimeAndFailedProjectionAreHandled()
 
 void miscibleComponentsConserveMassAndVolume()
 {
-    FluidGrid grid(32, 32, 2.0);
+    FluidGridCPU grid(32, 32, 2.0);
     const auto water = grid.elements.add({"Water"});
     const auto red = grid.elements.add({"Red"});
     const auto heavy = grid.elements.add({"Heavy"});
@@ -345,7 +345,7 @@ void miscibleComponentsConserveMassAndVolume()
     grid.liquid_mixture.components = {{water, 100.0}, {red, 100.0}, {heavy, 200.0}, {unused, 1000.0}};
     // The same element can occupy either phase without sharing its mass field.
     grid.gas_mixture.components = {{air, 0.1}, {water, 0.2}};
-    FluidGrid::State state;
+    FluidGridCPU::State state;
     const size_t count = size_t(grid.width) * grid.height;
     const double cell_volume = grid.cell_size * grid.cell_size;
     state.liquid_fraction.resize(count);
@@ -464,15 +464,15 @@ void multigridMatchesDiagonalProjection()
 {
     for (const auto size : {bl::IVec2{1, 129}, {131, 1}, {2, 67}, {65, 47}, {128, 128}})
     {
-        FluidGrid multigrid(size.x, size.y, 4.0);
+        FluidGridCPU multigrid(size.x, size.y, 4.0);
         for (int y = 0; y < size.y; ++y)
             for (int x = 0; x < size.x; ++x)
                 multigrid.liquid_fraction[y * size.x + x] = std::clamp(y + 1.0 - (0.35 * x + 0.2 * size.y), 0.0, 1.0);
         for (size_t i = 0; i < multigrid.u.size(); ++i) multigrid.u[i] = 3.0 * std::sin(i * 0.07);
         for (size_t i = 0; i < multigrid.v.size(); ++i) multigrid.v[i] = 4.0 * std::cos(i * 0.11);
         initializeTestMaterials(multigrid);
-        FluidGrid diagonal = multigrid;
-        diagonal.pressure_preconditioner = FluidGrid::PressurePreconditioner::Diagonal;
+        FluidGridCPU diagonal = multigrid;
+        diagonal.pressure_preconditioner = FluidGridCPU::PressurePreconditioner::Diagonal;
         const auto mg_result = multigrid.project(1.0 / 120.0, 4000, 1e-8);
         const auto diagonal_result = diagonal.project(1.0 / 120.0, 4000, 1e-8);
         require(mg_result.converged && diagonal_result.converged, "preconditioner comparison did not converge");
@@ -485,7 +485,7 @@ void multigridMatchesDiagonalProjection()
 
 void largeMixedPressureConvergesWithinDefaultBudget()
 {
-    FluidGrid grid(512, 512, 4.0);
+    FluidGridCPU grid(512, 512, 4.0);
     for (int y = 0; y < grid.height; ++y)
         for (int x = 0; x < grid.width; ++x)
             grid.liquid_fraction[y * grid.width + x] = std::clamp(y + 1.0 - (0.35 * x + 0.2 * grid.height), 0.0, 1.0);
@@ -499,14 +499,14 @@ void largeMixedPressureConvergesWithinDefaultBudget()
 
 void parallelExecutionMatchesSerialOnOddGrid()
 {
-    FluidGrid serial(513, 257, 1.0);
+    FluidGridCPU serial(513, 257, 1.0);
     for (int y = 0; y < serial.height; ++y)
         for (int x = 0; x < serial.width; ++x)
             serial.liquid_fraction[y * serial.width + x] = std::clamp(y + 1.0 - (0.3 * x + 30.0), 0.0, 1.0);
     for (size_t i = 0; i < serial.u.size(); ++i) serial.u[i] = std::sin(i * 0.03);
     for (size_t i = 0; i < serial.v.size(); ++i) serial.v[i] = std::cos(i * 0.017);
     initializeTestMaterials(serial);
-    FluidGrid parallel = serial;
+    FluidGridCPU parallel = serial;
     const int previous_threads = int(bl::Thread::threadCount());
     bl::Thread::setMaxThreads(1);
     const auto a = serial.project(0.004, 2000, 1e-8);
@@ -550,9 +550,9 @@ int main()
     const struct { const char* name; void (*run)(); } tests[] = {
         {"staggered world-space sampling", samplesStaggeredVelocityInWorldSpace},
         {"state transfer and CPU initialization equivalence", stateTransferPreservesCPUBehaviour},
-        {"sparse reusable material edit sessions", fluid::test::materialEditingIsSparseAndReusable<FluidGrid>},
-        {"bulk material edit batches", fluid::test::bulkMaterialEditsPreserveEveryCell<FluidGrid>},
-        {"repeated material edits and phase volumes", fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGrid>},
+        {"sparse reusable material edit sessions", fluid::test::materialEditingIsSparseAndReusable<FluidGridCPU>},
+        {"bulk material edit batches", fluid::test::bulkMaterialEditsPreserveEveryCell<FluidGridCPU>},
+        {"repeated material edits and phase volumes", fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGridCPU>},
         {"hydrostatic equilibrium", pressureBalancesGravity},
         {"explicit and automatic cache invalidation", explicitCacheInvalidationMatchesFreshState},
         {"conservative material transport", transportConservesLiquidAndMovesItsCentroid},

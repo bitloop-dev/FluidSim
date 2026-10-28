@@ -1,7 +1,8 @@
 #pragma once
-#include "FluidGrid.h"
-#include "FluidGridGPU.h"
+#include "FluidGridBase.h"
+#include "FluidGridWebGL.h"
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace fluid
@@ -15,8 +16,10 @@ public:
     FluidGridDisplay(const FluidGridDisplay&) = delete;
     FluidGridDisplay& operator=(const FluidGridDisplay&) = delete;
 
-    std::uint32_t texture(const FluidGrid& grid) const;
-    std::uint32_t texture(const FluidGridGPU& grid) const { return grid.colorTexture(); }
+    std::uint32_t texture(const FluidGridBase& grid) const;
+    // Prepared on the simulation owner; GL rendering consumes only derived RGBA.
+    std::uint32_t texture(int width, int height, std::span<const float> rgba) const;
+    std::uint32_t texture(const FluidGridWebGL& grid) const { return grid.colorTexture(); }
     void destroy();
 
 private:

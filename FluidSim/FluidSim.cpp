@@ -2,44 +2,12 @@
 #include <cmath>
 #include <cstdint>
 
+#include "noise.h"
+
 SIM_BEG;
 
 using namespace bl;
 
-namespace
-{
-double perlinNoise(double x, double y)
-{
-    const int ix = int(std::floor(x)), iy = int(std::floor(y));
-    const double fx = x - ix, fy = y - iy;
-
-    auto gradient = [](int gx, int gy, double dx, double dy)
-    {
-        // Hash each lattice corner to a repeatable gradient direction.
-        std::uint32_t hash = std::uint32_t(gx) * 0x9e3779b9u ^ std::uint32_t(gy) * 0x85ebca6bu ^ 0x12345678u;
-        hash ^= hash >> 16;
-        hash *= 0x7feb352du;
-        hash ^= hash >> 15;
-        hash *= 0x846ca68bu;
-        hash ^= hash >> 16;
-        constexpr double diagonal = 0.7071067811865476;
-        constexpr double directions[8][2] = {
-            {1, 0}, {-1, 0}, {0, 1}, {0, -1},
-            {diagonal, diagonal}, {-diagonal, diagonal},
-            {diagonal, -diagonal}, {-diagonal, -diagonal}
-        };
-        const auto& direction = directions[hash & 7u];
-        return direction[0] * dx + direction[1] * dy;
-    };
-
-    // Quintic interpolation joins neighbouring cells with smooth derivatives.
-    auto fade = [](double t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); };
-    const double sx = fade(fx), sy = fade(fy);
-    const double top = std::lerp(gradient(ix, iy, fx, fy), gradient(ix + 1, iy, fx - 1.0, fy), sx);
-    const double bottom = std::lerp(gradient(ix, iy + 1, fx, fy - 1.0), gradient(ix + 1, iy + 1, fx - 1.0, fy - 1.0), sx);
-    return std::lerp(top, bottom, sy);
-}
-}
 
 /// ─────────────────────── project setup ───────────────────────
 
@@ -73,7 +41,7 @@ void FluidSim_Scene::UI::sidebar()
 void FluidSim_Scene::initializePool(double amplitude)
 {
     constexpr double pi = 3.14159265358979323846;
-    const size_t cell_count = size_t(fluid.width) * fluid.height;
+    const size_t cell_count = size_t(fluid.getWidth()) * fluid.getHeight();
 
     using FluidGridType = decltype(fluid);
     using Scalar = FluidGridType::Scalar;
@@ -81,35 +49,35 @@ void FluidSim_Scene::initializePool(double amplitude)
     FluidGridType::State initial;
     initial.liquid_fraction.resize(cell_count);
 
-    const double cell_volume = fluid.cell_size * fluid.cell_size;
-    const double cloud_noise_scale = 6.0 / fluid.width;
+    const double cell_volume = fluid.getCellSize() * fluid.getCellSize();
+    const double cloud_noise_scale = 6.0 / fluid.getWidth();
 
-    initial.liquid_mass.assign(fluid.liquid_mixture.components.size(),
+    initial.liquid_mass.assign(fluid.getLiquidMixture().components.size(),
         std::vector<Scalar>(cell_count, 0.0));
 
-    initial.gas_mass.assign(fluid.gas_mixture.components.size(),
+    initial.gas_mass.assign(fluid.getGasMixture().components.size(),
         std::vector<Scalar>(cell_count, 0.0));
 
-    for (int y = 0; y < fluid.height; ++y)
+    for (int y = 0; y < fluid.getHeight(); ++y)
     {
-        for (int x = 0; x < fluid.width; ++x)
+        for (int x = 0; x < fluid.getWidth(); ++x)
         {
             // the experiment starts with a sloped, rippled surface
             const double surface =
-                x + fluid.height * (0.5 + amplitude * std::cos(pi * (x*3 + 0.5) / fluid.width));
+                x + fluid.getHeight() * (0.5 + amplitude * std::cos(pi * (x*3 + 0.5) / fluid.getWidth()));
 
             // measure how much of this cell lies below the liquid surface
-            const int i = y * fluid.width + x;
+            const int i = y * fluid.getWidth() + x;
             const double fraction = std::clamp(y + 1.0 - surface, 0.0, 1.0);
 
             initial.liquid_fraction[i] = Scalar(fraction);
 
             // Fill the left quarter's liquid with Red; use Water elsewhere.
-            const double red_share = x < fluid.width / 4 ? 1.0 : 0.0;
+            const double red_share = x < fluid.getWidth() / 4 ? 1.0 : 0.0;
 
-            for (size_t k = 0; k < fluid.liquid_mixture.components.size(); ++k)
+            for (size_t k = 0; k < fluid.getLiquidMixture().components.size(); ++k)
             {
-                const auto& component = fluid.liquid_mixture.components[k];
+                const auto& component = fluid.getLiquidMixture().components[k];
 
                 double share = 0.0;
 
@@ -133,9 +101,9 @@ void FluidSim_Scene::initializePool(double amplitude)
 
             const double cloud_share = std::clamp(0.15 + 2.5 * cloud_noise, 0.0, 1.0);
 
-            for (size_t k = 0; k < fluid.gas_mixture.components.size(); ++k)
+            for (size_t k = 0; k < fluid.getGasMixture().components.size(); ++k)
             {
-                const auto& component = fluid.gas_mixture.components[k];
+                const auto& component = fluid.getGasMixture().components[k];
 
                 double share = 0.0;
                 if (component.element == air_element)
@@ -150,7 +118,19 @@ void FluidSim_Scene::initializePool(double amplitude)
         }
     }
 
-    withFluidContext([&]() { fluid.upload(initial); });
+    try
+    {
+        withFluidContext([&]()
+        {
+            fluid.upload(initial);
+            fluid.writeColorPixels(display_pixels);
+        });
+    }
+    catch (const std::runtime_error& error)
+    {
+        simulation_failed = true;
+        blPrint() << error.what();
+    }
 }
 
 void FluidSim_Scene::sceneStart()
@@ -180,9 +160,9 @@ void FluidSim_Scene::sceneUnmounted([[maybe_unused]] Viewport* ctx)
 
 void FluidSim_Scene::sceneDestroy()
 {
+    withFluidContext([&]() { fluid.destroy(); });
     renderThreadQueue().post([this]()
     {
-        fluid.destroy();
         fluid_display.destroy();
         surface.destroy();
 #ifdef BITLOOP_DEV_MODE
@@ -207,7 +187,6 @@ void FluidSim_Scene::viewportProcess(
         return;
 
     // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
-    const double frame_time = 0.02;// std::min(dt, 0.05);
     const int steps_per_frame = 60;
     //const double play_speed = 0.8;
 
@@ -219,44 +198,56 @@ void FluidSim_Scene::viewportProcess(
     simulation_time += frame_time;
     real_time += dt;
 
-    withFluidContext([&]()
+    try
     {
-        // Spawn water by replacing gas; the ordinary fluid step handles the fall.
-        ///constexpr double drops_per_second = 20.0;
-        ///constexpr int drop_radius = 2;
-        ///auto rain = fluid.beginEdit();
-        ///for (int drop = int(previous_time * drops_per_second); drop < int(simulation_time * drops_per_second); ++drop)
-        ///{
-        ///    const int center_x = int(random(drop_radius + 1, fluid.width - drop_radius - 1));
-        ///    for (int y = -drop_radius; y <= drop_radius; ++y)
-        ///    for (int x = -drop_radius; x <= drop_radius; ++x)
-        ///        if (x * x + y * y <= drop_radius * drop_radius)
-        ///            rain.setCell(center_x + x, drop_radius + 2 + y, fluid::Phase::Liquid, water_element);
-        ///}
-        ///rain.commit();
-
-        for (int substep = 0; substep < step_count; ++substep)
+        withFluidContext([&]()
         {
-            // use one float-compatible tolerance for backend comparisons
-            const auto result = fluid.step(step, 2000, 1e-3);
+            // Spawn water by replacing gas; the ordinary fluid step handles the fall.
+            ///constexpr double drops_per_second = 20.0;
+            ///constexpr int drop_radius = 2;
+            ///auto rain = fluid.beginEdit();
+            ///for (int drop = int(previous_time * drops_per_second); drop < int(simulation_time * drops_per_second); ++drop)
+            ///{
+            ///    const int center_x = int(random(drop_radius + 1, fluid.getWidth() - drop_radius - 1));
+            ///    for (int y = -drop_radius; y <= drop_radius; ++y)
+            ///    for (int x = -drop_radius; x <= drop_radius; ++x)
+            ///        if (x * x + y * y <= drop_radius * drop_radius)
+            ///            rain.setCell(center_x + x, drop_radius + 2 + y, fluid::Phase::Liquid, water_element);
+            ///}
+            ///rain.commit();
 
-            if (!result.converged)
+            for (int substep = 0; substep < step_count; ++substep)
             {
-                blPrint() << "Projection failed; max divergence: "
-                    << result.max_divergence;
+                // use one float-compatible tolerance for backend comparisons
+                const auto result = fluid.step(step, 2000, 1e-3);
 
-                simulation_failed = true;
-                return;
+                if (!result.converged)
+                {
+                    blPrint() << "Projection failed; max divergence: "
+                        << result.max_divergence;
+
+                    simulation_failed = true;
+                    return;
+                }
             }
-        }
-    });
+            // Observe on the simulation/device owner; render only the derived image.
+            fluid.writeColorPixels(display_pixels);
+        });
+    }
+    catch (const std::runtime_error& error)
+    {
+        simulation_failed = true;
+        blPrint() << error.what();
+    }
 }
 
 void FluidSim_Scene::renderFluidSurface() const
 {
-    surface.render(fluid.width, fluid.height, [&](const ShaderSurface& shader)
+    // Device initialization can fail before the first derived image is ready.
+    if (display_pixels.empty()) return;
+    surface.render(fluid.getWidth(), fluid.getHeight(), [&](const ShaderSurface& shader)
     {
-        shader.bindTexture2D("u_color", fluid_display.texture(fluid));
+        shader.bindTexture2D("u_color", fluid_display.texture(fluid.getWidth(), fluid.getHeight(), display_pixels));
     });
 }
 
@@ -267,10 +258,10 @@ void FluidSim_Scene::viewportDraw(Viewport* ctx) const
     renderFluidSurface();
 
     DQuad bounds{
-        fluid.origin.x,
-        fluid.origin.y,
-        fluid.origin.x + fluid.width * fluid.cell_size,
-        fluid.origin.y + fluid.height * fluid.cell_size
+        fluid.getOrigin().x,
+        fluid.getOrigin().y,
+        fluid.getOrigin().x + fluid.getWidth() * fluid.getCellSize(),
+        fluid.getOrigin().y + fluid.getHeight() * fluid.getCellSize()
     };
 
     ctx->worldMode();
@@ -303,11 +294,11 @@ void FluidSim_Scene::traceFrame([[maybe_unused]] SimTraceFrame& frame) const
 
 bool FluidSim_Scene::captureTraceSnapshot(std::string_view route, SimSnapshotImage& image) const
 {
-    if (route != "grid")
+    if (route != "grid" || display_pixels.empty())
         return false;
 
     renderFluidSurface();
-    image.resolution = IVec2(fluid.width, fluid.height);
+    image.resolution = IVec2(fluid.getWidth(), fluid.getHeight());
     CapturePreprocessParams params;
     params.src_resolution = params.dst_resolution = image.resolution;
     // texture row zero already represents the top grid row

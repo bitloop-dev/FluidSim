@@ -1,5 +1,5 @@
 #pragma once
-#include "FluidGridGPUInternal.h"
+#include "FluidGridWebGLInternal.h"
 #include <memory>
 
 namespace fluid { class PressureMultigrid; }

@@ -1,5 +1,5 @@
 #pragma once
-#include "FluidGrid.h"
+#include "FluidGridCPU.h"
 #include <cmath>
 #include <numeric>
 #include <type_traits>

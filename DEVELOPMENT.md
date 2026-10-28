@@ -1,8 +1,8 @@
 # FluidSim development guide
 
-Stage 1 geometric material transport and Stage 2 consistent mass/momentum transport are implemented. Liquid geometry, component masses and momentum share transfers through successive X/Y passes. CPU and GPU pressure default to multigrid-preconditioned CG. Optional surface tension remains a later stage. `VISION.md` holds the longer-term ambitions and maths; this file is the short map of the working code and possible next steps.
+Stage 1 geometric material transport and Stage 2 consistent mass/momentum transport are implemented. Liquid geometry, component masses and momentum share transfers through successive X/Y passes. Uniform CPU and legacy WebGL pressure default to multigrid-preconditioned CG; adaptive pressure uses the composite solver described below. Optional surface tension remains a later stage. `VISION.md` holds the longer-term ambitions and maths; this file is the short map of the working code and possible next steps.
 
-Both engines use the component system: configure the element catalogue and liquid/gas mixtures, then upload component masses alongside `liquid_fraction`, the total liquid volume fraction. Density, momentum and displayed colours come from those masses. Engine geometry uses liquid/gas terminology; Water, Red, Air and Cloud are scene ingredients. Several miscible ingredients share each phase's geometry; adding an ingredient does not add another interface reconstruction or pressure solve.
+The engines use the component system: configure the element catalogue and liquid/gas mixtures, then upload component masses alongside `liquid_fraction`, the total liquid volume fraction. Density, momentum and displayed colours come from those masses. Engine geometry uses liquid/gas terminology; Water, Red, Air and Cloud are scene ingredients. Several miscible ingredients share each phase's geometry; adding an ingredient does not add another interface reconstruction or pressure solve.
 
 The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas ingredient. Air and Cloud share density 0.1; three fixed Perlin scales divide the initial gas volume between them. Noise is evaluated only in `initializePool()`, then ordinary component transport carries the clouds. This visualizes atmospheric flow without adding condensation or evaporation physics.
 
@@ -10,36 +10,141 @@ The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas i
 
 | File | Responsibility |
 | --- | --- |
-| `FluidSim/FluidGrid.h` | Engine data and public operations, in namespace `fluid` |
-| `FluidSim/FluidGrid.cpp` | Advection, gravity, material transport and pressure solver |
-| `FluidSim/PressureMultigrid.h/.cpp` | CPU pressure hierarchy, fixed symmetric V-cycle and small direct coarse solve |
-| `FluidSim/FluidGridGPU.h/.cpp` | Separate float GPU implementation of the same physics, using fragment-shader passes |
-| `FluidSim/PressureMultigridGPU.h/.cpp` | GPU pressure hierarchy with an owned CPU coarse solver; GPU-only tiny Cholesky remains selectable |
-| `FluidSim/FluidGridGPUInternal.h` | Private numeric textures, shaders, pass runner and graphics-state preservation shared by those two GPU components |
-| `FluidSim/FluidGridTypes.h` | Common state layout and projection result; CPU state uses double, GPU state uses float |
-| `FluidSim/FluidGridEdit.h` | Shared staged material replacements, validation and sparse commit ordering |
-| `FluidSim/FluidGridDisplay.h/.cpp` | Render-thread texture adapter for either engine |
-| `FluidSim/FluidSim.h/.cpp` | This experiment's initial pool, frame timing, failure reporting, camera, rendering and captures |
-| `tests/FluidGridTests.cpp` | Small engine regression set, independent of scenes and drawing |
-| `tests/FluidGridGPUTests.cpp` | GPU/CPU comparisons and GPU regressions in a hidden graphics context |
+| `FluidSim/FluidGridBase.h` | Abstract common simulation contract and backend-independent edit sessions |
+| `FluidSim/FluidGrid.h/.cpp` | Concrete public API, selection and forwarding to one owned backend |
+| `FluidSim/FluidGridCPU.h/.cpp` | Original uniform CPU engine, native arrays/helpers, unchanged physics; derived catalogue colours |
+| `FluidSim/FluidGridWebGPU.h/.cpp` | Uniform WebGPU backend implementing FluidGridBase; explicit host precision conversion and native step/edit/colour forwarding |
+| `FluidSim/UniformWebGPU/` | Imported native uniform float engine, GPU multigrid, shaders, compute/readback and retained pressure reduction |
+| `FluidSim/FluidGridAdaptiveWebGPU.h/.cpp` | FluidGridBase adapter for native adaptive GPU state, policy cadence, explicit observations and sparse material edits |
+| `FluidSim/AdaptiveWebGPU/` | Imported adaptive GPU transport, composite pressure, reconstruction shaders and GPU selection; separate explicit edit kernel |
+| `FluidSim/Adaptive/FluidAdaptiveRaster.h` | Temporary finest-raster observation shared by CPU/GPU native hierarchies; no persistent physical state |
+| `FluidSim/FluidGridAdaptiveCPU.h/.cpp` | FluidGridBase backend over one native AMR hierarchy, common edits/observation and automatic selection cadence |
+| `FluidSim/FluidAdaptiveSettings.h` | Scene-supplied quality, quiet dwell, check cadence and prediction horizon |
+| `FluidSim/Adaptive/` | Imported native AMR transport, conservative transfers, composite pressure, selection and bounded observation helpers |
+| `FluidSim/PressureMultigrid.h/.cpp` | Unchanged CPU pressure hierarchy, symmetric V-cycle and small direct coarse solve |
+| `FluidSim/FluidGridWebGL.h/.cpp` | Legacy float OpenGL engine, retained separately for reference/tests; not yet selectable through FluidGrid |
+| `FluidSim/PressureMultigridGPU.h/.cpp` | Legacy GPU pressure hierarchy and CPU coarse solver |
+| `FluidSim/FluidGridWebGLInternal.h` | Legacy private textures, shaders, pass runner and graphics-state preservation |
+| `FluidSim/FluidGridTypes.h` | Shared host state template and projection result; public interface uses double |
+| `FluidSim/FluidGridEdit.h` | Staged replacements, validation and sparse commit ordering |
+| `FluidSim/FluidGridDisplay.h/.cpp` | Render-thread adapter consuming common derived colours, plus legacy GPU texture overload |
+| `FluidSim/FluidSim.h/.cpp` | Scene initialization, timing, failure reporting, camera, rendering and captures |
+| `tests/FluidGridTests.cpp` | Existing direct FluidGridCPU numerical regressions |
+| `tests/FluidGridAPITests.cpp` | Common configuration, exact CPU/wrapper/base state and step parity, edits, colours and failure forwarding |
+| `tests/FluidGridWebGLTests.cpp` | Retained legacy GPU/CPU and display comparisons in a hidden graphics context |
 
-`FluidSimEngine` is a local CMake library used by both the scene and tests. It depends on Bitloop's vector type and thread pool, but has no Scene, camera, OpenGL or UI code. Another experiment can include `FluidGrid.h` and link that target. Packaging it as a separate repository is a later decision.
+`FluidSimEngine` is the project-local library shared by the scene and CPU/API tests. It depends on Bitloop's vector type and thread pool, with no Scene, camera, OpenGL or UI code. The existing CPU numerical implementation is renamed to `FluidGridCPU`; its function bodies are unchanged. Palette colour calculation moved from the display adapter to a read-only CPU operation, with its original arithmetic and traversal. Packaging the engine separately remains a later decision.
 
-A new `FluidGrid(width, height, cell_size)` starts with zero velocity and zero liquid fraction. Configure its mixtures and populate component masses before advancing physics. The scene creates an initial `State` in `initializePool()` and passes it to `upload()`; that sloped pool is an experiment, not an engine default. Existing CPU public arrays and individual operations remain available for learning. Dimensions and cell size describe a fixed grid; changing them requires constructing another grid.
+## Shared API and backend selection
 
-CPU density, pressure coefficients and the multigrid hierarchy are now cached. After directly editing `liquid_mass`, `gas_mass` or derived density/pressure-coefficient arrays, call `fluid.invalidateCaches()` before the next physics operation. It marks derived data stale; rebuilding happens when needed. `upload()` and engine material transport do this automatically. Direct velocity edits need no cache notification because CPU velocity statistics are recomputed, but transport still requires projected velocity. Mixture membership changes continue to require `upload()`. GPU mass/velocity textures are private and its `upload()` already invalidates its caches; direct CPU-array access is not part of the shared interface.
+`FluidGridBase` has pure virtual operations and a virtual destructor. The concrete public `FluidGrid` wrapper, `FluidGridCPU`, `FluidGridAdaptiveCPU`, `FluidGridWebGPU` and `FluidGridAdaptiveWebGPU` implement it. `FluidGrid` owns one `unique_ptr<FluidGridBase>` and forwards operations; it has no duplicate physical state or CPU-array escape hatch. The default is `FluidGridCPU`. CPU adaptive is now available through `FluidGridAdaptiveCPU`, which owns one imported native `FluidGridAdaptive` hierarchy. That core lives under `Adaptive/`; it is an implementation/learning tool, while the Base-compliant backend is the public simulation boundary. Uniform WebGPU is now available through `FluidGridWebGPU`, owning the imported float `UniformWebGPU/FluidGridGPU` core including its retained pressure reduction. Adaptive WebGPU is available through `FluidGridAdaptiveWebGPU`, owning the native GPU hierarchy and GPU refinement assessment.
 
-## Switching CPU and GPU
+```cpp
+fluid::FluidGrid grid(width, height, cell_size);
+grid.setDevice(fluid::FluidDevice::CPU);
+grid.setAdaptiveMode(fluid::AdaptiveMode::DISABLED);
+grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.setGravityY(100.0);
+grid.upload(initial_state);
+auto result = grid.step(dt, 2000, 1e-3);
+```
 
-Select the scene backend with `FluidGrid fluid;` or `FluidGridGPU fluid;`. Both accept the same catalogue, mixture definitions and per-cell component masses, and default to multigrid preconditioning.
+Select CPU and either DISABLED (original uniform CPU) or MAX_2/MAX_4/MAX_8/MAX_16/MAX_32 (adaptive CPU, maximum physical cell width relative to the finest grid). The finest domain dimensions are assumed divisible by the selected maximum scale. Choose mode before upload; setting the current mode is a no-op. Changing mode after upload throws `std::logic_error` before mutation: explicitly destroy, select and upload to restart. Pre-initialization selection preserves catalogue, mixtures, gravity and origin. GPU with DISABLED selects uniform WebGPU. GPU with MAX_2/MAX_4/MAX_8/MAX_16/MAX_32 selects adaptive WebGPU. Changing device after upload requires the same explicit restart as changing adaptive mode. Selection belongs on the wrapper, not the simulation base; there is no implicit fallback or live state migration.
 
-Both engines use the same 3x3 mixed Youngs-centered (MYC) normal estimate. The GPU scales the chosen normal before its float geometry calculations; scaling leaves the reconstructed interface unchanged. CPU/GPU transport comparisons pass with their existing precision tolerances.
+The common interface exposes dimensions/cell size/origin, material configuration and read-only catalogue/mixture access, vertical gravity, explicit upload/download, `step()` and `maxDivergence()`, staged edits, derived colour output and lifecycle/thread requirements. `getWidth()`, `getHeight()`, `getCellSize()` and `getOrigin()` replace direct geometry-field access. Fixed dimensions/cell size are selected at construction. `configureMaterials()` supplies the whole catalogue and both mixtures; configure their membership/order before upload and upload again after changing it.
 
-Both engines provide `Scalar`, `State`, `ProjectionResult`, `Edit`, `beginEdit`, `upload`, `download`, `step`, `advect`, `applyGravity`, `project`, `maxDivergence`, `uIndex`, `vIndex` and `destroy`. `decltype(fluid)::State` automatically uses double or float fields. Empty uploaded fields mean zero, and upload resets pressure prediction history; it is initialization rather than complete checkpoint restoration. CPU `destroy()` has no device resources to release; its vectors remain owned by its destructor.
+Common `Scalar`/`State` use double, and `ProjectionResult` retains the existing structure. Native backend precision remains an implementation choice for later migrations. Upload is initialization: empty fields mean zero and pressure prediction history resets; it is not complete checkpoint restoration. Masses remain actual mass per cell, unit depth and area `cell_size * cell_size`. The engine never invents an Air ingredient. Shared step defaults retain the original CPU defaults (200 iterations, 1e-6); the scene passes its existing explicit 2000/1e-3 policy.
 
-`withFluidContext()` uses the engine's `requires_render_thread` constant: CPU initialization/physics run on the simulation worker, while GPU work runs through the render queue. `FluidGridDisplay::texture(fluid)` uploads CPU catalogue colours into a reusable RGBA float texture, or builds them directly from GPU masses. Drawing and the native-grid capture route use the same adapter. GPU stepping and drawing perform no full-grid download; `download()` explicitly reads every state field, including component masses.
+A new grid starts with zero velocity/liquid fraction; populate configured component masses before physics. The scene's sloped/clouded pool remains scene-owned. Mode changes require the explicit destroy/select/upload sequence described above.
 
-Configure mixture membership/order before `upload()`, and upload again when changing it. State masses are actual mass per cell (unit depth, cell volume = `cell_size * cell_size`) on either backend. An empty mass field initializes to zero; the engine never invents an Air ingredient. The same element can appear in both mixtures with different component densities.
+The CPU engine's public arrays, `invalidateCaches()`, sampling, vortex helper and working-data inspection remain on `FluidGridCPU` for learning and direct numerical tests. After directly changing component masses/derived density or coefficient arrays, invalidate its caches before the next physics operation. Upload/transport do this automatically. Direct velocity edits need no cache invalidation but must be projected before transport. The public wrapper exposes operations rather than these storage details.
+
+The scene queries `requiresRenderThread()` at runtime before executing engine operations. All four current backends return false (no GL-context requirement). Rendering remains on the render owner. The scene asks `writeColorPixels(display_pixels)` on the simulation/device owner after initialization and once after a frame's physical steps. Rendering uses `FluidGridDisplay::texture(width,height,rgba)`, so GL never invokes WebGPU commands from another thread. This derived image is not a physical-state copy. The Base-taking display overload remains available when observation and rendering share the correct owner; neither path performs a full physical-state download or casts to a CPU backend. Physics and observation must remain externally scheduled apart, as before. CPU `destroy()` retains its previous no-op behavior; the object can be reinitialized by upload, with owned memory released by destruction.
+
+The legacy OpenGL GPU class still has float State and its original owning-context rule/API. It remains covered by its regression suite but does not inherit the shared base until its own migration. No WebGPU implementation has been substituted for it.
+
+## Uniform WebGPU API
+
+```cpp
+fluid::FluidGrid grid(width, height, cell_size);
+grid.setDevice(fluid::FluidDevice::GPU);
+grid.setAdaptiveMode(fluid::AdaptiveMode::DISABLED);
+grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.upload(initial_state);
+auto result = grid.step(dt, 2000, 1e-3);
+```
+
+The default scene remains CPU uniform. Its `fluid_device` member selects CPU/GPU before initialization; `adaptive_mode` selects the physical hierarchy. Uniform WebGPU is the GPU/DISABLED combination, and GPU/MAX selects adaptive WebGPU. Device/mode selection preserves geometry, catalogue, mixtures, gravity and origin before upload. Selecting the current value is a no-op; a real change after upload throws before mutation. Explicitly destroy, select and upload to restart.
+
+The public backend implements the same double host State/Edit and step-focused contract. Native fields/shaders remain float; conversion occurs only on explicit upload/download. No conversion/full-state readback is inserted into stepping or edits. Shared step defaults remain 200/1e-6 for every implementation; the scene deliberately passes its existing 2000/1e-3 policy. Caller limits/tolerance reach the native solver unchanged. `step(0)` reports existing divergence without advancing; the native granular API retains its previous zero-time result.
+
+Device creation is lazy at upload. Keep upload, stepping, editing, observation/readback and destruction on one owning thread; `requiresRenderThread()==false` means no GL context is required, not that the live device may migrate between threads. Main uses its simulation owner for these operations and hands derived RGBA to the GL renderer. Common colour output reuses caller vector storage and the existing mapped readback staging; it does not download masses, pressure or velocities. Source edit batches retain sparse writes and validate atomically before mutation. Device/readback errors propagate; the scene records failure and stops, keeping rendering away from an unavailable image.
+
+The current native PCG, multigrid, projection/transport/force ordering, stopping rules and all numerical kernels are imported unchanged. This includes the development worktree's retained two-pass bounded pressure reduction (run0129); divergence/CFL reductions stay on their original path. No new reduction/solver optimization was introduced during migration. The only native-core bridge edits add a reusable colour output method, reuse vector storage in the existing readback body, and grant the common backend access to the existing sparse edit commit.
+
+FluidSim requires the Bitloop WebGPU module in every configuration. Its root CMake enforces BITLOOP_WITH_WEBGPU/ASYNC_WAIT before project/provider discovery, including existing caches containing OFF; presets need no extra flags or cache deletion. The underlying framework component remains optional for other projects. Build enables the existing optional Bitloop WebGPU module and uses the project-local Dawn overlay in `ports/dawn`, copied unchanged from development `tooling/ports/dawn`, with its vcpkg license. The root manifest requests the same Dawn features. The overlay supplies the already-used dxc packaging and cache patches; registry baselines/framework sources are unchanged. CMake deploys the shader compiler/runtime DLLs with app/tests. Browser harness/flags are retained, but this migration's validation is native Windows.
+
+`FluidUniformWebGPUTests` runs the imported native regression suite (only uniform CPU rename/header paths adapted). `FluidWebGPUAPITests` covers common configuration, unsupported combinations in both selection orders, double/float state parity, zero time, iteration failure, edits/atomic rejection, reusable/empty palette output, restart and worker-to-GL pixel equality. `FluidWebGPUEvolvingParity` compares direct native and common wrapper over the first 200 512-square four-ingredient wave frames, using main's .02-second frame / two .01-second steps. Projection results match every step; full committed fields match exactly at frames 1/40/80/120/160/200. Ingredient drift and local phase-volume error are reported separately. This is integration parity, not a new performance A/B or the previous .08-second Perlin-cloud benchmark. [Source proof, snapshots and logs](.codex/runs/run0004_20261027_192920/README.md).
+
+## Adaptive WebGPU API
+
+```cpp
+fluid::FluidGrid grid(width, height, cell_size);
+grid.setDevice(fluid::FluidDevice::GPU);
+grid.setAdaptiveMode(fluid::AdaptiveMode::MAX_4);
+fluid::FluidAdaptiveSettings quality;
+quality.prediction_horizon = quality.check_interval + frame_time;
+grid.setAdaptiveSettings(quality);
+grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.upload(initial_state);
+auto result = grid.step(dt, 2000, 1e-3);
+```
+
+All four backend combinations are available through the same step-focused Base: CPU/DISABLED is uniform CPU; CPU/MAX is adaptive CPU; GPU/DISABLED is uniform WebGPU; GPU/MAX is adaptive WebGPU. Device/mode order before initialization is interchangeable. Live changes still require explicit destroy/select/upload, and selecting current values is a no-op. The scene default remains CPU uniform.
+
+The GPU adaptive backend follows the already-agreed CPU adaptive scheduling contract: assessment starts at simulated time zero, then on a physical-step boundary no earlier than `check_interval`. The backend runs existing GPU error assessment/quiet history/look-ahead and downloads only compact request tiles for existing host clustering. Regrid transfers real native state and restores projected faces before transport. Thresholds, quiet dwell, buffers, nesting and finest-liquid policy are unchanged. Native combined force/projection and zero damping remain unchanged. `automatic_refinement=false` freezes the current hierarchy; starting OFF/upload begins wholly fine. Quality updates reset assessment history and schedule a fresh check. Rendering/download never drive refinement.
+
+Native material/momentum/face state remains in float GPU buffers; pressure retains its compensated high/low planes. The explicit caller iteration ceiling reaches ordinary/restoration projection unchanged. Native-core default calls still use their original 200 gas/2000 liquid ceilings, and upload retains its native 1e-4 initial projection tolerance. Shared step defaults remain 200/1e-6; the scene supplies 2000/1e-3 explicitly. The existing native nonconvergence exception now carries its iteration count; the common adapter returns an unsuccessful ProjectionResult with actual native divergence so the scene can stop. No solver tolerance is silently relaxed.
+
+`writeColorPixels` uses the existing native GPU material reconstruction/render shader and reusable mapped/caller storage. Explicit `download()` temporarily reads native-resolution arrays, combines pressure high/low in double, and uses the same bounded material/raster observer as adaptive CPU. Ingredient densities become per-finest-cell masses; pressure impulse becomes physical pressure using the last projection interval. MAC faces are observed/interpolated, not reprojected on a fine grid. No CPU engine or pressure solve is created for readback, no data feeds back into physics, and no fine physical raster persists. Native `maxDivergence` remains authoritative. Keep device commands/readback/destruction on the simulation owner; the existing scene RGBA handoff works for this fourth backend too.
+
+Common edits validate/deduplicate the entire batch before mutation. Geometry-only requests refine coarse selected footprints with the existing clustering/nesting, retaining existing resolved regions, and restore projected faces before replacement. A separate explicit source/sink kernel replaces selected finest ingredients, preserves cell velocity by rescaling momentum with density, then invokes existing conservative restriction for covered parents. MAC faces and pressure history stay unchanged after replacement; normal transport/projection uses the original kernels. Commands stay sparse; no full material/velocity download or upload occurs during commit. Tests cover non-unit cell area, coarse-gas liquid sources, duplicate ordering, atomic rejection, moving-cell velocity inheritance, pressure/face history and subsequent gravity evolution.
+
+Production source is under `AdaptiveWebGPU/` with existing shared project-owned mesh/transfer/topology/compute. The upstream AMReX reference project, oracle targets, checkout and historical `fluid-amrex` overlay are absent. The existing [provenance/license](FluidSim/Adaptive/provenance/README.md) covers adapted algorithms; this is library independence, not a claim that those algorithms were written from scratch. No framework, registry baseline or dependency package changes were needed for this migration.
+
+Native `AmrGasWebGPUTests`, `FluidCoarseningWebGPUTests` and `AmrPressureWebGPUTests` are imported regression tests against the local CPU core, without upstream AMReX. `FluidAdaptiveWebGPUAPITests` exercises common integration, all MAX modes and 200 evolving 96-square gas frames against a direct native/policy control. Projection results/layouts agree each step; valid conserved fields, compensated pressure and faces agree at frames1/32/100/200. Actual active-cell overlays were inspected; 13 checks produce two layout changes and retain finest detail while quiet regions release. The layout settles inside its feature buffer, so this does not establish moving-feature behavior beyond it or a new adaptive speedup. All16 native CTest entries and the Release app pass. [Exact source proof, snapshots, logs and limits](.codex/runs/run0006_20261027_202107/README.md).
+
+## CPU adaptive API and scheduling
+
+```cpp
+fluid::FluidGrid grid(width, height, cell_size);
+grid.setAdaptiveMode(fluid::AdaptiveMode::MAX_4);
+fluid::FluidAdaptiveSettings quality;
+quality.check_interval = 0.32;
+quality.prediction_horizon = quality.check_interval + frame_time;
+grid.setAdaptiveSettings(quality);
+grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.upload(initial_state);
+auto result = grid.step(dt, 2000, 1e-3);
+```
+
+The shared API is step-focused. Uniform `advect`, `applyGravity` and `project` stay on `FluidGridCPU`; they are no longer methods of the wrapper/base. Adaptive transport and combined acceleration/projection stay native. Splitting them into extra common stages would add work and complicate the force impulse. Each common adaptive step calls the existing ordered native step with unchanged damping (zero here), solver equations and transport. The explicit caller iteration ceiling applies to both normal and regrid-restoration projection. Default native-core calls retain the original 200 gas / 2000 liquid ceilings. Native nonconvergence still throws, with a typed failure carrying iterations; the public backend translates it into an unsuccessful ProjectionResult with actual native face divergence, so the scene stops as before. Initialization/edit-restoration errors still throw.
+
+The scene supplies quality/cadence; the adaptive backend owns simulated-time scheduling, assessment, conservative regrid and required restoration before transport. The existing tolerances (velocity/pressure gradient 0.1, relative density/ingredient 0.02), quiet band 0.5 and quiet dwell 0.24 seconds are preserved. Checks start at time zero and then occur no earlier than the check interval, on a physics-step boundary. A zero-time step performs no selection. Supply a prediction horizon covering the check interval plus the scene frame/observation interval (main uses 0.32 + 0.02 seconds); do not substitute a shorter substep horizon. `setAdaptiveSettings()` can update quality/cadence between steps; it resets assessment history and schedules a fresh check. An identical settings value is a no-op. There are no selection scans between scheduled checks and no full-state readbacks in stepping.
+
+Upload begins fully fine. `automatic_refinement=false` freezes the current hierarchy; starting OFF therefore gives the adaptive method on a uniform finest grid. DISABLED selects the separate original uniform method. Turning OFF after coarsening retains that coarsening until policy is re-enabled or the grid is reinitialized. Automatic selection protects liquid at finest resolution, as in the source engine; this import does not add automatic liquid coarsening or replace simulated gas with ambient pressure.
+
+Colour output uses the same bounded native material plane as the imported display, with reusable caller RGBA storage. Explicit `download()` constructs a temporary finest raster of reconstructed ingredient masses and liquid volume, sampled native MAC faces and physical pressure (native pressure impulse / last projection interval; zero for a geometric restoration). At a level join it observes the finer face; it is not a divergence-preserving fine velocity solve or a complete checkpoint. `maxDivergence()` and the step result measure actual native active-cell faces. Observation does not advance/refine/reproject the hierarchy and no finest physical copy persists.
+
+Common material edits validate the entire batch first. If a requested finest cell is coarse, retain existing resolved footprints and use the existing request clustering/nesting to refine locally, conservatively transfer and restore projected faces, then replace only selected finest-cell materials. Cell momentum inherits local velocity; covered parents receive the conservative change. Existing projected MAC faces remain fixed after replacement. This explicit source/sink and refinement cost belongs to commit, not staging. Invalid batches do not regrid or write material. Tests cover duplicate ordering, atomic rejection, edited mass budgets and subsequent evolution.
+
+### AMR numerical contract
+
+Keep one native hierarchy with real physical coarse/fine state, two refreshed conserved ghost layers, conservative restriction/interpolation and synchronized coarse/fine fluxes. Never use a saved fine physical raster to repair coarsening. Gas material uses bounded linear reconstruction and half-step tracing; momentum uses mass flux and a limited velocity residual. Mixed liquid/gas uses native MYC/PLIC directional transport and frozen phase corrections. No clipping or renormalization is added. Single-resolution CFL uses the existing local outgoing donor bound; mixed layouts retain the conservative global bound. All transport subdivisions hold projected faces fixed, followed by one full-step force/projection. Regrid restoration is separate.
+
+Pressure is the imported composite AMReX-derived 2D operator: GMRES+MLMG for differing densities, standalone MLMG/BiCGStab for globally equal densities. Tolerance and actual active-cell divergence remain authoritative. Native pressure/transfer/reconstruction sources are unchanged in this import apart from forwarding the explicit iteration ceiling and typing the pre-existing convergence exception. Pressure source provenance and retained license are in [Adaptive/provenance](FluidSim/Adaptive/provenance/README.md). Direct deep restriction still requires its footprint to fit a source FAB; the retained block width 64 covers supported maximum 32. Refinement policy preserves requested detail, quiet history, nesting and finest liquid; rendering is observation-only.
+
+Build `FluidAdaptiveAPITests`, `FluidCoarseningPreviewTests` and `FluidRefinementTests` with FLUIDSIM_BUILD_TESTS. The default CTest set includes short reconstruction, CFL, mixed-liquid and selection/depth cases alongside the existing uniform/API/WebGL suites. Adaptive API tests compare native fields/layouts through 200 evolving 96-square gas frames, gas/mixed-density liquid step parity, OFF, zero time, caller iteration limits, reconstructed observations, sparse edits, all MAX modes and lifecycle. These are integration/regression checks, not a new 512-square performance comparison or long-run wave-fidelity claim. [Import evidence](.codex/runs/run0003_20261027_164329/README.md).
 
 ## Editing material at runtime
 
@@ -77,13 +182,13 @@ Commit sorts only when edits are out of raster order and resolves duplicates. CP
 
 The CPU implementation remains the readable algorithm reference. The GPU executes the same X/Y split transport and pressure model with float arithmetic; long chaotic trajectories need not match pixel-for-pixel.
 
-The shared operations require no base class or virtual dispatch. Direct CPU vectors, `sampleVelocity`, `addVortex` and CPU working-data inspection remain CPU-specific learning tools. Pass an explicit divergence tolerance for comparisons: the engines retain their different precision-appropriate defaults.
+The shared public contract is enforced by FluidGridBase. Direct CPU vectors, `sampleVelocity`, `addVortex` and working-data inspection remain FluidGridCPU-specific learning tools. Pass explicit divergence tolerances when comparing the common CPU API with the retained legacy GPU class.
 
 Unused dye buffers, `advectDye`, particles and the unused `FluidCell` placeholder have been removed. `sampleVelocity` and `addVortex` remain useful experiment operations.
 
 ## One physics substep
 
-Read `FluidGrid::step()` first:
+Read `FluidGridCPU::step()` first; the public wrapper delegates to it:
 
 ```cpp
 advect(dt);
@@ -96,7 +201,7 @@ return project(dt, max_iterations, divergence_tolerance);
 3. **Project pressure:** rebuild density coefficients from the current component masses, close the tank walls, solve for pressure and correct velocity until cell divergence meets the requested tolerance.
 Transport uses the previous substep's projected velocity. The scene starts with zero velocity, which already satisfies incompressibility. An experiment that directly changes velocities must project them before transport. The final projection handles the transported state and gravity, preparing the next substep.
 
-`viewportProcess()` currently fixes each frame at 0.02 simulated seconds and divides it into five equal steps of 0.004 second. It calls `fluid.step(step, 2000, 1e-3)` for either selected backend. The CPU regression reference retains its double-precision `1e-8` checks; the scene uses the same explicit float-compatible target for comparisons. The engine advances exactly the time passed to it; it does not know about frames or recording. Older measurements below used six 1/120-second steps per frame; compare timing only with matched timestep and simulated duration.
+`viewportProcess()` retains its existing 0.02 simulated seconds per frame and `ceil(frame_time * 60)` subdivision, currently two equal steps of 0.01 second. It calls `fluid.step(step, 2000, 1e-3)` for either selected backend. The CPU regression reference retains its double-precision `1e-8` checks; the scene uses the same explicit float-compatible target for comparisons. The engine advances exactly the time passed to it; it does not know about frames or recording. Older measurements below used six 1/120-second steps per frame; compare timing only with matched timestep and simulated duration.
 
 On failed final projection, `step()` returns an unconverged result after transport and gravity have already run. It does **not** roll back material, velocity or pressure. The scene pauses and reports the failure rather than continuing with that state. A zero timestep leaves state unchanged.
 
@@ -196,9 +301,9 @@ The 512x512 sloped scene then passed 40 simulated seconds / 4,800 committed subs
 
 ## GPU implementation
 
-`FluidSimEngineGPU` is a separate local library. CPU physics remains the reference for learning and experiments. The GPU port was validated on the 128x128 sloped pool, cell size 4, densities 0.1/100 and gravity 100. Both air and water are simulated; no physical model or boundary condition is selected automatically.
+`FluidSimEngineWebGL` is a separate local library. CPU physics remains the reference for learning and experiments. The GPU port was validated on the 128x128 sloped pool, cell size 4, densities 0.1/100 and gravity 100. Both air and water are simulated; no physical model or boundary condition is selected automatically.
 
-Read `FluidGridGPU::step()` and then the similarly named `Impl` methods. Each numeric array is a nearest-filtered float texture; fragment passes write new textures and swap them with the old inputs. A shader never reads the texture it is currently writing. The small private pass runner handles numeric textures; the framework's `ShaderSurface` is still used only to colour the result for display.
+Read `FluidGridWebGL::step()` and then the similarly named `Impl` methods. Each numeric array is a nearest-filtered float texture; fragment passes write new textures and swap them with the old inputs. A shader never reads the texture it is currently writing. The small private pass runner handles numeric textures; the framework's `ShaderSurface` is still used only to colour the result for display.
 
 | GPU detail | Purpose |
 | --- | --- |
@@ -273,19 +378,19 @@ The first long validation caught float cancellation pushing a full cell above `1
 
 ## GPU coarse-pressure optimization
 
-`FluidGridGPU` retains material transport, forces, the fine pressure equation, CG vector updates and rendering on the GPU. Its private `PressureMultigridGPU` owns a small CPU `PressureMultigrid` workspace for a coarse grid covering the **whole domain**; its correction is returned to the GPU hierarchy. Both gas and liquid remain simulated. CPU/GPU stages alternate; there is no spatial partition or load balancer.
+`FluidGridWebGL` retains material transport, forces, the fine pressure equation, CG vector updates and rendering on the GPU. Its private `PressureMultigridGPU` owns a small CPU `PressureMultigrid` workspace for a coarse grid covering the **whole domain**; its correction is returned to the GPU hierarchy. Both gas and liquid remain simulated. CPU/GPU stages alternate; there is no spatial partition or load balancer.
 
-Select `FluidGridGPU fluid;` in the scene and link `FluidSimEngineGPU`. Coarse execution is an internal GPU-engine optimization, with no separate fluid engine or display adapter. Construction requires no GL context; upload, physics, edits, display and destruction follow the GPU engine's owning-context rule. Its `Scalar`/`State` remain float.
+The retained legacy `FluidGridWebGL` is constructed directly and links `FluidSimEngineWebGL`; it is not yet selectable through the public FluidGrid wrapper. Coarse execution is an internal GPU-engine optimization, with no separate fluid engine or display adapter. Construction requires no GL context; upload, physics, edits, display and destruction follow the GPU engine's owning-context rule. Its `Scalar`/`State` remain float.
 
-Set `FluidGridGPU::cpu_pressure_cells` before `upload()` to choose the first coarse level with at most that many cells. The default is 1,024; the GPU hierarchy bottoms out at 16 cells even for smaller positive cutoffs. Zero keeps the entire hierarchy on the GPU. The setting takes effect on upload, including reupload after a mode change. This is a fixed hierarchy cutoff, not a target percentage of execution time. `FluidGrid` and CPU multigrid mathematics are unchanged.
+Set `FluidGridWebGL::cpu_pressure_cells` before `upload()` to choose the first coarse level with at most that many cells. The default is 1,024; the GPU hierarchy bottoms out at 16 cells even for smaller positive cutoffs. Zero keeps the entire hierarchy on the GPU. The setting takes effect on upload, including reupload after a mode change. This is a fixed hierarchy cutoff, not a target percentage of execution time. `FluidGridCPU` and CPU multigrid mathematics are unchanged.
 
 The fine-grid pressure operator, geometric transport and final actual-divergence check remain authoritative. GPU smoothing, restriction and interpolation continue above the cutoff; the CPU applies its fixed symmetric V-cycle below it. Coarse coefficients are copied and factored lazily once a projection needs a correction, then reused throughout that solve. Different preconditioning and float/double rounding can change iterations and chaotic trajectories within the requested accuracy.
 
 The last GPU restriction pass packs the current global residual maximum/failure flag with the coarse RHS. This lets the CPU handoff detect convergence without separate per-iteration scalar round trips, stop the V-cycle's unused return passes and preserve the active-iteration budget. With a 32x32 cutoff, ordinary cycles transfer 16 KiB of packed RHS/statistics and 4 KiB of correction; a stale matrix additionally reads 16 KiB of coefficients once per projection. The normal path never downloads the full fluid state. Native scalar reads use RED/FLOAT; WebGL retains RGBA/FLOAT but has not been run.
 
-The existing coarse-pressure checks now belong to `FluidSimGPUTests`; there is no separate hybrid test target. Projection, iteration caps, mode changes, edits, display, graphics-state preservation and multigrid algebra exercise CPU-coarse and GPU-only execution.
+The existing coarse-pressure checks now belong to `FluidSimWebGLTests`; there is no separate hybrid test target. Projection, iteration caps, mode changes, edits, display, graphics-state preservation and multigrid algebra exercise CPU-coarse and GPU-only execution.
 
-Retained experiment commands are `FluidSimGPUTests --coarse-compare 512 1200`, `--coarse-benchmark 512 0` and `--coarse-pool-steps 4800 512`. Comparison uses an identical saved 10-second GPU-only pool state, five alternating pairs, five warmup steps and 48 timed steps at `dt=0.004`, `1e-3` divergence, with GPU completion included. Setup, shared history replay, rendering and explicit state inspection are excluded. A history of zero measures startup. The pool command checks 40 simulated seconds at `dt=1/120`, using the existing budgets of `1e-3` actual divergence, `1e-4` relative ingredient-mass drift and `0.002` cell phase-volume disagreement.
+Retained experiment commands are `FluidSimWebGLTests --coarse-compare 512 1200`, `--coarse-benchmark 512 0` and `--coarse-pool-steps 4800 512`. Comparison uses an identical saved 10-second GPU-only pool state, five alternating pairs, five warmup steps and 48 timed steps at `dt=0.004`, `1e-3` divergence, with GPU completion included. Setup, shared history replay, rendering and explicit state inspection are excluded. A history of zero measures startup. The pool command checks 40 simulated seconds at `dt=1/120`, using the existing budgets of `1e-3` actual divergence, `1e-4` relative ingredient-mass drift and `0.002` cell phase-volume disagreement.
 
 Before the ownership cleanup, five alternating pairs on the Ryzen 9 9950X3D / RX 7700 XT, MSVC Release, measured these full-step medians for the four-ingredient test pool (`cell_size=4`, `dt=0.004`, tolerance `1e-3`). The GPU-only reference includes the short-solve scheduling improvement; these are the **additional** gains from CPU coarse execution:
 
@@ -308,13 +413,13 @@ ctest --test-dir <build-directory> -R "^FluidGridTests$" --output-on-failure
 
 On Windows, configure/build from a Visual Studio developer shell. The test executable needs the same vcpkg runtime DLL directory on `PATH` as the application (`<build-directory>/vcpkg_installed/x64-windows/bin`).
 
-With the same test option enabled, build `FluidSimGPUTests` and run both suites with `ctest --test-dir <build-directory> -R "^FluidGrid(GPU)?Tests$" --output-on-failure`. GPU cases cover hydrostatics, odd/thin projection, CPU comparisons, all four diagonal directions, nonuniform momentum transport, tiny interface remnants, sharp slabs, exact pure-material preservation, zero-time/failure handling and graphics-state restoration. GPU multigrid algebra tests cover odd/thin/high-contrast grids through 513x257, including the larger-grid polynomial smoother. Additional cases protect 512x512 default-budget convergence, the one-iteration cap and exact cached-versus-refreshed CFL parity. Common-API tests exercise upload/download, zero/reset behavior and actual display pixels for both types, including an empty catalogue. Component comparisons cover liquid-only, gas-only, 4, 7 and 18 ingredients, empty fields, differing densities, an element in both phases, and populated ingredients beyond the first sixteen. A 512x512 regression exercises the formerly failing vanishing-sliver case. Both engines' legacy fixtures explicitly populate component masses through `tests/FluidTestSetup.h`.
+With the same test option enabled, build `FluidSimWebGLTests` and run both suites with `ctest --test-dir <build-directory> -R "^FluidGrid(GPU)?Tests$" --output-on-failure`. GPU cases cover hydrostatics, odd/thin projection, CPU comparisons, all four diagonal directions, nonuniform momentum transport, tiny interface remnants, sharp slabs, exact pure-material preservation, zero-time/failure handling and graphics-state restoration. GPU multigrid algebra tests cover odd/thin/high-contrast grids through 513x257, including the larger-grid polynomial smoother. Additional cases protect 512x512 default-budget convergence, the one-iteration cap and exact cached-versus-refreshed CFL parity. Common-API tests exercise upload/download, zero/reset behavior and actual display pixels for both types, including an empty catalogue. Component comparisons cover liquid-only, gas-only, 4, 7 and 18 ingredients, empty fields, differing densities, an element in both phases, and populated ingredients beyond the first sixteen. A 512x512 regression exercises the formerly failing vanishing-sliver case. Both engines' legacy fixtures explicitly populate component masses through `tests/FluidTestSetup.h`.
 
 Edit-session regressions cover staged/cancelled/moved/reused sessions, empty commits, initialization requirements, arbitrary sparse masks, duplicate-write ordering, row-boundary gaps, liquid/gas replacement through nineteen ingredients, invalid-batch atomicity, cache refresh against a fresh upload, edited display colours and GL state restoration. A 257x129 full-grid edit also covers threaded CPU commits and merged GPU uploads. A two-second, 240-step source/sink case on each backend commits twelve batches during pool motion; every step checks projection, source-adjusted component mass, fraction bounds and mass-derived phase volumes. Existing twenty-second CPU pool/component regressions continue to cover the unchanged transport/pressure algorithms.
 
-`FluidSimGPUTests --edit-benchmark` measures reserved staging and GPU-complete commits for 1, 10 and 100 separate 6x6 drops on the 1024x1024 four-ingredient grid, plus a full-state download/upload reference. These are isolated edit costs with explicit GPU synchronization, excluding physics and drawing.
+`FluidSimWebGLTests --edit-benchmark` measures reserved staging and GPU-complete commits for 1, 10 and 100 separate 6x6 drops on the 1024x1024 four-ingredient grid, plus a full-state download/upload reference. These are isolated edit costs with explicit GPU synchronization, excluding physics and drawing.
 
-`FluidSimGPUTests --pool-steps 4800 1e-3 512 4` runs a 512x512, four-ingredient mixed-density pool for 40 simulated seconds. It downloads each committed step to check finite fields, fractions, each ingredient's mass, mass-derived phase volumes, closed walls, actual divergence and energy. The last two arguments default to 128 and 2. Short comparisons allow `5e-6` local phase-volume error; long float runs have an explicit quality budget of `0.002` of one cell (0.2%), while global ingredient-mass drift must remain below `1e-4`. This separates accumulated local roundoff from global conservation; it does not normalize masses to hide disagreement.
+`FluidSimWebGLTests --pool-steps 4800 1e-3 512 4` runs a 512x512, four-ingredient mixed-density pool for 40 simulated seconds. It downloads each committed step to check finite fields, fractions, each ingredient's mass, mass-derived phase volumes, closed walls, actual divergence and energy. The last two arguments default to 128 and 2. Short comparisons allow `5e-6` local phase-volume error; long float runs have an explicit quality budget of `0.002` of one cell (0.2%), while global ingredient-mass drift must remain below `1e-4`. This separates accumulated local roundoff from global conservation; it does not normalize masses to hide disagreement.
 
 `--component-benchmark 120 1920 1080 16` times one simulated second with sixteen ingredients sharing the original phase densities. It excludes initialization, rendering and full-state downloads and counts six physics steps per output frame. `--benchmark-steps 360` retains the small CPU/GPU comparison, reporting CPU `1e-8` and matched `1e-3` tolerances separately. Startup timings are not developed-wave performance.
 

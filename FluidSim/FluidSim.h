@@ -1,7 +1,6 @@
 #pragma once
 #include <bitloop.h>
 #include "FluidGrid.h"
-#include "FluidGridGPU.h"
 #include "FluidGridDisplay.h"
 #include <utility>
 
@@ -10,7 +9,6 @@ SIM_BEG;
 using namespace bl;
 using fluid::FluidGrid;
 using fluid::ElementId;
-using fluid::FluidGridGPU;
 using fluid::FluidGridDisplay;
 
 struct FluidSim_Scene : public Scene<FluidSim_Scene>
@@ -33,6 +31,10 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     double world_h = double(grid_h) * cell_size;
 
     FluidGrid fluid;
+    fluid::FluidDevice fluid_device = fluid::FluidDevice::GPU;
+    fluid::AdaptiveMode adaptive_mode = fluid::AdaptiveMode::DISABLED;
+    fluid::FluidAdaptiveSettings adaptive_settings;
+    static constexpr double frame_time = 0.02;
 
     ElementId air_element{};
     ElementId water_element{};
@@ -56,6 +58,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
 
     ShaderSurface surface;
     FluidGridDisplay fluid_display;
+    std::vector<float> display_pixels;
     void initializePool(double amplitude = 0.04);
     void renderFluidSurface() const;
 
@@ -63,7 +66,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     template<typename Operation>
     void withFluidContext(Operation&& operation)
     {
-        if constexpr (decltype(fluid)::requires_render_thread)
+        if (fluid.requiresRenderThread())
             renderThreadQueue().invokeBlocking(std::forward<Operation>(operation));
         else
             operation();
@@ -81,32 +84,43 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     FluidSim_Scene(Config& info [[maybe_unused]])
         : fluid(grid_w, grid_h, cell_size)
     {
-        air_element = fluid.elements.add({
+        // Scene-owned policy; selection, conservative regrid and restoration run in the backend.
+        adaptive_settings.prediction_horizon = adaptive_settings.check_interval + frame_time;
+
+        fluid.setAdaptiveSettings(adaptive_settings);
+        fluid.setDevice(fluid_device);
+        fluid.setAdaptiveMode(adaptive_mode);
+
+        fluid::ElementCatalogue elements;
+        fluid::FluidMixture liquid_mixture, gas_mixture;
+
+        air_element = elements.add({
             "Air", {0.015f, 0.025f, 0.06f}
         });
 
-        water_element = fluid.elements.add({
+        water_element = elements.add({
             "Water", {0.1f, 0.35f, 1.0f}
         });
 
-        red_element = fluid.elements.add({
+        red_element = elements.add({
             "Red fluid", {0.95f, 0.25f, 0.15f}
         });
 
-        cloud_element = fluid.elements.add({
+        cloud_element = elements.add({
             "Cloud", {0.0f, 1.0f, 1.0f}
         });
 
-        fluid.liquid_mixture.components = {
+        liquid_mixture.components = {
             {water_element, 100.0},
             {red_element, 300.0}
         };
 
         const double atmosphere_density = 0.1;
-        fluid.gas_mixture.components = {
+        gas_mixture.components = {
             {air_element, atmosphere_density},
             {cloud_element, atmosphere_density}
         };
+        fluid.configureMaterials(std::move(elements), std::move(liquid_mixture), std::move(gas_mixture));
     }
 
     struct UI : BufferedInterfaceModel

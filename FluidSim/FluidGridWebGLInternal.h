@@ -180,7 +180,7 @@ inline GLuint compile(GLenum type, const std::string& source, std::string_view n
         std::string log(std::max(length, 1), '\0');
         glGetShaderInfoLog(shader, length, nullptr, log.data());
         glDeleteShader(shader);
-        throw std::runtime_error("FluidGridGPU " + std::string(name) + ": " + log);
+        throw std::runtime_error("FluidGridWebGL " + std::string(name) + ": " + log);
     }
     return shader;
 }
@@ -310,7 +310,7 @@ struct PassRunner
             glGetProgramiv(program.id, GL_INFO_LOG_LENGTH, &length);
             std::string log(std::max(length, 1), '\0');
             glGetProgramInfoLog(program.id, length, nullptr, log.data());
-            throw std::runtime_error("FluidGridGPU " + std::string(name) + ": " + log);
+            throw std::runtime_error("FluidGridWebGL " + std::string(name) + ": " + log);
         }
     }
     std::vector<float> read(const Texture& texture) const

@@ -3,6 +3,24 @@
   "name": "sim",
   "version-string": "0.1.0",
   "dependencies": [
-    "bitloop"
+    "bitloop",
+    {
+      "name": "dawn",
+      "default-features": false,
+      "features": [
+        {
+          "name": "dxc",
+          "platform": "windows"
+        },
+        {
+          "name": "metal",
+          "platform": "osx | ios"
+        },
+        {
+          "name": "vulkan",
+          "platform": "linux | android"
+        }
+      ]
+    }
   ]
 }

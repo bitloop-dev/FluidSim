@@ -335,7 +335,7 @@ void PressureMultigridGPU::rebuildCPU()
         cpu_down[(y + 1) * level.width + x] = cpu_pixels[4 * i + 3];
     }
     if (!cpu_coarse->rebuild(cpu_right, cpu_down))
-        throw std::runtime_error("FluidGridGPU coarse pressure factorization failed");
+        throw std::runtime_error("FluidGridWebGL coarse pressure factorization failed");
 }
 
 void PressureMultigridGPU::solveCPU(const Texture& rhs)

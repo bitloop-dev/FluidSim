@@ -1,5 +1,5 @@
 #pragma once
-#include "FluidGrid.h"
+#include "FluidGridCPU.h"
 
 namespace fluid::test
 {
@@ -32,8 +32,8 @@ void uploadTestMaterials(Grid& grid, typename Grid::State state)
 }
 
 // Initialize a fresh test grid from its existing fraction and velocity fields.
-inline FluidGrid::State initializeTestMaterials(
-    FluidGrid& grid, double liquid_density = 100.0, double gas_density = 0.1)
+inline FluidGridCPU::State initializeTestMaterials(
+    FluidGridCPU& grid, double liquid_density = 100.0, double gas_density = 0.1)
 {
     const auto water = grid.elements.add({"Water", {0.0f, 0.0f, 1.0f}});
     const auto air = grid.elements.add({"Air", {0.0f, 0.0f, 0.0f}});

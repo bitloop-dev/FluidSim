@@ -1,0 +1,9 @@
+# Current work: exit-time Scene UI race fixed
+
+**Goal / parent:** fix intermittent exit crash at Scene::_populateOverlay while keeping ui valid for every live scene. The user explicitly rejected a null guard. Four-backend/CMake tasks remain complete; this task concerns framework shutdown.
+
+**Cause / correction:** normal worker project commands exclude GUI population with SharedSync::shadow_buffer_mutex, but final worker_loop teardown did not. GUI could pump UI deletion and then populate still-published active_scenes while owner cleanup continued. Final _destroyActiveProject now holds the same existing lock. GUI can still pump deferred cleanup while waiting; after teardown it observes current_project cleared. Existing owner-thread destruction/draining, worker_finished signaling and all user changes are retained. Scene/UI code is byte-unchanged; no ui guard, new lifecycle abstraction, simulation or dependency change.
+
+**Validation:** new deterministic real Project/Scene UI regression fails before the fix at gui_excluded, then passes. Focused lifecycle/handles/deferred-cleanup tests pass (9 cases/103 assertions), plus25 repeated shutdown regression runs. Framework tests build in an ignored ninja-release-codex context; FluidSim Debug app builds in separate ninja-debug-codex, preserving the debugger-attached executable and normal build caches. [Exact source delta, proof, logs and limits](.codex/runs/run0008_20261027_210742/README.md). Skill: repository bitloop-development lifecycle/UI/threading/build guidance. No full manual desktop quit or numerical/trajectory test is claimed for this exit-only synchronization change.
+
+**Status / next:** fix complete. Stop the old paused process and rebuild/restart the user's normal Debug app to link it. No commit/merge or additional implementation is authorized. Simulation engines, user edits and AMReX-independent imports are preserved.

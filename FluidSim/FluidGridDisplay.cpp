@@ -1,48 +1,18 @@
 #include "FluidGridDisplay.h"
 #include <bitloop/core/debug.h>
-#include <bitloop/core/threads.h>
 #include <bitloop/nanovgx/nano_shader_surface.h>
-#include <algorithm>
 
 namespace fluid
 {
 
-std::uint32_t FluidGridDisplay::texture(const FluidGrid& grid) const
+std::uint32_t FluidGridDisplay::texture(const FluidGridBase& grid) const
 {
-    const int cell_count = grid.width * grid.height;
-    const double cell_volume = grid.cell_size * grid.cell_size;
+    grid.writeColorPixels(pixels);
+    return texture(grid.getWidth(), grid.getHeight(), pixels);
+}
 
-    pixels.resize(size_t(cell_count) * 4);
-
-    bl::Thread::forEachBatch(cell_count, [&](int i0, int i1)
-    {
-        for (int i = i0; i < i1; ++i)
-        {
-            float* pixel = pixels.data() + size_t(i) * 4;
-            pixel[0] = pixel[1] = pixel[2] = 0.0f;
-            pixel[3] = 1.0f;
-
-            auto addMixture = [&](const FluidMixture& mixture, const auto& masses)
-            {
-                for (size_t k = 0; k < mixture.components.size(); ++k)
-                {
-                    const auto& component = mixture.components[k];
-                    const auto& color = grid.elements[component.element].color;
-
-                    // Convert ingredient mass into its fraction of the whole cell.
-                    const double volume_fraction =
-                        masses[k][i] / (component.density * cell_volume);
-
-                    for (int channel = 0; channel < 3; ++channel)
-                        pixel[channel] += float(volume_fraction * color[channel]);
-                }
-            };
-
-            addMixture(grid.liquid_mixture, grid.liquid_mass);
-            addMixture(grid.gas_mixture, grid.gas_mass);
-        }
-    });
-
+std::uint32_t FluidGridDisplay::texture(int new_width, int new_height, std::span<const float> rgba) const
+{
     bl::GLStateGuard guard;
     glActiveTexture(GL_TEXTURE0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -58,10 +28,10 @@ std::uint32_t FluidGridDisplay::texture(const FluidGrid& grid) const
     else
         glBindTexture(GL_TEXTURE_2D, cpu_texture);
 
-    if (width != grid.width || height != grid.height)
+    if (width != new_width || height != new_height)
     {
-        width = grid.width;
-        height = grid.height;
+        width = new_width;
+        height = new_height;
 
         // Allocate storage for four floating-point colour channels.
         glTexImage2D(
@@ -74,7 +44,7 @@ std::uint32_t FluidGridDisplay::texture(const FluidGrid& grid) const
     glTexSubImage2D(
         GL_TEXTURE_2D, 0, 0, 0,
         width, height,
-        GL_RGBA, GL_FLOAT, pixels.data());
+        GL_RGBA, GL_FLOAT, rgba.data());
 
     return cpu_texture;
 }

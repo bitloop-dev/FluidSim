@@ -1,59 +1,85 @@
-#include "FluidGrid.h"
+#include "FluidGridCPU.h"
+#include "UniformWebGPU/FluidGridGPU.h"
 #include "FluidTestSetup.h"
 #include "FluidGridEditTests.h"
-#include "FluidGridGPU.h"
-#include "FluidGridGPUCoarseTests.h"
-#include "FluidGridDisplay.h"
-#include "PressureMultigridGPU.h"
-#include <SDL3/SDL.h>
-#include <glad/glad.h>
+#include "UniformWebGPU/PressureMultigridGPU.h"
+#include "UniformWebGPU/UniformPressureReduction.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 
-namespace
-{
-using fluid::FluidGrid;
+namespace {
+using fluid::FluidGridCPU;
 using fluid::FluidGridGPU;
 using fluid::test::initializeTestMaterials;
 using fluid::test::uploadTestMaterials;
+void require(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
 
-void require(bool condition, const char* message)
+void pressureReductionsMatchHost()
 {
-    if (!condition) throw std::runtime_error(message);
+    using namespace fluid::webgpu;
+    Compute compute;
+    UniformPressureReduction reduction(compute, 1031 * 1031);
+    auto result = compute.field(1, 1, 4);
+    auto check = [&](int w, int h, bool fractional)
+    {
+        auto input = compute.field(w, h), other = compute.field(w, h);
+        std::vector<float> a(w * h), b(w * h);
+        for (int i = 0; i < w * h; ++i)
+        {
+            a[i] = fractional ? float(std::sin(i * .17) * .13 + .02) : float((i * 17 + 3) % 11 - 5);
+            b[i] = fractional ? float(std::cos(i * .11) * .07 - .01) : float((i * 5 + 1) % 7 - 3);
+        }
+        a.back() = 13; b.back() = -7; // An odd final cell must participate in both sums and products.
+        compute.write(input, a); compute.write(other, b);
+        for (int mode = 0; mode < 3; ++mode)
+        {
+            std::array<double, 4> expected{};
+            for (int i = 0; i < w * h; ++i)
+            {
+                if (mode != 1) expected[0] += a[i];
+                if (mode == 0) expected[1] = std::max(expected[1], double(std::abs(a[i])));
+                if (mode == 1) expected[0] += double(a[i]) * b[i];
+                if (mode == 2) expected[2] += double(a[i]) * b[i];
+            }
+            reduction.reduce(input, result, mode, &other);
+            const auto actual = compute.read(result);
+            for (int channel = 0; channel < 4; ++channel)
+            {
+                const double tolerance = fractional ? 2.e-5 * std::max(1., std::abs(expected[channel])) : 0.;
+                require(std::abs(actual[channel] - expected[channel]) <= tolerance,
+                        "Uniform pressure reduction differs from host sum/dot/max");
+            }
+        }
+        std::cout << "reductions " << w << 'x' << h << " fractional=" << fractional << '\n';
+    };
+    for (const auto& [w, h] : {std::pair{1, 1}, {1, 129}, {129, 1}, {17, 19}, {511, 513}, {512, 512}, {1031, 1031}})
+        check(w, h, false);
+    check(37, 23, true);
+
+    auto input = compute.field(1031, 1031), other = compute.field(1031, 1031);
+    std::vector<float> a(1031 * 1031, 1.f), b(a.size(), 1.f);
+    for (int mode = 0; mode < 3; ++mode)
+    {
+        a.back() = mode == 1 ? 1.f : std::numeric_limits<float>::quiet_NaN();
+        b.back() = std::numeric_limits<float>::infinity();
+        compute.write(input, a); compute.write(other, b);
+        reduction.reduce(input, result, mode, &other);
+        require(compute.read(result)[3] == 1.f, "Uniform pressure reduction lost a non-finite flag");
+    }
+    // Poisoned partials from a larger reduction must not enter a subsequent small result.
+    auto small = compute.field(3, 1);
+    compute.write(small, std::vector<float>{1.f, -2.f, 4.f});
+    reduction.reduce(small, result, 0);
+    require(compute.read(result) == std::vector<float>({3.f, 4.f, 0.f, 0.f}),
+            "Uniform pressure reduction retained stale partial statistics");
 }
-
-struct Context
-{
-    SDL_Window* window = nullptr;
-    SDL_GLContext context = nullptr;
-    Context()
-    {
-        if (!SDL_Init(SDL_INIT_VIDEO)) throw std::runtime_error(SDL_GetError());
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-        window = SDL_CreateWindow("FluidGridGPU tests", 32, 32, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
-        if (!window) throw std::runtime_error(SDL_GetError());
-        context = SDL_GL_CreateContext(window);
-        if (!context) throw std::runtime_error(SDL_GetError());
-        SDL_GL_MakeCurrent(window, context);
-        require(gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress) != 0, "GL entry points unavailable");
-        SDL_GL_SetSwapInterval(0);
-        std::cout << "GPU: " << glGetString(GL_RENDERER) << "\nGL: " << glGetString(GL_VERSION) << '\n';
-    }
-    ~Context()
-    {
-        if (context) SDL_GL_DestroyContext(context);
-        if (window) SDL_DestroyWindow(window);
-        SDL_Quit();
-    }
-};
 
 FluidGridGPU::State pool(int width, int height)
 {
@@ -68,12 +94,11 @@ FluidGridGPU::State pool(int width, int height)
     return state;
 }
 
-void pressureBalancesGravity(int cpu_cells = 1024)
+void pressureBalancesGravity()
 {
     for (const auto& [w, h] : { std::pair{15, 11}, std::pair{1, 13}, std::pair{13, 1} })
     {
         FluidGridGPU grid(w, h, 4);
-        grid.cpu_pressure_cells = cpu_cells;
         FluidGridGPU::State state;
         state.liquid_fraction.assign(w * h, 1);
         uploadTestMaterials(grid, state);
@@ -86,11 +111,11 @@ void pressureBalancesGravity(int cpu_cells = 1024)
     }
 }
 
-void projectionMatchesCPU(int cpu_cells = 1024)
+void projectionMatchesCPU()
 {
     for (const auto& [w, h] : { std::pair{17, 13}, std::pair{128, 128} })
     {
-        FluidGrid cpu(w, h, 4);
+        FluidGridCPU cpu(w, h, 4);
         auto state = pool(w, h);
         cpu.liquid_fraction.assign(state.liquid_fraction.begin(), state.liquid_fraction.end());
         initializeTestMaterials(cpu);
@@ -100,7 +125,6 @@ void projectionMatchesCPU(int cpu_cells = 1024)
         for (auto preconditioner : {FluidGridGPU::PressurePreconditioner::Diagonal, FluidGridGPU::PressurePreconditioner::Multigrid})
         {
             FluidGridGPU gpu(w, h, 4);
-            gpu.cpu_pressure_cells = cpu_cells;
             gpu.pressure_preconditioner = preconditioner;
             uploadTestMaterials(gpu, state);
             gpu.applyGravity(1.0 / 120);
@@ -129,16 +153,14 @@ void zeroTimeAndFailedProjectionAreHandled()
     require(!grid.project(0.01, 0).converged, "zero-iteration projection unexpectedly converged");
 }
 
-void multigridPreservesPCGContract(int cpu_cells = 0)
+void multigridPreservesPCGContract()
 {
-    using namespace fluid::gpu_detail;
-    ComputeState guard;
-    PassRunner runner;
+    using namespace fluid::webgpu;
+    Compute runner;
     for (auto [w, h] : {std::pair{1, 1}, {1, 129}, {131, 1}, {2, 67}, {13, 9}, {65, 37}, {128, 128}, {512, 512}, {513, 257}})
     {
         PressureMultigridGPU multigrid(runner, w, h);
-        multigrid.useCPUCoarsePressure(cpu_cells);
-        Texture coefficients(w, h, 4), rhs(w, h), stats(1, 1, 4);
+        auto coefficients=runner.field(w,h,4), rhs=runner.field(w,h), stats=runner.field(1,1,4);
         std::vector<float> weights(size_t(w) * h * 4), a(w * h), b(w * h), combined(w * h);
         auto density = [](int x, int y) { return (x / 3 + y / 4) % 2 == 0 ? 0.1f : 100.0f; };
         for (int y = 0; y < h; ++y)
@@ -154,8 +176,7 @@ void multigridPreservesPCGContract(int cpu_cells = 0)
             a[i] = float(std::sin(i * 0.31) + std::cos(i * 0.073));
             b[i] = float(std::cos(i * 0.17) - std::sin(i * 0.019));
         }
-        glBindTexture(GL_TEXTURE_2D, coefficients.id);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_FLOAT, weights.data());
+        runner.write(coefficients,weights);
         multigrid.rebuild(coefficients);
         auto center = [](auto& values)
         {
@@ -166,14 +187,12 @@ void multigridPreservesPCGContract(int cpu_cells = 0)
         for (size_t i = 0; i < a.size(); ++i) combined[i] = 1.3f * a[i] - 0.7f * b[i];
         auto apply = [&](const std::vector<float>& input)
         {
-            glBindTexture(GL_TEXTURE_2D, rhs.id);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RED, GL_FLOAT, input.data());
+            runner.write(rhs,input);
             const float reduction[] = {float(std::accumulate(input.begin(), input.end(), 0.0)), 0, 0, 0};
-            glBindTexture(GL_TEXTURE_2D, stats.id);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, reduction);
+            runner.write(stats,reduction);
             const auto pixels = runner.read(multigrid.apply(rhs, stats));
             std::vector<double> result(input.size());
-            for (size_t i = 0; i < result.size(); ++i) result[i] = pixels[4 * i];
+            for (size_t i = 0; i < result.size(); ++i) result[i] = pixels[i];
             center(result);
             return result;
         };
@@ -196,7 +215,7 @@ void multigridPreservesPCGContract(int cpu_cells = 0)
         const auto constant = apply(a);
         double constant_error = 0.0;
         for (double value : constant) constant_error = std::max(constant_error, std::abs(value));
-        std::cout << "multigrid " << w << 'x' << h << " cpu_cells=" << cpu_cells << " linearity=" << error / std::max(1.0, scale)
+        std::cout << "multigrid " << w << 'x' << h << " linearity=" << error / std::max(1.0, scale)
                   << " constant_error=" << constant_error << " scale=" << scale << '\n';
         require(constant_error <= 5e-6 * std::max(1.0, scale), "GPU multigrid did not remove its nullspace within float accuracy");
     }
@@ -242,133 +261,44 @@ void cachedVelocityStatsRemainCurrent()
     require(a.liquid_fraction == b.liquid_fraction && a.u == b.u && a.v == b.v, "upload retained stale velocity statistics");
 }
 
-template<typename Grid>
-void commonInterfaceAndDisplay(int cpu_cells = 1024)
+void commonStateAndColorReadback()
 {
-    Grid grid(9, 7, 2.5);
-    if constexpr (std::is_same_v<Grid, FluidGridGPU>) grid.cpu_pressure_cells = cpu_cells;
-    typename Grid::State initial;
-    initial.liquid_fraction.resize(9 * 7);
-    initial.liquid_fraction[2 * 9 + 3] = typename Grid::Scalar(0.375);
+    FluidGridGPU grid(9, 7, 2.5);
+    FluidGridGPU::State initial;
+    initial.liquid_fraction.resize(63);
+    initial.liquid_fraction[2 * 9 + 3] = 0.375f;
     uploadTestMaterials(grid, initial);
     const auto before = grid.download();
-    require(before.liquid_fraction == initial.liquid_fraction && before.u.size() == 10 * 7 && before.v.size() == 9 * 8 && before.pressure.size() == 9 * 7,
-            "common state transfer has incorrect field sizes or contents");
-
-    fluid::FluidGridDisplay display;
-    GLuint framebuffer;
-    glGenFramebuffers(1, &framebuffer);
-    auto checkTexture = [&](float expected)
+    require(before.liquid_fraction == initial.liquid_fraction && before.u.size() == 70 && before.v.size() == 72 && before.pressure.size() == 63,
+            "WebGPU state transfer has incorrect field sizes or contents");
+    auto checkColor = [&](float expected)
     {
-        const auto texture = display.texture(grid);
-        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        require(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "common display texture is incomplete");
-        float pixel[4];
-        glReadPixels(3, 2, 1, 1, GL_RGBA, GL_FLOAT, pixel);
-        require(pixel[0] == 0.0f && pixel[1] == 0.0f && pixel[2] == expected && pixel[3] == 1.0f, "display returned stale or incorrect component colours");
+        const auto rgba = grid.colorPixels();
+        const float* pixel = rgba.data() + 4 * (2 * 9 + 3);
+        require(rgba.size() == 63 * 4 && pixel[0] == 0 && pixel[1] == 0 && pixel[2] == expected && pixel[3] == 1,
+                "WebGPU color readback is stale or incorrect");
     };
-    checkTexture(0.375f);
-    require(before.liquid_fraction == grid.download().liquid_fraction, "display mutated the material state");
+    checkColor(0.375f);
+    require(fluid::test::sameEditState(before, grid.download()), "color readback mutated physics state");
     auto edit = grid.beginEdit();
-    edit.setCell(3, 2, fluid::Phase::Liquid, grid.liquid_mixture.components[0].element);
-    edit.commit();
-    checkTexture(1.0f);
-    edit.setCell(3, 2, fluid::Phase::Gas, grid.gas_mixture.components[0].element);
-    edit.commit();
-    checkTexture(0.0f);
-    require(grid.step(1.0 / 120, 2000, 1e-3).converged, "common physics call failed");
-    grid.destroy();
-    grid.upload({});
-    checkTexture(0.0f);
+    edit.setCell(3, 2, fluid::Phase::Liquid, grid.liquid_mixture.components[0].element); edit.commit(); checkColor(1);
+    edit.setCell(3, 2, fluid::Phase::Gas, grid.gas_mixture.components[0].element); edit.commit(); checkColor(0);
+    require(grid.step(1.0 / 120, 2000, 1e-3).converged, "WebGPU common physics call failed");
+    grid.destroy(); grid.upload({}); checkColor(0);
     const auto reset = grid.download();
-    for (const auto* field : { &reset.liquid_fraction, &reset.u, &reset.v, &reset.pressure })
-        for (auto value : *field) require(value == 0, "empty upload failed to reset a field");
-    for (const auto* phase : { &reset.liquid_mass, &reset.gas_mass })
-        for (const auto& field : *phase) for (auto value : field) require(value == 0, "empty upload failed to reset component masses");
-    grid.liquid_mixture.components.clear();
-    grid.gas_mixture.components.clear();
-    grid.upload({});
-    checkTexture(0.0f);
-    display.destroy();
-    grid.destroy();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glDeleteFramebuffers(1, &framebuffer);
-}
-
-void graphicsStateIsPreserved(int w = 8, int h = 8, int cpu_cells = 1024)
-{
-    GLuint texture, framebuffer, buffers[2];
-    glGenTextures(1, &texture);
-    glGenFramebuffers(1, &framebuffer);
-    glGenBuffers(2, buffers);
-    glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, buffers[0]);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffers[1]);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 19);
-    glPixelStorei(GL_PACK_ROW_LENGTH, 23);
-    glViewport(7, 9, 11, 13);
-    glEnable(GL_BLEND);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(0, 0, 0, 0);
-    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-    {
-        FluidGridGPU gpu(w, h, 1);
-        gpu.cpu_pressure_cells = cpu_cells;
-        uploadTestMaterials(gpu, pool(w, h));
-        auto edit = gpu.beginEdit();
-        edit.setCell(0, h - 1, fluid::Phase::Liquid, gpu.liquid_mixture.components[0].element);
-        edit.commit();
-        require(gpu.step(1.0 / 120, 2000, 1e-3).converged, "graphics state changed the numerical passes");
-        const auto state = gpu.download();
-        require(state.liquid_fraction[(h - 1) * w] > 0.9f, "pixel buffers or color mask corrupted GPU state");
-        GLint value, viewport[4];
-        GLboolean mask[4];
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &value);
-        require(GLuint(value) == framebuffer, "draw framebuffer was not restored");
-        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &value);
-        require(GLuint(value) == framebuffer, "read framebuffer was not restored");
-        glGetIntegerv(GL_ACTIVE_TEXTURE, &value);
-        require(value == GL_TEXTURE3, "active texture was not restored");
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &value);
-        require(GLuint(value) == texture, "texture binding was not restored");
-        glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &value);
-        require(GLuint(value) == buffers[0], "pack buffer was not restored");
-        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &value);
-        require(GLuint(value) == buffers[1], "unpack buffer was not restored");
-        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &value);
-        require(value == 19, "unpack layout was not restored");
-        glGetIntegerv(GL_PACK_ROW_LENGTH, &value);
-        require(value == 23, "pack layout was not restored");
-        glGetIntegerv(GL_VIEWPORT, viewport);
-        require(viewport[0] == 7 && viewport[1] == 9 && viewport[2] == 11 && viewport[3] == 13, "viewport was not restored");
-        glGetBooleanv(GL_COLOR_WRITEMASK, mask);
-        require(!mask[0] && !mask[1] && !mask[2] && !mask[3], "color mask was not restored");
-        require(glIsEnabled(GL_BLEND) && glIsEnabled(GL_SCISSOR_TEST), "drawing capabilities were not restored");
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glDisable(GL_BLEND);
-    glDisable(GL_SCISSOR_TEST);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glDeleteFramebuffers(1, &framebuffer);
-    glDeleteTextures(1, &texture);
-    glDeleteBuffers(2, buffers);
+    for (const auto* field : {&reset.liquid_fraction, &reset.u, &reset.v, &reset.pressure})
+        for (float value : *field) require(value == 0, "empty upload did not reset state");
+    for (const auto* phase : {&reset.liquid_mass, &reset.gas_mass})
+        for (const auto& field : *phase) for (float value : field) require(value == 0, "empty upload did not reset components");
+    grid.liquid_mixture.components.clear(); grid.gas_mixture.components.clear();
+    grid.upload({}); checkColor(0); grid.destroy();
 }
 
 void transportMatchesCPU()
 {
     for (const auto velocity : { bl::DVec2{1, 0.75}, bl::DVec2{-1, 0.75}, bl::DVec2{1, -0.75}, bl::DVec2{-1, -0.75} })
     {
-        FluidGrid cpu(48, 48, 1);
+        FluidGridCPU cpu(48, 48, 1);
         FluidGridGPU gpu(48, 48, 1);
         FluidGridGPU::State state;
         state.liquid_fraction.resize(48 * 48);
@@ -446,12 +376,12 @@ void transportKeepsStraightInterfacesSharp()
 void transportKeepsShallowInterfacesStraight()
 {
     double largest_error = 0.0;
+    FluidGridGPU grid(96, 96, 1.0);
     for (bool vertical : {false, true})
     for (bool reverse_phase : {false, true})
     for (double slope : {0.0, -0.1, -0.05, 0.05, 0.1})
     for (double speed : {-1.0, 1.0})
     {
-        FluidGridGPU grid(96, 96, 1.0);
         FluidGridGPU::State state;
         state.liquid_fraction.resize(96 * 96);
         auto& flow = vertical ? state.v : state.u;
@@ -499,7 +429,7 @@ void nonuniformTransportMatchesCPU()
     for (int x = 0; x <= w; ++x) state.u[y * (w + 1) + x] = float(stream(x, y + 1) - stream(x, y));
     for (int y = 0; y <= h; ++y)
     for (int x = 0; x < w; ++x) state.v[y * w + x] = float(stream(x, y) - stream(x + 1, y));
-    FluidGrid cpu(w, h, 1);
+    FluidGridCPU cpu(w, h, 1);
     cpu.liquid_fraction.assign(state.liquid_fraction.begin(), state.liquid_fraction.end());
     cpu.u.assign(state.u.begin(), state.u.end());
     cpu.v.assign(state.v.begin(), state.v.end());
@@ -520,7 +450,7 @@ void nonuniformTransportMatchesCPU()
 
 void fullStepsMatchCPU()
 {
-    FluidGrid cpu(32, 24, 4);
+    FluidGridCPU cpu(32, 24, 4);
     FluidGridGPU gpu(32, 24, 4);
     auto state = pool(32, 24);
     cpu.liquid_fraction.assign(state.liquid_fraction.begin(), state.liquid_fraction.end());
@@ -657,7 +587,7 @@ void componentsMatchCPU()
     for (auto [liquids, gases] : {std::pair{1, 0}, std::pair{0, 1}, std::pair{2, 2}, std::pair{3, 4}, std::pair{9, 9}})
     {
         FluidGridGPU gpu(31, 23, 2.5);
-        FluidGrid cpu(31, 23, 2.5);
+        FluidGridCPU cpu(31, 23, 2.5);
         auto initial = componentPool(gpu, liquids, gases);
         auto reference = componentPool(cpu, liquids, gases);
         // Start from exactly the same representable masses, so the comparison isolates arithmetic.
@@ -688,21 +618,21 @@ void componentsMatchCPU()
         }
         std::cout << "components=" << liquids + gases << " mass_fraction_error=" << mass_error << " velocity_error=" << velocity_error << '\n';
         require(mass_error < 2e-4 && velocity_error < 0.01, "GPU components differ from CPU reference");
-        fluid::FluidGridDisplay cpu_display, gpu_display;
-        const auto gpu_texture = gpu_display.texture(gpu);
-        const auto cpu_texture = cpu_display.texture(cpu);
-        fluid::gpu_detail::ComputeState guard;
-        GLuint framebuffer;
-        glGenFramebuffers(1, &framebuffer);
-        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-        std::vector<float> a(31 * 23 * 4), b(a.size());
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gpu_texture, 0);
-        glReadPixels(0, 0, 31, 23, GL_RGBA, GL_FLOAT, a.data());
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cpu_texture, 0);
-        glReadPixels(0, 0, 31, 23, GL_RGBA, GL_FLOAT, b.data());
-        for (size_t i = 0; i < a.size(); ++i) require(std::abs(a[i] - b[i]) < 5e-4, "GPU catalogue colors differ from CPU");
-        glDeleteFramebuffers(1, &framebuffer);
-        cpu_display.destroy();
+        const auto pixels=gpu.colorPixels();
+        const auto current=gpu.download();
+        for (size_t i=0; i<current.liquid_fraction.size(); ++i)
+        {
+            std::array<double,3> expected={};
+            for (auto phase : {std::pair{&gpu.liquid_mixture,&current.liquid_mass},std::pair{&gpu.gas_mixture,&current.gas_mass}})
+                for (size_t k=0; k<phase.first->components.size(); ++k)
+                {
+                    const auto& component=phase.first->components[k];
+                    for (int c=0; c<3; ++c) expected[c]+=(*phase.second)[k][i]*gpu.elements[component.element].color[c]/(component.density*gpu.cell_size*gpu.cell_size);
+                }
+            for (int c=0; c<3; ++c) require(std::abs(pixels[4*i+c]-expected[c])<5e-6,"GPU catalogue colors differ from masses");
+            require(pixels[4*i+3]==1,"GPU catalogue alpha differs");
+        }
+
     }
 }
 
@@ -715,105 +645,6 @@ void vanishingSliversCannotExportExcessMass()
     for (int tick = 0; tick < 140; ++tick)
         require(grid.step(1.0 / 120, 2000, 1e-3).converged, "vanishing donor sliver destabilized component transport");
     checkComponents(grid, grid.download(), initial);
-}
-
-void componentBenchmark(int steps, int width, int height, int count)
-{
-    FluidGridGPU grid(width, height, 4);
-    grid.upload(componentPool(grid, count / 2, count - count / 2, false));
-    glFinish();
-    const auto started = std::chrono::steady_clock::now();
-    long long iterations = 0;
-    for (int tick = 0; tick < steps; ++tick)
-    {
-        const auto result = grid.step(1.0 / 120, 2000, 1e-3);
-        if (!result.converged)
-            std::cout << "benchmark failure tick=" << tick + 1 << " iterations=" << result.iterations << " divergence=" << result.max_divergence << '\n';
-        require(result.converged, "component benchmark failed to converge");
-        iterations += result.iterations;
-    }
-    glFinish();
-    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    std::cout << "component_benchmark grid=" << width << 'x' << height << " components=" << count << " steps=" << steps
-              << " seconds=" << seconds << " fps=" << steps / (6 * seconds) << " mean_iterations=" << double(iterations) / steps << '\n';
-}
-
-void benchmark(int steps)
-{
-    const auto initial = pool(128, 128);
-    auto time = [&](auto& grid, const char* name, double tolerance)
-    {
-        const auto start = std::chrono::steady_clock::now();
-        long long iterations = 0;
-        for (int tick = 0; tick < steps; ++tick)
-        {
-            auto result = grid.step(1.0 / 120, 2000, tolerance);
-            require(result.converged, "benchmark projection failed");
-            iterations += result.iterations;
-        }
-        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        std::cout << name << " steps=" << steps << " tolerance=" << tolerance << " seconds=" << seconds
-                  << " frames_per_second=" << (steps / 6.0) / seconds << " mean_iterations=" << double(iterations) / steps << '\n';
-    };
-    for (double tolerance : { 1e-8, 1e-3 })
-    {
-        FluidGrid cpu(128, 128, 4);
-        cpu.liquid_fraction.assign(initial.liquid_fraction.begin(), initial.liquid_fraction.end());
-        initializeTestMaterials(cpu);
-        time(cpu, "CPU", tolerance);
-    }
-    FluidGridGPU gpu(128, 128, 4);
-    uploadTestMaterials(gpu, initial);
-    time(gpu, "GPU", 1e-3);
-}
-
-void editBenchmark()
-{
-    FluidGridGPU grid(1024, 1024, 1);
-    grid.upload(componentPool(grid, 2, 2, false));
-    const auto water = grid.liquid_mixture.components[0].element;
-    auto edit = grid.beginEdit();
-    edit.reserve(3600);
-    auto median = [](std::vector<double> values) {
-        std::sort(values.begin(), values.end());
-        return values[values.size() / 2];
-    };
-    for (int drops : {1, 10, 100})
-    {
-        std::vector<double> staging, commits;
-        for (int repeat = 0; repeat < 25; ++repeat)
-        {
-            glFinish();
-            const auto start = std::chrono::steady_clock::now();
-            for (int drop = 0; drop < drops; ++drop)
-            for (int y = 0; y < 6; ++y)
-            for (int x = 0; x < 6; ++x)
-                edit.setCell(4 + (drop % 10) * 100 + x, 4 + (drop / 10) * 100 + y, fluid::Phase::Liquid, water);
-            const auto queued = std::chrono::steady_clock::now();
-            edit.commit();
-            glFinish();
-            const auto finished = std::chrono::steady_clock::now();
-            if (repeat >= 5)
-            {
-                staging.push_back(std::chrono::duration<double, std::micro>(queued - start).count());
-                commits.push_back(std::chrono::duration<double, std::micro>(finished - queued).count());
-            }
-        }
-        std::cout << "edit drops=" << drops << " cells=" << drops * 36 << " texture_bytes=" << drops * 36 * 20
-                  << " staging_us=" << median(staging) << " commit_gpu_complete_us=" << median(commits) << '\n';
-    }
-    std::vector<double> full_transfers;
-    for (int repeat = 0; repeat < 7; ++repeat)
-    {
-        glFinish();
-        const auto start = std::chrono::steady_clock::now();
-        const auto state = grid.download();
-        grid.upload(state);
-        glFinish();
-        if (repeat >= 2)
-            full_transfers.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
-    }
-    std::cout << "full_state_round_trip_ms=" << median(full_transfers) << '\n';
 }
 
 void closedPool(int steps, int size, double tolerance, int count)
@@ -859,6 +690,7 @@ void closedPool(int steps, int size, double tolerance, int count)
     {
         const auto solve_start = std::chrono::steady_clock::now();
         const auto result = grid.step(1.0 / 120, 2000, tolerance);
+        grid.synchronize();
         solve_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count();
         iterations += result.iterations;
         largest_divergence = std::max(largest_divergence, result.max_divergence);
@@ -920,65 +752,53 @@ void closedPool(int steps, int size, double tolerance, int count)
 }
 }
 
-int main(int argc, char** argv)
+int main(int argc,char** argv)
 {
     try
     {
-        std::cout << std::unitbuf;
-        std::cerr << std::unitbuf;
-        Context context;
-        if (argc >= 2 && (std::string(argv[1]) == "--coarse-benchmark" || std::string(argv[1]) == "--coarse-compare"))
+        std::cout<<std::unitbuf; std::cerr<<std::unitbuf;
+        if (argc==2 && std::string(argv[1])=="--reductions")
         {
-            fluid::test::coarsePressureBenchmark(argc > 2 ? std::stoi(argv[2]) : 512, argc > 3 ? std::stoi(argv[3]) : 0,
-                                                 std::string(argv[1]) == "--coarse-compare");
-            return 0;
+            pressureReductionsMatchHost();
+            std::cout<<"PASS WebGPU reductions\n"; return 0;
         }
-        if (argc >= 3 && std::string(argv[1]) == "--coarse-pool-steps")
+        if (argc>=3 && std::string(argv[1])=="--pool-steps")
         {
-            fluid::test::coarsePressurePool(std::stoi(argv[2]), argc > 3 ? std::stoi(argv[3]) : 128);
-            return 0;
+            closedPool(std::stoi(argv[2]),argc>4?std::stoi(argv[4]):64,argc>3?std::stod(argv[3]):1e-3,argc>5?std::stoi(argv[5]):4);
+            std::cout<<"PASS WebGPU pool\n"; return 0;
         }
-        if (argc == 2 && std::string(argv[1]) == "--edit-benchmark")
+        if (argc==2 && std::string(argv[1])=="--smoke")
         {
-            editBenchmark();
-            require(glGetError() == GL_NO_ERROR, "GL error during edit benchmark");
-            return 0;
+            pressureBalancesGravity(); zeroTimeAndFailedProjectionAreHandled();
+            std::cout<<"PASS WebGPU smoke\n"; return 0;
         }
-        if (argc == 6 && std::string(argv[1]) == "--component-benchmark")
+        if (argc==2 && std::string(argv[1])=="--multigrid")
         {
-            componentBenchmark(std::stoi(argv[2]), std::stoi(argv[3]), std::stoi(argv[4]), std::stoi(argv[5]));
-            return 0;
+            multigridPreservesPCGContract();
+            std::cout<<"PASS WebGPU multigrid\n"; return 0;
         }
-        if (argc == 3 && std::string(argv[1]) == "--benchmark-steps")
+        if (argc==2 && std::string(argv[1])=="--projection")
         {
-            benchmark(std::stoi(argv[2]));
-            return 0;
+            projectionMatchesCPU(); largeMixedPressureConvergesWithinDefaultBudget();
+            std::cout<<"PASS WebGPU projection\n"; return 0;
         }
-        if (argc >= 3 && std::string(argv[1]) == "--pool-steps")
+        if (argc==2 && std::string(argv[1])=="--transport")
         {
-            const int steps = std::stoi(argv[2]);
-            const double tolerance = argc > 3 ? std::stod(argv[3]) : 1e-3;
-            const int size = argc > 4 ? std::stoi(argv[4]) : 128;
-            const int count = argc > 5 ? std::stoi(argv[5]) : 2;
-            closedPool(steps, size, tolerance, count);
-            require(glGetError() == GL_NO_ERROR, "GL error during GPU pool");
-            return 0;
+            tinyFractionsRemainFinite(); transportMatchesCPU(); transportPreservesPureMaterial();
+            transportKeepsStraightInterfacesSharp(); transportKeepsShallowInterfacesStraight();
+            nonuniformTransportMatchesCPU(); fullStepsMatchCPU(); componentsMatchCPU();
+            std::cout<<"PASS WebGPU transport\n"; return 0;
         }
+        pressureReductionsMatchHost();
         pressureBalancesGravity();
-        pressureBalancesGravity(0);
         multigridPreservesPCGContract();
-        multigridPreservesPCGContract(64);
-        multigridPreservesPCGContract(1024);
         largeMixedPressureConvergesWithinDefaultBudget();
         cachedVelocityStatsRemainCurrent();
+        commonStateAndColorReadback();
         fluid::test::materialEditingIsSparseAndReusable<FluidGridGPU>();
         fluid::test::bulkMaterialEditsPreserveEveryCell<FluidGridGPU>();
         fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGridGPU>();
-        commonInterfaceAndDisplay<FluidGrid>();
-        commonInterfaceAndDisplay<FluidGridGPU>();
-        commonInterfaceAndDisplay<FluidGridGPU>(0);
         projectionMatchesCPU();
-        projectionMatchesCPU(0);
         tinyFractionsRemainFinite();
         transportMatchesCPU();
         transportPreservesPureMaterial();
@@ -989,17 +809,8 @@ int main(int argc, char** argv)
         componentsMatchCPU();
         vanishingSliversCannotExportExcessMass();
         zeroTimeAndFailedProjectionAreHandled();
-        graphicsStateIsPreserved();
-        graphicsStateIsPreserved(8, 8, 0);
-        graphicsStateIsPreserved(65, 37);
-        fluid::test::coarsePressureRegressions();
-        require(glGetError() == GL_NO_ERROR, "GL error during GPU regressions");
-        std::cout << "PASS GPU regressions\n";
+        std::cout<<"PASS WebGPU regressions\n";
         return 0;
     }
-    catch (const std::exception& error)
-    {
-        std::cerr << "FAIL " << error.what() << '\n';
-        return 1;
-    }
+    catch (const std::exception& error) { std::cerr<<"FAIL "<<error.what()<<'\n'; return 1; }
 }

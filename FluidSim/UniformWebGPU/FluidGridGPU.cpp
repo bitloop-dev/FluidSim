@@ -1,0 +1,631 @@
+#include "FluidGridGPU.h"
+#include "UniformPressureReduction.h"
+#include "FluidUniformWebGPUKernels.h"
+#include "PressureMultigridGPU.h"
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+
+namespace fluid
+{
+using namespace webgpu;
+
+struct FluidGridGPU::Impl : UniformKernels
+{
+    const int width, height;
+    float cell_size = 1, gravity_y = 100, tolerance = 0, gas_damping_rate = 0;
+    Compute runner;
+    Field u, v, next_u, next_v, liquid_fraction, next_liquid_fraction;
+    // RG holds liquid mass / cell volume and gas mass / cell volume separately.
+    Field density, next_density;
+    Field color, next_color;
+    // Each RGBA group holds four ingredients, liquid first and then gas.
+    struct ComponentGroup
+    {
+        Field mass, next_mass, correction;
+        std::array<float, 4> liquid_mask = {}, gas_mask = {};
+        ComponentGroup(Compute& runner, int w, int h) : mass(runner.field(w,h,4)), next_mass(runner.field(w,h,4)), correction(runner.field(w,h,4)) {}
+    };
+    std::vector<ComponentGroup> components;
+    std::vector<float> edit_upload;
+    size_t liquid_count = 0, gas_count = 0;
+    bool density_valid = false;
+    Field momentum_u, momentum_v, next_momentum_u, next_momentum_v;
+    Field interfaces, split_weights, transfers_u, transfers_v;
+    Field pressure, next_pressure, previous_pressure, pressure_base, pressure_rhs, pressure_residual, next_residual;
+    Field pressure_correction, pressure_direction, next_direction, pressure_product;
+    Field pressure_coefficients;
+    Field residual_stats, correction_stats, denominator, solver_state, next_solver_state;
+    std::vector<Field> reduction_levels;
+    UniformPressureReduction pressure_reduction;
+    PressureMultigridGPU multigrid;
+    bool use_multigrid = true;
+    int previous_solve_iterations = 7;
+    float cached_outflow = 0;
+    bool velocity_stats_valid = false;
+
+    Impl(int w, int h);
+    void configure(const FluidGridGPU& grid)
+    {
+        if (cell_size != float(grid.cell_size)) density_valid = false;
+        cell_size = float(grid.cell_size);
+        gravity_y = float(grid.gravity_y);
+        gas_damping_rate = float(grid.gas_damping_rate);
+        use_multigrid = grid.pressure_preconditioner == FluidGridGPU::PressurePreconditioner::Multigrid;
+    }
+    using Input = std::pair<const char*, const Field*>;
+    void run(Kernel& program, std::initializer_list<const Field*> outputs,
+             std::initializer_list<Input> inputs = {}, float dt = 0, int mode = 0)
+    {
+        Parameters params = program.parameters;
+        params.grid[0] = width; params.grid[1] = height; params.grid[2] = mode;
+        params.value[0] = cell_size; params.value[1] = dt; params.value[2] = tolerance;
+        runner.run(program, outputs, inputs, params);
+    }
+    void reduce(const Field& input, Field& result, int mode = 0, const Field* other = nullptr, size_t first_level = 0)
+    {
+        if (mode != 4)
+        {
+            pressure_reduction.reduce(input, result, mode, other);
+            return;
+        }
+        // Preserve the existing divergence/CFL statistics and their reduction order.
+        const Field* source = &input;
+        for (size_t i = first_level; i < reduction_levels.size(); ++i)
+        {
+            const Field& level = reduction_levels[i];
+            run(reduce_pass, { &level }, { {"source", source}, {"other", other ? other : source} }, 0, mode);
+            source = &level;
+            mode = mode == 4 ? 4 : 3;
+        }
+        run(reduce_pass, { &result }, { {"source", source}, {"other", other ? other : source} }, 0, mode);
+    }
+    std::array<float, 4> readScalar(const Field& field)
+    {
+        const auto values = runner.read(field);
+        return {values[0], values[1], values[2], values[3]};
+    }
+    void removeMean(Field& field, Field& scratch)
+    {
+        reduce(field, residual_stats);
+        run(subtract_mean, { &scratch }, { {"source", &field}, {"stats", &residual_stats} });
+        field.swap(scratch);
+    }
+    void uploadComponents(const FluidGridGPU& grid, const State& state);
+    void rebuildDensity();
+    void rebuildColor(const FluidGridGPU& grid);
+    void sumGroups(Kernel& program, Field& result, Field& scratch, size_t first);
+    void advectComponents(double dt, int direction);
+    void rebuildPressureCoefficients();
+    void applyPressureOperator(const Field& input);
+    void rebuildResidual();
+    void applyPreconditioner(bool restart);
+    int solvePressure(int max_iterations, float residual_tolerance, bool refinement);
+    FluidGridGPU::ProjectionResult project(double dt, int max_iterations, double divergence_tolerance);
+    double maxDivergence();
+    void dampGasVelocity(double dt);
+    void applyGravity(double dt);
+    void rebuildInterfaces();
+    void rebuildTransfersX(double dt);
+    void rebuildTransfersY(double dt);
+    void rebuildMomentum();
+    void advectMomentumX(double dt);
+    void advectMomentumY(double dt);
+    void recoverVelocity();
+    double transportStepLimit(double dt);
+    void freezeComponentCorrections();
+    void advectDirection(double step, bool horizontal);
+    void advect(double dt);
+};
+
+FluidGridGPU::Impl::Impl(int w, int h) :
+    width(w), height(h),
+    u(runner.field(w + 1, h)), v(runner.field(w, h + 1)), next_u(runner.field(w + 1, h)), next_v(runner.field(w, h + 1)),
+    liquid_fraction(runner.field(w, h)), next_liquid_fraction(runner.field(w, h)), density(runner.field(w, h, 2)), next_density(runner.field(w, h, 2)),
+    color(runner.field(w, h, 4)), next_color(runner.field(w, h, 4)),
+    momentum_u(runner.field(w + 1, h)), momentum_v(runner.field(w, h + 1)), next_momentum_u(runner.field(w + 1, h)), next_momentum_v(runner.field(w, h + 1)),
+    interfaces(runner.field(w, h, 4)), split_weights(runner.field(w, h, 2)), transfers_u(runner.field(w + 1, h, 2)), transfers_v(runner.field(w, h + 1, 2)),
+    pressure(runner.field(w, h)), next_pressure(runner.field(w, h)), previous_pressure(runner.field(w, h)), pressure_base(runner.field(w, h)), pressure_rhs(runner.field(w, h)),
+    pressure_residual(runner.field(w, h)), next_residual(runner.field(w, h)), pressure_correction(runner.field(w, h)),
+    pressure_direction(runner.field(w, h)), next_direction(runner.field(w, h)), pressure_product(runner.field(w, h)),
+    pressure_coefficients(runner.field(w, h, 4)),
+    residual_stats(runner.field(1, 1, 4)), correction_stats(runner.field(1, 1, 4)), denominator(runner.field(1, 1, 4)),
+    solver_state(runner.field(1, 1, 4)), next_solver_state(runner.field(1, 1, 4)),
+    pressure_reduction(runner, w * h), multigrid(runner, w, h)
+{
+    for (int rw = (w + 3) / 4, rh = (h + 3) / 4; rw > 1 || rh > 1; rw = (rw + 3) / 4, rh = (rh + 3) / 4)
+        reduction_levels.push_back(runner.field(rw,rh,4));
+    build(runner);
+}
+
+void FluidGridGPU::upload(const State& state)
+{
+    if (!gpu) gpu = std::make_unique<Impl>(width,height);
+    gpu->configure(*this);
+    auto upload = [&](Field& field, const std::vector<float>& values)
+    {
+        if (values.empty()) { gpu->run(gpu->fill,{&field}); return; }
+        if (values.size() != size_t(field.width)*field.height)
+            throw std::invalid_argument("FluidGridGPU upload dimensions do not match the grid");
+        gpu->runner.write(field,values);
+    };
+    upload(gpu->liquid_fraction,state.liquid_fraction);
+    upload(gpu->u,state.u); upload(gpu->v,state.v);
+    upload(gpu->pressure,state.pressure); upload(gpu->previous_pressure,state.pressure);
+    gpu->uploadComponents(*this,state);
+    gpu->previous_solve_iterations=7;
+    gpu->cached_outflow=0;
+    gpu->velocity_stats_valid=state.u.empty()&&state.v.empty();
+    gpu->runner.flush();
+}
+
+void FluidGridGPU::commitEdits(detail::CellEditBatch& batch)
+{
+    batch.prepare(width,height,cell_size*cell_size,liquid_mixture,gas_mixture);
+    if (!gpu||gpu->liquid_count!=liquid_mixture.components.size()||gpu->gas_count!=gas_mixture.components.size())
+        throw std::logic_error("Upload the configured fluid mixtures before committing edits");
+    const auto& cells=batch.cells;
+    for (size_t first=0; first<cells.size();)
+    {
+        const size_t offset=size_t(cells[first].y)*width+cells[first].x;
+        size_t last=first+1;
+        while (last<cells.size()&&size_t(cells[last].y)*width+cells[last].x==offset+last-first) ++last;
+        const size_t count=last-first;
+        auto& data=gpu->edit_upload;
+        data.assign(count*(1+4*gpu->components.size()),0.0f);
+        for (size_t i=0; i<count; ++i)
+        {
+            const auto& cell=cells[first+i];
+            data[i]=cell.component<gpu->liquid_count?1.0f:0.0f;
+            data[count+(cell.component/4)*count*4+i*4+cell.component%4]=float(cell.mass);
+        }
+        gpu->runner.write(gpu->liquid_fraction,std::span<const float>(data.data(),count),offset);
+        for (size_t group=0; group<gpu->components.size(); ++group)
+            gpu->runner.write(gpu->components[group].mass,std::span<const float>(data.data()+count*(1+4*group),count*4),offset*4);
+        first=last;
+    }
+    gpu->density_valid=false;
+}
+
+FluidGridGPU::State FluidGridGPU::download() const
+{
+    State state{gpu->runner.read(gpu->liquid_fraction),gpu->runner.read(gpu->u),gpu->runner.read(gpu->v),gpu->runner.read(gpu->pressure)};
+    const size_t count=size_t(width)*height;
+    state.liquid_mass.assign(gpu->liquid_count,std::vector<float>(count));
+    state.gas_mass.assign(gpu->gas_count,std::vector<float>(count));
+    for (size_t group=0; group<gpu->components.size(); ++group)
+    {
+        const auto packed=gpu->runner.read(gpu->components[group].mass);
+        for (size_t lane=0; lane<4; ++lane)
+        {
+            const size_t index=group*4+lane;
+            if (index>=gpu->liquid_count+gpu->gas_count) break;
+            auto& mass=index<gpu->liquid_count?state.liquid_mass[index]:state.gas_mass[index-gpu->liquid_count];
+            for (size_t i=0; i<count; ++i) mass[i]=packed[4*i+lane];
+        }
+    }
+    return state;
+}
+
+void FluidGridGPU::destroy() { gpu.reset(); }
+
+FluidGridGPU::ProjectionResult FluidGridGPU::step(double dt, int max_iterations, double divergence_tolerance)
+{
+    if (dt<=0.0) return {};
+    gpu->configure(*this);
+    gpu->advect(dt);
+    gpu->dampGasVelocity(dt);
+    gpu->applyGravity(dt);
+    const auto result=gpu->project(dt,max_iterations,divergence_tolerance);
+    gpu->runner.flush();
+    return result;
+}
+
+void FluidGridGPU::advect(double dt)
+{
+    if (dt<=0.0) return;
+    gpu->configure(*this);
+    gpu->advect(dt); gpu->runner.flush();
+}
+
+void FluidGridGPU::dampGasVelocity(double dt)
+{
+    gpu->configure(*this); gpu->dampGasVelocity(dt); gpu->runner.flush();
+}
+
+void FluidGridGPU::applyGravity(double dt)
+{
+    gpu->configure(*this); gpu->applyGravity(dt); gpu->runner.flush();
+}
+
+FluidGridGPU::ProjectionResult FluidGridGPU::project(double dt, int max_iterations, double divergence_tolerance)
+{
+    if (dt<=0.0) return {};
+    gpu->configure(*this); const auto result=gpu->project(dt,max_iterations,divergence_tolerance);
+    gpu->runner.flush();
+    return result;
+}
+
+double FluidGridGPU::maxDivergence() const { gpu->configure(*this); return gpu->maxDivergence(); }
+
+std::vector<float> FluidGridGPU::colorPixels() const
+{
+    std::vector<float> pixels;
+    writeColorPixels(pixels);
+    return pixels;
+}
+
+void FluidGridGPU::writeColorPixels(std::vector<float>& pixels) const
+{
+    gpu->configure(*this); gpu->rebuildColor(*this); gpu->runner.read(gpu->color, pixels);
+}
+
+void FluidGridGPU::synchronize() const { if (gpu) gpu->runner.read(gpu->liquid_fraction,0,sizeof(float)); }
+
+void FluidGridGPU::Impl::rebuildPressureCoefficients()
+{
+    rebuildDensity();
+    run(pressure_coefficient, { &pressure_coefficients }, { {"density", &density} });
+    if (use_multigrid) multigrid.rebuild(pressure_coefficients);
+}
+
+void FluidGridGPU::Impl::applyPressureOperator(const Field& input)
+{
+    run(pressure_operator, { &pressure_product }, { {"source", &input}, {"weights", &pressure_coefficients} });
+}
+
+void FluidGridGPU::Impl::rebuildResidual()
+{
+    applyPressureOperator(pressure);
+    run(residual, { &pressure_residual }, { {"rhs", &pressure_rhs}, {"product", &pressure_product} });
+    reduce(pressure_residual, residual_stats);
+}
+
+void FluidGridGPU::Impl::applyPreconditioner(bool restart)
+{
+    const Field* correction = &pressure_correction;
+    if (use_multigrid)
+        correction = &multigrid.apply(pressure_residual, residual_stats);
+    else
+        run(precondition, { &pressure_correction }, {
+            {"residual", &pressure_residual}, {"stats", &residual_stats}, {"weights", &pressure_coefficients} });
+    reduce(*correction, correction_stats, 2, &pressure_residual);
+    run(coefficients, { &next_solver_state }, {
+        {"residual_stats", &residual_stats}, {"correction_stats", &correction_stats},
+        {"previous", &solver_state}, {"denominator", &denominator} }, 0, restart ? 1 : 0);
+    run(direction, { &next_direction }, {
+        {"correction", correction}, {"old_direction", &pressure_direction},
+        {"state", &next_solver_state}, {"previous", &solver_state} }, 0, restart ? 1 : 0);
+    pressure_direction.swap(next_direction);
+    solver_state.swap(next_solver_state);
+}
+
+int FluidGridGPU::Impl::solvePressure(int max_iterations, float residual_tolerance, bool refinement)
+{
+    tolerance = residual_tolerance;
+    // solve a correction from zero so small updates are not added to a large warm-start pressure
+    run(fill, { &pressure });
+    rebuildResidual();
+    auto stats = readScalar(residual_stats);
+    if (stats[1] <= tolerance || max_iterations == 0 || stats[3] != 0) return 0;
+
+    run(fill, { &solver_state });
+    run(fill, { &pressure_direction });
+    run(fill, { &denominator });
+    applyPreconditioner(true);
+    int submitted = 0;
+    int batch = use_multigrid ? (refinement ? 2 : std::clamp(previous_solve_iterations + 1, 2, 64)) : 8;
+    int extra_batch = 4;
+    std::array<float, 4> state = {};
+    while (submitted < max_iterations)
+    {
+        // Predict the check point from the previous solve; frozen updates cannot overshoot convergence.
+        const int end = std::min(submitted + batch, max_iterations);
+        for (; submitted < end; ++submitted)
+        {
+            applyPressureOperator(pressure_direction);
+            reduce(pressure_direction, denominator, 1, &pressure_product);
+            run(update_pressure, { &next_pressure, &next_residual }, {
+                {"pressure", &pressure}, {"residual", &pressure_residual}, {"direction", &pressure_direction},
+                {"product", &pressure_product}, {"state", &solver_state}, {"denominator", &denominator} });
+            pressure.swap(next_pressure);
+            pressure_residual.swap(next_residual);
+            reduce(pressure_residual, residual_stats);
+            applyPreconditioner(false);
+        }
+        state = readScalar(solver_state);
+        // project verifies the true remaining error on velocity before accepting this correction
+        if (state[0] < 0.0 || state[2] <= tolerance) break;
+        batch = use_multigrid ? extra_batch : 8;
+        extra_batch = std::min(extra_batch * 2, 128);
+    }
+    removeMean(pressure, next_pressure);
+    return int(state[3] + 0.5f);
+}
+
+FluidGridGPU::ProjectionResult FluidGridGPU::Impl::project(double dt, int max_iterations, double divergence_tolerance)
+{
+    velocity_stats_valid = false;
+    rebuildPressureCoefficients();
+
+    run(predict_pressure, { &pressure_base }, { {"latest", &pressure}, {"previous", &previous_pressure} });
+    previous_pressure.swap(pressure);
+    removeMean(pressure_base, next_pressure);
+    // apply the warm start first, then solve the remaining divergence as a smaller pressure correction
+    run(correct_velocity, { &next_u }, { {"velocity", &u}, {"pressure", &pressure_base}, {"weights", &pressure_coefficients} }, float(dt));
+    run(correct_velocity, { &next_v }, { {"velocity", &v}, {"pressure", &pressure_base}, {"weights", &pressure_coefficients} }, float(dt), 1);
+    u.swap(next_u);
+    v.swap(next_v);
+    ProjectionResult result;
+    for (;;)
+    {
+        run(divergence, { &pressure_rhs }, { {"u", &u}, {"v", &v} }, float(dt), 1);
+        removeMean(pressure_rhs, pressure_product);
+        // leave room for float rounding when applying the pressure gradient to velocity
+        const int iterations = solvePressure(max_iterations - result.iterations, float(0.25 * divergence_tolerance * cell_size * cell_size / dt), result.iterations != 0);
+        if (result.iterations == 0) previous_solve_iterations = iterations;
+        result.iterations += iterations;
+        run(correct_velocity, { &next_u }, { {"velocity", &u}, {"pressure", &pressure}, {"weights", &pressure_coefficients} }, float(dt));
+        run(correct_velocity, { &next_v }, { {"velocity", &v}, {"pressure", &pressure}, {"weights", &pressure_coefficients} }, float(dt), 1);
+        u.swap(next_u);
+        v.swap(next_v);
+        run(add_pressure, { &next_pressure }, { {"base", &pressure_base}, {"correction", &pressure} });
+        pressure_base.swap(next_pressure);
+
+        // measure actual divergence; refine from zero if float recurrence drift left too much error
+        result.max_divergence = maxDivergence();
+        result.converged = result.max_divergence <= divergence_tolerance;
+        if (result.converged || iterations == 0 || result.iterations >= max_iterations) break;
+    }
+    // retain total pressure for next step's prediction, after applying the corrections separately
+    pressure.swap(pressure_base);
+    removeMean(pressure, next_pressure);
+    return result;
+}
+
+double FluidGridGPU::Impl::maxDivergence()
+{
+    if (reduction_levels.empty())
+        run(velocity_stats, { &residual_stats }, { {"u", &u}, {"v", &v} });
+    else
+    {
+        run(velocity_stats, { &reduction_levels.front() }, { {"u", &u}, {"v", &v} });
+        reduce(reduction_levels.front(), residual_stats, 4, nullptr, 1);
+    }
+    const auto result = readScalar(residual_stats);
+    cached_outflow = result[2];
+    velocity_stats_valid = result[3] == 0;
+    return velocity_stats_valid ? result[1] : std::numeric_limits<double>::infinity();
+}
+
+void FluidGridGPU::Impl::dampGasVelocity(double dt)
+{
+    if (gas_damping_rate == 0 || dt <= 0) return;
+    const float retention = float(std::exp(-gas_damping_rate * dt));
+    run(damping, {&next_u}, {{"velocity", &u}, {"liquid", &liquid_fraction}}, retention, 0);
+    run(damping, {&next_v}, {{"velocity", &v}, {"liquid", &liquid_fraction}}, retention, 1);
+    u.swap(next_u); v.swap(next_v);
+    velocity_stats_valid = false;
+}
+
+void FluidGridGPU::Impl::applyGravity(double dt)
+{
+    velocity_stats_valid = false;
+    run(gravity, { &next_v }, { {"velocity", &v} }, float(gravity_y * dt));
+    v.swap(next_v);
+}
+
+void FluidGridGPU::Impl::uploadComponents(const FluidGridGPU& grid, const State& state)
+{
+    liquid_count = grid.liquid_mixture.components.size();
+    gas_count = grid.gas_mixture.components.size();
+    const size_t cell_count = size_t(width) * height;
+    auto validate = [&](const auto& fields, size_t count)
+    {
+        if (!fields.empty() && fields.size() != count)
+            throw std::invalid_argument("FluidGridGPU upload component count does not match the mixture");
+        for (const auto& field : fields)
+            if (!field.empty() && field.size() != cell_count)
+                throw std::invalid_argument("FluidGridGPU upload component dimensions do not match the grid");
+    };
+    validate(state.liquid_mass, liquid_count);
+    validate(state.gas_mass, gas_count);
+    const size_t group_count = (liquid_count + gas_count + 3) / 4;
+    while (components.size() > group_count) components.pop_back();
+    while (components.size() < group_count) components.emplace_back(runner,width,height);
+    std::vector<float> packed(cell_count * 4);
+    for (size_t group = 0; group < group_count; ++group)
+    {
+        auto& component = components[group];
+        component.liquid_mask = component.gas_mask = {};
+        std::fill(packed.begin(), packed.end(), 0.0f);
+        for (size_t lane = 0; lane < 4; ++lane)
+        {
+            const size_t index = group * 4 + lane;
+            if (index >= liquid_count + gas_count) break;
+            const bool liquid = index < liquid_count;
+            (liquid ? component.liquid_mask : component.gas_mask)[lane] = 1;
+            const auto& fields = liquid ? state.liquid_mass : state.gas_mass;
+            const size_t k = liquid ? index : index - liquid_count;
+            if (fields.empty() || fields[k].empty()) continue;
+            for (size_t i = 0; i < cell_count; ++i) packed[4 * i + lane] = fields[k][i];
+        }
+        runner.write(component.mass, packed);
+    }
+    density_valid = false;
+}
+
+void FluidGridGPU::Impl::rebuildDensity()
+{
+    if (density_valid) return;
+    if (components.empty()) run(fill, { &density });
+    for (size_t first = 0; first < components.size(); first += 4)
+    {
+        std::array<std::array<float, 4>, 4> liquid_masks = {}, gas_masks = {};
+        for (size_t j = 0; j < 4 && first + j < components.size(); ++j)
+        {
+            liquid_masks[j] = components[first + j].liquid_mask;
+            gas_masks[j] = components[first + j].gas_mask;
+        }
+        for (size_t j=0; j<4; ++j) { density_pass.parameters.vectors[j]=liquid_masks[j]; density_pass.parameters.vectors[j+4]=gas_masks[j]; }
+        sumGroups(density_pass, density, next_density, first);
+    }
+    density_valid = true;
+}
+
+void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid)
+{
+    if (components.empty()) run(fill, { &color }, {}, 0, 1);
+    for (size_t first = 0; first < components.size(); first += 4)
+    {
+        std::array<std::array<float, 4>, 4> channels[3] = {};
+        for (size_t group = 0; group < 4 && first + group < components.size(); ++group)
+        for (size_t lane = 0; lane < 4; ++lane)
+        {
+            const size_t index = (first + group) * 4 + lane;
+            if (index >= liquid_count + gas_count) break;
+            const auto& component = index < liquid_count ? grid.liquid_mixture.components[index]
+                : grid.gas_mixture.components[index - liquid_count];
+            const auto& rgb = grid.elements[component.element].color;
+            for (size_t c = 0; c < 3; ++c)
+                channels[c][group][lane] = float(rgb[c] / (component.density * grid.cell_size * grid.cell_size));
+        }
+        for (size_t c=0; c<3; ++c) for (size_t j=0; j<4; ++j) color_pass.parameters.vectors[c*4+j]=channels[c][j];
+        sumGroups(color_pass, color, next_color, first);
+    }
+}
+
+void FluidGridGPU::Impl::sumGroups(Kernel& program, Field& result, Field& scratch, size_t first)
+{
+    // Four packed inputs cover sixteen ingredients per dispatch.
+    const size_t count = std::min(size_t(4), components.size() - first);
+    const Field* inputs[4];
+    for (size_t j = 0; j < 4; ++j) inputs[j] = &components[first + std::min(j, count - 1)].mass;
+    program.parameters.grid[3] = int(count);
+    run(program, { &scratch }, { {"masses0", inputs[0]}, {"masses1", inputs[1]},
+        {"masses2", inputs[2]}, {"masses3", inputs[3]}, {"previous", &result} }, 0, first != 0);
+    result.swap(scratch);
+}
+
+
+FluidGridGPU::FluidGridGPU(int width, int height, double cell_size) : width(width), height(height), cell_size(cell_size) {}
+FluidGridGPU::~FluidGridGPU() = default;
+
+
+void FluidGridGPU::Impl::rebuildInterfaces()
+{
+    run(reconstruct, { &interfaces }, { {"liquid", &liquid_fraction} });
+}
+
+void FluidGridGPU::Impl::rebuildTransfersX(double dt)
+{
+    run(transfers, { &transfers_u }, { {"liquid", &liquid_fraction}, {"interfaces", &interfaces}, {"flow", &u}, {"density", &density} }, float(dt));
+}
+
+void FluidGridGPU::Impl::rebuildTransfersY(double dt)
+{
+    run(transfers, { &transfers_v }, { {"liquid", &liquid_fraction}, {"interfaces", &interfaces}, {"flow", &v}, {"density", &density} }, float(dt), 1);
+}
+
+void FluidGridGPU::Impl::advectComponents(double dt, int direction)
+{
+    Kernel& program = direction == 0 ? transport_components_x : transport_components_y;
+    for (auto& component : components)
+    {
+        program.parameters.vectors[0] = component.liquid_mask;
+        program.parameters.vectors[1] = component.gas_mask;
+        const std::initializer_list<Input> inputs = {
+            {"liquid", &liquid_fraction}, {"masses", &component.mass}, {"corrections", &component.correction},
+            {"transfers", direction == 0 ? &transfers_u : &transfers_v}, {"flow", direction == 0 ? &u : &v} };
+        if (direction == 0) run(program, {&component.next_mass, &component.correction}, inputs, float(dt), direction);
+        else run(program, {&component.next_mass}, inputs, float(dt), direction);
+        component.mass.swap(component.next_mass);
+    }
+    run(transport_liquid, {&next_liquid_fraction}, {{"liquid", &liquid_fraction},
+        {"transfers", direction == 0 ? &transfers_u : &transfers_v}, {"flow", direction == 0 ? &u : &v}, {"weights", &split_weights}}, float(dt), direction);
+    liquid_fraction.swap(next_liquid_fraction);
+    density_valid = false;
+}
+
+void FluidGridGPU::Impl::rebuildMomentum()
+{
+    rebuildDensity();
+    // Initialize donor velocities alongside momentum, without multiplying and dividing them by density.
+    run(momentum, { &momentum_u, &next_u }, { {"density", &density}, {"source", &u} });
+    run(momentum, { &momentum_v, &next_v }, { {"density", &density}, {"source", &v} }, 0, 1);
+}
+
+void FluidGridGPU::Impl::recoverVelocity()
+{
+    rebuildDensity();
+    run(recover, { &next_u }, { {"density", &density}, {"source", &momentum_u} }, 0, 2);
+    run(recover, { &next_v }, { {"density", &density}, {"source", &momentum_v} }, 0, 3);
+}
+
+void FluidGridGPU::Impl::advectMomentumX(double dt)
+{
+    run(transport_momentum, { &next_momentum_u }, {
+        {"momentum", &momentum_u}, {"donor_velocity", &next_u}, {"original_velocity", &u},
+        {"flow", &u}, {"weights", &split_weights}, {"transfers", &transfers_u} }, float(dt), 0);
+    run(transport_momentum, { &next_momentum_v }, {
+        {"momentum", &momentum_v}, {"donor_velocity", &next_v}, {"original_velocity", &v},
+        {"flow", &u}, {"weights", &split_weights}, {"transfers", &transfers_u} }, float(dt), 1);
+    momentum_u.swap(next_momentum_u);
+    momentum_v.swap(next_momentum_v);
+}
+
+void FluidGridGPU::Impl::advectMomentumY(double dt)
+{
+    run(transport_momentum, { &next_momentum_u }, {
+        {"momentum", &momentum_u}, {"donor_velocity", &next_u}, {"original_velocity", &u},
+        {"flow", &v}, {"weights", &split_weights}, {"transfers", &transfers_v} }, float(dt), 2);
+    run(transport_momentum, { &next_momentum_v }, {
+        {"momentum", &momentum_v}, {"donor_velocity", &next_v}, {"original_velocity", &v},
+        {"flow", &v}, {"weights", &split_weights}, {"transfers", &transfers_v} }, float(dt), 3);
+    momentum_u.swap(next_momentum_u);
+    momentum_v.swap(next_momentum_v);
+}
+
+double FluidGridGPU::Impl::transportStepLimit(double dt)
+{
+    if (!velocity_stats_valid && !std::isfinite(maxDivergence()))
+        throw std::runtime_error("FluidGridGPU encountered non-finite transport velocity");
+    return cached_outflow > 0 ? 0.5 * cell_size / cached_outflow : dt;
+}
+
+void FluidGridGPU::Impl::freezeComponentCorrections()
+{
+    run(freeze_weights, {&split_weights}, {{"liquid", &liquid_fraction}, {"density", &density}});
+}
+
+void FluidGridGPU::Impl::advectDirection(double step, bool horizontal)
+{
+    rebuildInterfaces();
+    if (horizontal) { rebuildTransfersX(step); advectMomentumX(step); }
+    else { rebuildTransfersY(step); advectMomentumY(step); }
+    // GPU momentum consumes the old component/density buffers before they swap.
+    advectComponents(step, horizontal ? 0 : 1);
+    recoverVelocity();
+}
+
+void FluidGridGPU::Impl::advect(double dt)
+{
+    rebuildMomentum();
+    const double max_step = transportStepLimit(dt);
+    double remaining = dt;
+    while (remaining > 0)
+    {
+        const double step = std::min(remaining, max_step);
+        freezeComponentCorrections();
+        advectDirection(step, true);
+        advectDirection(step, false);
+        remaining -= step;
+    }
+    u.swap(next_u);
+    v.swap(next_v);
+    velocity_stats_valid = false;
+}
+
+}
