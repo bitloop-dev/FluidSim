@@ -290,7 +290,7 @@ FluidGridCPU::ProjectionResult FluidGridCPU::step(
 {
     if (timings) *timings = {};
     if (dt <= 0.0)
-        return {};
+        return {0, std::numeric_limits<double>::infinity(), false, 0, 0};
 
     using Clock = std::chrono::steady_clock;
     auto previous = timings ? Clock::now() : Clock::time_point{};
@@ -302,16 +302,33 @@ FluidGridCPU::ProjectionResult FluidGridCPU::step(
         return ms;
     };
 
-    // carry material and momentum using the previous projected velocity
-    advect(dt);
-    if (timings) timings->transport_ms = elapsed();
+    const bool tension = surface_tension > 0.;
+    const double subdivisions = tension ? std::max(1., std::ceil(dt / capillaryStepLimit())) : 1.;
+    // User-supplied tension can require a timestep too small for an integer step count.
+    if (subdivisions > std::numeric_limits<int>::max())
+        throw std::runtime_error("Surface tension requires too many physical substeps for this timestep");
+    const int count = int(subdivisions);
+    const double step = dt / count;
+    ProjectionResult result;
+    result.physical_steps = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        // Each capillary subdivision advances transport, forces and projection together.
+        advect(step);
+        if (timings) timings->transport_ms += elapsed();
 
-    applyGravity(dt);
-    if (timings) timings->forces_ms = elapsed();
+        applyAcceleration(step);
+        if (tension) applySurfaceTension(step);
+        if (timings) timings->forces_ms += elapsed();
 
-    // correct the transported velocity after applying forces
-    const auto result = project(dt, max_iterations, divergence_tolerance);
-    if (timings) timings->pressure_ms = elapsed();
+        const auto projection = project(step, max_iterations, divergence_tolerance);
+        if (timings) timings->pressure_ms += elapsed();
+        result.iterations += projection.iterations;
+        result.max_divergence = projection.max_divergence;
+        result.converged = projection.converged;
+        ++result.physical_steps;
+        if (!result.converged) break;
+    }
     return result;
 }
 
@@ -851,6 +868,125 @@ double FluidGridCPU::liquidTransferY(int x, int y, double step) const
 
     // positive transfer moves liquid down; negative transfer moves it up
     return speed > 0.0 ? bounded_area : -bounded_area;
+}
+
+void FluidGridCPU::setSurfaceTension(double coefficient)
+{
+    if (!std::isfinite(coefficient) || coefficient < 0.)
+        throw std::invalid_argument("Surface tension must be finite and nonnegative");
+    surface_tension = coefficient;
+}
+
+double FluidGridCPU::capillaryStepLimit() const
+{
+    if (surface_tension == 0. || liquid_mixture.components.empty() || gas_mixture.components.empty())
+        return std::numeric_limits<double>::infinity();
+    const auto minimum = [](const FluidMixture& mixture)
+    {
+        double density = mixture.components.front().density;
+        for (const auto& component : mixture.components) density = std::min(density, component.density);
+        return density;
+    };
+    constexpr double pi = 3.14159265358979323846;
+    return .5 * std::sqrt((minimum(liquid_mixture) + minimum(gas_mixture)) * cell_size * cell_size * cell_size /
+        (2. * pi * surface_tension));
+}
+
+void FluidGridCPU::applySurfaceTension(double dt)
+{
+    if (!capillary) capillary.emplace(width, height);
+    auto& geometry = *capillary;
+    geometry.liquid = liquid_fraction;
+    geometry.cell_size = cell_size;
+    const auto eachCell = [&](auto operation)
+    {
+        forBatches(width * height, [&](int first, int last)
+        {
+            for (int i = first; i < last; ++i) operation(i % width, i / width);
+        }, 16);
+    };
+    eachCell([&](int x, int y) { geometry.buildHeight(x, y); });
+    eachCell([&](int x, int y) { geometry.buildCurvature(x, y); });
+    eachCell([&](int x, int y) { geometry.completeCurvature(x, y); });
+
+    // The capillary and pressure gradients use identical face weights and spacing.
+    // CPU solves total pressure, so add this force before forming its existing RHS.
+    rebuildPressureCoefficients();
+    forBatches(height, [&](int first, int last)
+    {
+        for (int y = first; y < last; ++y)
+        {
+            for (int x = 1; x < width; ++x)
+            {
+                const int cell = y * width + x;
+                const int face = uIndex(x, y);
+                const double jump = surface_tension * geometry.faceCurvature(cell - 1, cell) *
+                    (liquid_fraction[cell] - liquid_fraction[cell - 1]);
+                u[face] += dt * inv_density_u[face] * jump / cell_size;
+            }
+            if (y == 0) continue;
+            for (int x = 0; x < width; ++x)
+            {
+                const int cell = y * width + x;
+                const double jump = surface_tension * geometry.faceCurvature(cell - width, cell) *
+                    (liquid_fraction[cell] - liquid_fraction[cell - width]);
+                v[cell] += dt * inv_density_v[cell] * jump / cell_size;
+            }
+        }
+    }, width);
+}
+
+void FluidGridCPU::setAccelerationField(const FluidField& field)
+{
+    const auto& layout = field.layout();
+    if (layout.width != width || layout.height != height || layout.cell_size != cell_size ||
+        layout.origin.x != origin.x || layout.origin.y != origin.y || layout.channels != 2)
+        throw std::invalid_argument("Acceleration requires a matching cell-centred XY field");
+    if (field.isWebGPU())
+        throw std::invalid_argument("Download the field before binding it to the CPU grid");
+    acceleration = field;
+}
+
+void FluidGridCPU::applyAcceleration(double dt)
+{
+    if (!acceleration)
+    {
+        applyGravity(dt);
+        return;
+    }
+
+    // Match the GPU's adjacent-cell average, using the CPU engine's double arithmetic.
+    const auto values = acceleration->values();
+    forBatches(int(u.size()), [&](int first, int last)
+    {
+        for (int i = first; i < last; ++i)
+        {
+            const int x = i % (width + 1);
+            const int y = i / (width + 1);
+            if (x == 0 || x == width)
+            {
+                u[i] = 0.;
+                continue;
+            }
+            const int cell = y * width + x;
+            const double average = .5 * (double(values[2 * (cell - 1)]) + double(values[2 * cell]));
+            u[i] += dt * average;
+        }
+    });
+    forBatches(int(v.size()), [&](int first, int last)
+    {
+        for (int i = first; i < last; ++i)
+        {
+            const int y = i / width;
+            if (y == 0 || y == height)
+            {
+                v[i] = 0.;
+                continue;
+            }
+            const double average = .5 * (double(values[2 * (i - width) + 1]) + double(values[2 * i + 1]));
+            v[i] += dt * average;
+        }
+    });
 }
 
 void FluidGridCPU::applyGravity(double dt)

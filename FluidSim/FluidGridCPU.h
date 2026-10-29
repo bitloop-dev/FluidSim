@@ -3,8 +3,10 @@
 #include "PressureMultigrid.h"
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
+#include "FluidSurfaceTensionCPU.h"
 
 #include <bitloop/core/types.h>
+#include <optional>
 
 namespace fluid
 {
@@ -71,6 +73,11 @@ struct FluidGridCPU final : FluidGridBase
     const FluidMixture& getGasMixture() const override { return gas_mixture; }
     double getGravityY() const override { return gravity_y; }
     void setGravityY(double acceleration) override { gravity_y = acceleration; }
+    double getSurfaceTension() const override { return surface_tension; }
+    void setSurfaceTension(double coefficient) override;
+    double capillaryStepLimit() const;
+    void setAccelerationField(const FluidField& field) override;
+    void clearAccelerationField() override { acceleration.reset(); }
 
     void upload(const State& state) override;
     State download() const override;
@@ -80,8 +87,8 @@ struct FluidGridCPU final : FluidGridBase
     // upload() and engine transport invalidate these caches automatically; velocities are not cached.
     void invalidateCaches();
 
-    // CPU storage is released by the destructor; there are no device resources to destroy
-    void destroy() override {}
+    // Physical arrays remain owned until destruction; release the external field binding.
+    void destroy() override { clearAccelerationField(); }
 
     // one physics substep: transport material and momentum, apply forces, then project
     ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr) override;
@@ -105,6 +112,11 @@ struct FluidGridCPU final : FluidGridBase
 private:
     friend Edit;
     void commitEdits(detail::CellEditBatch& batch) override;
+    void applyAcceleration(double dt);
+    std::optional<FluidField> acceleration;
+    double surface_tension = 0.;
+    std::optional<FluidSurfaceTensionCPU> capillary;
+    void applySurfaceTension(double dt);
 
     PressureMultigrid pressure_multigrid;
     bool density_valid = false;

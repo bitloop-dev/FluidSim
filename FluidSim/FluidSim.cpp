@@ -1,4 +1,5 @@
 #include "FluidSim.h"
+#include "MouseAttraction.h"
 #include "FluidCheckpointIO.h"
 #include <cmath>
 #include <cstdint>
@@ -73,6 +74,32 @@ void FluidSim_Scene::UI::sidebar()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Positive maximum cell divergence (per second).\nLarger values trade accuracy for speed.\nPress Enter or leave the field to apply.");
 
+    bl_pull(surface_tension);
+    bl_view(adaptive_mode);
+    ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED);
+    const double old_tension = surface_tension;
+    ImGui::InputDouble("Surface Tension", &surface_tension, 0., 0., "%.6g");
+    if (ImGui::IsItemActivated()) surface_tension_before_edit = old_tension;
+    if (ImGui::IsItemDeactivatedAfterEdit())
+    {
+        if (std::isfinite(float(surface_tension)) && surface_tension >= 0.)
+        {
+            const double value = surface_tension;
+            bl_schedule([value](FluidSim_Scene& scene) { scene.setSurfaceTension(value); });
+        }
+        else surface_tension = surface_tension_before_edit;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Liquid-gas surface tension in scene units; zero disables it.\nUniform CPU and WebGPU. Stronger tension may require extra physics steps.\nPress Enter or leave the field to apply.");
+    ImGui::EndDisabled();
+
+    bl_scoped(mouse_attraction);
+    ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED);
+    ImGui::Checkbox("Mouse attraction", &mouse_attraction);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Replace uniform gravity with attraction towards the pointer.\nMove inside the viewport to choose the target; leaving it keeps the last target.");
+    ImGui::EndDisabled();
+
     if (ImGui::CollapsingHeaderBox("Frame statistics", true))
     {
         bl_scoped(profile_stages);
@@ -112,6 +139,7 @@ void FluidSim_Scene::UI::sidebar()
             ImGui::EndTable();
         }
         ImGui::TextDisabled("Fluid stages sum %d physics substep(s).", stats.substeps);
+        ImGui::TextDisabled("%d transport steps; %d pressure iterations.", stats.transport_steps, stats.pressure_iterations);
         ImGui::TextDisabled("GPU profiling adds completion waits.");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Disable detailed timings for normal throughput.\nTotal = scene update + latest render CPU time.\nUI/presentation and GPU draw completion are excluded.");
@@ -240,6 +268,46 @@ void FluidSim_Scene::restartSimulation()
     requestRedraw(true);
 }
 
+void FluidSim_Scene::setSurfaceTension(double coefficient)
+{
+    withFluidContext([&] { fluid.setSurfaceTension(coefficient); });
+    surface_tension = coefficient;
+}
+
+void FluidSim_Scene::updateAccelerationField()
+{
+    if (mouse_attraction)
+    {
+        if (!mouse_field)
+        {
+            const fluid::FluidField::Layout layout{grid_w, grid_h, cell_size, fluid.getOrigin(), 2};
+            if (fluid.getDevice() == fluid::FluidDevice::CPU)
+                mouse_field.emplace(layout);
+            else
+            {
+                const auto context = fluid.getWebGPUContext();
+                mouse_field.emplace(layout, context);
+                mouse_field_generator = std::make_unique<fluid::FluidFieldWebGPUGenerator>(context, mouse_attraction_shader);
+            }
+        }
+        const std::array<float, 4> parameters[] = {
+            {float(mouse_target.x), float(mouse_target.y),
+                float(mouse_attraction_strength), float(mouse_attraction_radius)}
+        };
+        if (mouse_field->isWebGPU())
+            mouse_field_generator->generate(*mouse_field, parameters);
+        else
+            fluid::generateFluidField(*mouse_field, [&](DVec2 position) { return mouseAttraction(position, parameters[0]); });
+        fluid.setAccelerationField(*mouse_field);
+        mouse_field_active = true;
+    }
+    else if (mouse_field_active)
+    {
+        fluid.clearAccelerationField();
+        mouse_field_active = false;
+    }
+}
+
 void FluidSim_Scene::sceneMounted([[maybe_unused]] Viewport* ctx)
 {
     /// Initialize viewport.
@@ -261,7 +329,12 @@ void FluidSim_Scene::sceneUnmounted([[maybe_unused]] Viewport* ctx)
 
 void FluidSim_Scene::sceneDestroy()
 {
-    withFluidContext([&]() { fluid.destroy(); });
+    withFluidContext([&]()
+    {
+        mouse_field_generator.reset();
+        mouse_field.reset();
+        fluid.destroy();
+    });
     renderThreadQueue().post([this]()
     {
         fluid_display.destroy();
@@ -324,6 +397,9 @@ void FluidSim_Scene::viewportProcess(
             {
                 FluidGrid::StepTimings timings;
                 const auto started = Clock::now();
+                // Generate once per scene frame; every complete physics step uses the stored field.
+                if (substep == 0)
+                    updateAccelerationField();
                 // use one float-compatible tolerance for backend comparisons
                 const auto result = fluid.step(step, projection_max_iterations, frame_statistics.projection_tolerance, profile_stages ? &timings : nullptr);
                 frame_statistics.fluid_ms += std::chrono::duration<double, std::milli>(Clock::now() - started).count();
@@ -332,7 +408,9 @@ void FluidSim_Scene::viewportProcess(
                 frame_statistics.stages.pressure_ms += timings.pressure_ms;
                 frame_statistics.stages.selection_ms += timings.selection_ms;
                 frame_statistics.stages.regrid_ms += timings.regrid_ms;
-                ++frame_statistics.substeps;
+                frame_statistics.substeps += result.physical_steps;
+                frame_statistics.transport_steps += result.transport_steps;
+                frame_statistics.pressure_iterations += result.iterations;
 
                 if (!result.converged)
                 {
@@ -416,6 +494,24 @@ void FluidSim_Scene::onEvent(Event e)
     }
     if (e.ownedBy(this))
         navigator.handleWorldNavigation(e, true);
+
+    if (e.type() == EventType::MOUSE_MOTION)
+    {
+        // Hover motion has no drag owner; convert through the viewport under the cursor.
+        auto* viewport = e.ctx_hovered();
+        if (viewport && viewport->mountedScene() == this)
+        {
+            const auto& motion = e.data().motion;
+            mouse_target = camera.transformFor(*viewport).toWorld<double>(
+                viewport->toSurfaceX(motion.x), viewport->toSurfaceY(motion.y));
+        }
+    }
+    else if (e.ownedBy(this) && (e.type() == EventType::FINGER_MOTION || e.isPressEvent()))
+    {
+        PointerEvent pointer(e);
+        if (pointer.hoveredOver(this))
+            mouse_target = pointer.worldPosition(camera);
+    }
 }
 
 JSON::json FluidSim_Scene::captureSceneState() const
@@ -424,6 +520,10 @@ JSON::json FluidSim_Scene::captureSceneState() const
         {"version", 1}, {"simulation_time", simulation_time}, {"real_time", real_time},
         {"simulation_failed", simulation_failed}, {"projection_tolerance", projection_tolerance},
         {"profile_stages", profile_stages}, {"frame_time", frame_time},
+        {"mouse_attraction", mouse_attraction},
+        {"mouse_attraction_strength", mouse_attraction_strength},
+        {"mouse_attraction_radius", mouse_attraction_radius},
+        {"mouse_target", {mouse_target.x, mouse_target.y}},
         {"steps_per_frame", steps_per_frame}, {"projection_max_iterations", projection_max_iterations},
         {"device", int(fluid.getDevice())}, {"adaptive_mode", int(fluid.getAdaptiveMode())},
         {"scene_elements", {air_element, water_element, red_element, cloud_element}}
@@ -465,6 +565,13 @@ void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::Flu
     const bool saved_failure = scene.at("simulation_failed").get<bool>();
     const bool saved_profiling = scene.at("profile_stages").get<bool>();
     const auto ids = scene.at("scene_elements").get<std::array<ElementId, 4>>();
+    const bool saved_mouse_attraction = scene.value("mouse_attraction", false);
+    const double saved_strength = scene.value("mouse_attraction_strength", mouse_attraction_strength);
+    const double saved_radius = scene.value("mouse_attraction_radius", mouse_attraction_radius);
+    const auto saved_target = scene.value("mouse_target", std::array<double, 2>{width * spacing * 0.5, height * spacing * 0.5});
+    if (!std::isfinite(saved_strength) || !std::isfinite(saved_radius) || saved_radius <= 0 ||
+        !std::isfinite(saved_target[0]) || !std::isfinite(saved_target[1]))
+        throw std::runtime_error("Invalid saved mouse attraction settings");
 
     // Build and validate a replacement before releasing the current simulation.
     FluidGrid restored(width, height, spacing);
@@ -478,6 +585,8 @@ void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::Flu
     restored.writeColorPixels(pixels);
     withFluidContext([&]
     {
+        mouse_field_generator.reset();
+        mouse_field.reset();
         fluid.destroy();
         fluid = std::move(restored);
     });
@@ -489,6 +598,13 @@ void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::Flu
     world_h = height * spacing;
     fluid_device = fluid.getDevice();
     adaptive_mode = fluid.getAdaptiveMode();
+    gravity_y = fluid.getGravityY();
+    surface_tension = fluid.getSurfaceTension();
+    mouse_attraction = saved_mouse_attraction;
+    mouse_attraction_strength = saved_strength;
+    mouse_attraction_radius = saved_radius;
+    mouse_target = {saved_target[0], saved_target[1]};
+    mouse_field_active = mouse_attraction;
     simulation_time = saved_simulation_time;
     real_time = saved_real_time;
     projection_tolerance = saved_tolerance;
@@ -529,6 +645,9 @@ void FluidSim_Scene::traceFrame(SimTraceFrame& frame) const
     frame.metric("fluid_ms", frame_statistics.fluid_ms);
     frame.metric("colour_ms", frame_statistics.colour_ms);
     frame.metric("physics_substeps", frame_statistics.substeps);
+    frame.metric("transport_substeps", frame_statistics.transport_steps);
+    frame.metric("pressure_iterations", frame_statistics.pressure_iterations);
+    frame.metric("surface_tension", fluid.getSurfaceTension());
     frame.metric("phase_timings_available", frame_statistics.detailed);
     frame.metric("projection_tolerance", frame_statistics.projection_tolerance);
     if (frame_statistics.detailed)

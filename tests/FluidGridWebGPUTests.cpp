@@ -1,5 +1,6 @@
 #include "FluidGridCPU.h"
 #include "UniformWebGPU/FluidGridGPU.h"
+#include "UniformWebGPU/FluidUniformWebGPUKernels.h"
 #include "FluidTestSetup.h"
 #include "FluidGridEditTests.h"
 #include "UniformWebGPU/PressureMultigridGPU.h"
@@ -23,9 +24,15 @@ struct PressureMultigridGPUTestAccess
     static const Field& applyGeneric(PressureMultigridGPU& solver, const Field& rhs, const Field& stats)
     {
         const int shared_level = solver.tile_level;
+        const bool shared = solver.use_shared_smoothing;
+        const bool paired = solver.use_paired_smoothing;
+        solver.use_shared_smoothing = false;
+        solver.use_paired_smoothing = false;
         solver.tile_level = -1;
         const auto& result = solver.apply(rhs, stats);
         solver.tile_level = shared_level;
+        solver.use_shared_smoothing = shared;
+        solver.use_paired_smoothing = paired;
         return result;
     }
 };
@@ -37,6 +44,85 @@ using fluid::FluidGridGPU;
 using fluid::test::initializeTestMaterials;
 using fluid::test::uploadTestMaterials;
 void require(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
+
+void fusedFractionMatchesSeparatePass()
+{
+    using namespace fluid::webgpu;
+    Compute compute;
+    UniformKernels kernels;
+    kernels.build(compute);
+    for (const auto [w, h] : {std::pair{1, 13}, {17, 1}, {17, 13}, {32, 24}})
+    {
+        auto liquid = compute.field(w, h);
+        auto masses = compute.field(w, h, 4);
+        auto weights = compute.field(w, h, 2);
+        auto corrections = compute.field(w, h, 4);
+        auto reference_mass = compute.field(w, h, 4);
+        auto fused_mass = compute.field(w, h, 4);
+        auto reference_correction = compute.field(w, h, 4);
+        auto fused_correction = compute.field(w, h, 4);
+        auto reference_fraction = compute.field(w, h);
+        auto fused_fraction = compute.field(w, h);
+        std::vector<float> f(w * h);
+        std::vector<float> m(w * h * 4);
+        std::vector<float> split(w * h * 2);
+        std::vector<float> correction(m.size());
+        for (int i = 0; i < w * h; ++i)
+        {
+            f[i] = i % 7 == 0 ? 0.f : i % 11 == 0 ? 1.f : .2f + .6f * float(i % 13) / 12.f;
+            // Frozen weights deliberately differ from the current fraction, as can happen in Y.
+            split[2 * i] = float(i % 3 == 0);
+            for (int lane = 0; lane < 4; ++lane)
+            {
+                m[4 * i + lane] = (lane % 2 == 0 ? f[i] : 1.f - f[i]) * (.1f + lane);
+                correction[4 * i + lane] = .03f * float((i + lane) % 5);
+            }
+        }
+        compute.write(liquid, f);
+        compute.write(masses, m);
+        compute.write(weights, split);
+        compute.write(corrections, correction);
+        for (int direction = 0; direction < 2; ++direction)
+        {
+            const int fw = w + int(direction == 0);
+            const int fh = h + int(direction == 1);
+            auto flow = compute.field(fw, fh);
+            auto transfers = compute.field(fw, fh, 2);
+            std::vector<float> velocity(fw * fh);
+            std::vector<float> transfer(fw * fh * 2);
+            for (int i = 0; i < fw * fh; ++i)
+            {
+                velocity[i] = .2f * float(i % 9 - 4);
+                transfer[2 * i] = .3f * velocity[i] * .01f / 2.f;
+            }
+            compute.write(flow, velocity);
+            compute.write(transfers, transfer);
+            const std::initializer_list<Compute::Input> inputs = {
+                {"liquid", &liquid}, {"masses", &masses}, {"transfers", &transfers},
+                {"flow", &flow}, {"weights", &weights}, {"corrections", &corrections}
+            };
+            Parameters parameters;
+            parameters.grid = {w, h, direction, 0};
+            parameters.value = {2.f, .01f, 0, 0};
+            parameters.vectors[0] = {1, 0, 1, 0};
+            parameters.vectors[1] = {0, 1, 0, 1};
+            if (direction == 0)
+            {
+                compute.run(kernels.transport_components_x, {&reference_mass, &reference_correction}, inputs, parameters);
+                compute.run(kernels.fused_transport.fraction_x, {&fused_mass, &fused_correction, &fused_fraction}, inputs, parameters);
+                require(compute.read(reference_correction) == compute.read(fused_correction), "Fused transport changed frozen component corrections");
+            }
+            else
+            {
+                compute.run(kernels.transport_components_y, {&reference_mass}, inputs, parameters);
+                compute.run(kernels.fused_transport.fraction_y, {&fused_mass, &fused_fraction}, inputs, parameters);
+            }
+            compute.run(kernels.transport_liquid, {&reference_fraction}, inputs, parameters);
+            require(compute.read(reference_mass) == compute.read(fused_mass), "Fused transport changed component masses");
+            require(compute.read(reference_fraction) == compute.read(fused_fraction), "Fused fraction differs from the separate geometric update");
+        }
+    }
+}
 
 void pressureReductionsMatchHost()
 {
@@ -91,9 +177,9 @@ void pressureReductionsMatchHost()
         require(compute.read(result)[3] == 1.f, "Uniform pressure reduction lost a non-finite flag");
     }
     // Poisoned partials from a larger reduction must not enter a subsequent small result.
-    auto small = compute.field(3, 1);
-    compute.write(small, std::vector<float>{1.f, -2.f, 4.f});
-    reduction.reduce(small, result, 0);
+    auto short_input = compute.field(3, 1);
+    compute.write(short_input, std::vector<float>{1.f, -2.f, 4.f});
+    reduction.reduce(short_input, result, 0);
     require(compute.read(result) == std::vector<float>({3.f, 4.f, 0.f, 0.f}),
             "Uniform pressure reduction retained stale partial statistics");
 }
@@ -244,11 +330,11 @@ void rectangularSharedMultigridMatchesGeneric()
     Compute runner;
     bool matched = true;
     for (const auto [w, h] : {std::pair{32, 32}, {1, 129}, {2, 67}, {16, 23}, {32, 23}, {32, 31},
-                              {128, 90}, {256, 180}, {1024, 720}, {65, 37}})
+                              {128, 90}, {256, 180}, {1024, 720}, {65, 37}, {257, 257}, {513, 131}})
     {
         PressureMultigridGPU solver(runner, w, h);
         const int shared_level = PressureMultigridGPUTestAccess::sharedLevel(solver);
-        require(w == 65 ? shared_level == -1 : shared_level >= 0,
+        require((w == 65 || w == 257 || w == 513) ? shared_level == -1 : shared_level >= 0,
                 "Rectangular shared-tail selection or non-power-of-two width fallback is wrong");
         auto coefficients = runner.field(w, h, 4), rhs = runner.field(w, h), stats = runner.field(1, 1, 4);
         std::vector<float> weights(size_t(w) * h * 4), input(w * h);
@@ -280,6 +366,24 @@ void rectangularSharedMultigridMatchesGeneric()
                 runner.write(stats, reduction);
                 const auto shared = runner.read(solver.apply(rhs, stats));
                 const auto generic = runner.read(PressureMultigridGPUTestAccess::applyGeneric(solver, rhs, stats));
+                if (refresh == 0 && field == 0)
+                {
+                    const float converged[] = {reduction[0], .5f, 0, 0};
+                    runner.write(stats, converged);
+                    const auto skipped = runner.read(solver.apply(rhs, stats, .5f));
+                    require(std::all_of(skipped.begin(), skipped.end(), [](float value) { return value == 0.f; }),
+                            "Converged multigrid cycle did not produce a zero correction");
+                    const float failed[] = {reduction[0], 1.f, 0, 1.f};
+                    runner.write(stats, failed);
+                    const auto stopped = runner.read(solver.apply(rhs, stats, .5f));
+                    require(std::all_of(stopped.begin(), stopped.end(), [](float value) { return value == 0.f; }),
+                            "Failed multigrid cycle did not produce a zero correction");
+                    const float active[] = {reduction[0], 1.f, 0, 0};
+                    runner.write(stats, active);
+                    require(runner.read(solver.apply(rhs, stats, .5f)) == shared,
+                            "Multigrid gate changed an active cycle or retained a stale correction");
+                    runner.write(stats, reduction);
+                }
                 const double shared_mean = std::accumulate(shared.begin(), shared.end(), 0.) / shared.size();
                 const double generic_mean = std::accumulate(generic.begin(), generic.end(), 0.) / generic.size();
                 double error = 0., scale = 0., centered_error = 0.;
@@ -663,7 +767,8 @@ ComponentErrors checkComponents(const FluidGridGPU& grid, const FluidGridGPU::St
 
 void componentsMatchCPU()
 {
-    for (auto [liquids, gases] : {std::pair{1, 0}, std::pair{0, 1}, std::pair{2, 2}, std::pair{3, 4}, std::pair{9, 9}})
+    for (auto [liquids, gases] : {std::pair{1, 0}, std::pair{0, 1}, std::pair{2, 2}, std::pair{3, 4}, std::pair{3, 2}, std::pair{4, 4},
+        std::pair{8, 8}, std::pair{9, 8}, std::pair{9, 9}, std::pair{16, 16}})
     {
         FluidGridGPU gpu(31, 23, 2.5);
         FluidGridCPU cpu(31, 23, 2.5);
@@ -838,7 +943,8 @@ int main(int argc,char** argv)
         std::cout<<std::unitbuf; std::cerr<<std::unitbuf;
         if (argc==2 && std::string(argv[1])=="--reductions")
         {
-            pressureReductionsMatchHost();
+            fusedFractionMatchesSeparatePass();
+        pressureReductionsMatchHost();
             std::cout<<"PASS WebGPU reductions\n"; return 0;
         }
         if (argc>=3 && std::string(argv[1])=="--pool-steps")
@@ -869,6 +975,7 @@ int main(int argc,char** argv)
             nonuniformTransportMatchesCPU(); fullStepsMatchCPU(); componentsMatchCPU();
             std::cout<<"PASS WebGPU transport\n"; return 0;
         }
+        fusedFractionMatchesSeparatePass();
         pressureReductionsMatchHost();
         pressureBalancesGravity();
         multigridPreservesPCGContract();

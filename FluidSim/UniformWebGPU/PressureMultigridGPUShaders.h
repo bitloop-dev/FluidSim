@@ -70,6 +70,12 @@ fn solveBottom(l: i32) {
 }
 fn execute() {
     let lane=cell().y*16+cell().x; let size=shape(0); let last=params.grid.w-1;
+    if (skipSharedCycle(u32(lane))) {
+        for (var i = lane; i < size.x * size.y; i += 256) {
+            write0(coordinate(i, size), vec4f(0));
+        }
+        return;
+    }
     for (var batch=0; batch<size.x*size.y; batch+=256) {
         let i=batch+lane;
         if (i<size.x*size.y) { forcing[i]=rhsAt(coordinate(i,size)); }

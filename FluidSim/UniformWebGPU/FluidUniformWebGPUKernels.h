@@ -1,11 +1,13 @@
 #pragma once
 #include "FluidWebGPUCompute.h"
 #include "FluidWebGPUShaders.h"
+#include "FluidTransportFusionKernels.h"
 
 namespace fluid::webgpu {
 
 struct UniformKernels
 {
+    TransportFusionKernels fused_transport;
     Kernel fill, density_pass, color_pass, pressure_coefficient, divergence, pressure_operator;
     Kernel predict_pressure, add_pressure, subtract_mean, residual, reduce_pass, precondition, coefficients, direction, update_pressure;
     Kernel correct_velocity, gravity, damping, velocity_stats, reconstruct, freeze_weights, transfers;
@@ -241,6 +243,8 @@ fn execute() {
         compute.build(transport_components_y, "fluid ingredients Y", 1, {"liquid", "masses", "transfers", "flow", "corrections"}, R"wgsl(
 fn execute() { write0(cell(),transport(cell(),corrections(cell()))); }
 )wgsl", component_helpers);
+        fused_transport.build(compute, component_helpers);
+
         const std::string momentum_helpers = R"wgsl(
 fn momentumValue(p: vec2i) -> f32 {
     let horizontal=mode()==0||mode()==2; let axis=select(vec2i(0,1),vec2i(1,0),horizontal);

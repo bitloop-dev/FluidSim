@@ -46,6 +46,9 @@ struct FluidProjectionResult
     int iterations = 0;
     double max_divergence = std::numeric_limits<double>::infinity();
     bool converged = false;
+    // Actual complete physics steps and transport subdivisions, where available.
+    int physical_steps = 1;
+    int transport_steps = 0;
 };
 
 }

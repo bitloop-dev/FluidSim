@@ -4,7 +4,12 @@
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
 #include "FluidCheckpoint.h"
+#include "FluidField.h"
 #include <bitloop/core/types.h>
+#include <stdexcept>
+#include <array>
+#include <span>
+#include <string_view>
 
 namespace fluid
 {
@@ -37,6 +42,32 @@ public:
     virtual const FluidMixture& getGasMixture() const = 0;
     virtual double getGravityY() const = 0;
     virtual void setGravityY(double acceleration) = 0;
+    // Constant liquid-gas interface coefficient; optional until each backend implements it.
+    virtual double getSurfaceTension() const { return 0.; }
+    virtual void setSurfaceTension(double coefficient)
+    {
+        if (coefficient != 0.) throw std::invalid_argument("Surface tension is only supported by uniform engines");
+    }
+
+    // Optional cell-centred XY acceleration, replacing uniform gravity until cleared.
+    // Binding retains the field's shared storage; later writes affect subsequent steps.
+    // Uniform backends require matching geometry and storage on their own device.
+    virtual void setAccelerationField(const FluidField&)
+    {
+        throw std::logic_error("Acceleration fields currently require a uniform engine");
+    }
+    virtual void clearAccelerationField() {}
+
+    // Optional device sharing with independent field producers. Set before upload;
+    // get creates the default context lazily on the simulation owner if necessary.
+    virtual void setWebGPUContext(const FluidWebGPUContext&)
+    {
+        throw std::logic_error("Shared WebGPU contexts currently require uniform WebGPU");
+    }
+    virtual FluidWebGPUContext getWebGPUContext()
+    {
+        throw std::logic_error("Shared WebGPU contexts currently require uniform WebGPU");
+    }
 
     virtual void upload(const State& state) = 0;
     virtual State download() const = 0;

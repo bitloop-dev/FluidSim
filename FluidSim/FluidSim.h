@@ -4,6 +4,7 @@
 #include "FluidGridDisplay.h"
 #include "FluidSnapshot.h"
 #include <utility>
+#include <optional>
 
 SIM_BEG;
 
@@ -39,7 +40,16 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     static constexpr double frame_time = 0.02;
     static constexpr int steps_per_frame = 60;
     static constexpr int projection_max_iterations = 2000;
-    double projection_tolerance = 1; // Scene policy, independent of engine API defaults.
+    double projection_tolerance = 0.1; // Scene policy, independent of engine API defaults.
+    double gravity_y = 500.0; // Scene acceleration; positive Y points down.
+    double surface_tension = 20000;
+    bool mouse_attraction = false;
+    double mouse_attraction_strength = 500.0;
+    double mouse_attraction_radius = 20.0;
+    DVec2 mouse_target = {world_w * 0.5, world_h * 0.5};
+    bool mouse_field_active = false;
+    std::optional<fluid::FluidField> mouse_field;
+    std::unique_ptr<fluid::FluidFieldWebGPUGenerator> mouse_field_generator;
 
     ElementId air_element{};
     ElementId water_element{};
@@ -73,6 +83,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
         double update_ms = 0, fluid_ms = 0, colour_ms = 0;
         fluid::FluidStepTimings stages;
         int substeps = 0;
+        int transport_steps = 0, pressure_iterations = 0;
         bool detailed = false, adaptive = false;
         double projection_tolerance = 1e-2;
         bool operator==(const FrameStatistics&) const = default;
@@ -82,6 +93,8 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     mutable double last_render_ms = 0;
     void initializePool(double amplitude = 0.04);
     void restartSimulation();
+    void setSurfaceTension(double coefficient);
+    void updateAccelerationField();
     void renderFluidSurface() const;
     JSON::json captureSceneState() const;
     void restoreSceneState(const JSON::json& state, const fluid::FluidCheckpoint& checkpoint,
@@ -123,6 +136,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
         fluid.setAdaptiveSettings(adaptive_settings);
         fluid.setDevice(fluid_device);
         fluid.setAdaptiveMode(adaptive_mode);
+        fluid.setGravityY(gravity_y);
 
         fluid::ElementCatalogue elements;
         fluid::FluidMixture liquid_mixture, gas_mixture;
@@ -144,8 +158,8 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
         });
 
         liquid_mixture.components = {
-            {water_element, 100.0},
-            {red_element, 300.0}
+            {water_element, 10.0},
+            {red_element, 30.0}
         };
 
         const double atmosphere_density = 0.1;
@@ -154,6 +168,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
             {cloud_element, atmosphere_density}
         };
         fluid.configureMaterials(std::move(elements), std::move(liquid_mixture), std::move(gas_mixture));
+        fluid.setSurfaceTension(surface_tension);
     }
 
     struct UI : BufferedInterfaceModel
@@ -165,6 +180,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
         /// ─────── Your UI-only variables ───────
 
         double pressure_tolerance_before_edit = 1e-2;
+        double surface_tension_before_edit = 0.;
 
     };
 

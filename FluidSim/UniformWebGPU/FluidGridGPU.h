@@ -4,9 +4,14 @@
 #include "ElementCatalogue.h"
 #include "FluidMixture.h"
 #include "FluidCheckpoint.h"
+#include "FluidField.h"
 #include <bitloop/core/types.h>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <array>
+#include <span>
+#include <string_view>
 
 namespace fluid
 {
@@ -29,6 +34,13 @@ public:
     FluidMixture gas_mixture;
     double gravity_y = 100.0;
     double gas_damping_rate = 0.0;
+    double getSurfaceTension() const { return surface_tension; }
+    void setSurfaceTension(double coefficient);
+    double capillaryStepLimit() const;
+    void setAccelerationField(const FluidField& field);
+    void clearAccelerationField();
+    void setWebGPUContext(const FluidWebGPUContext& context);
+    FluidWebGPUContext getWebGPUContext();
 
     enum class PressurePreconditioner { Diagonal, Multigrid };
     PressurePreconditioner pressure_preconditioner = PressurePreconditioner::Multigrid;
@@ -70,7 +82,9 @@ private:
     void commitEdits(detail::CellEditBatch& batch);
 
     struct Impl;
+    std::optional<FluidWebGPUContext> context;
     std::unique_ptr<Impl> gpu;
+    double surface_tension = 0.;
 };
 
 }

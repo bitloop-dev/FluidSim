@@ -42,6 +42,12 @@ public:
     const FluidMixture& getGasMixture() const override;
     double getGravityY() const override;
     void setGravityY(double acceleration) override;
+    double getSurfaceTension() const override;
+    void setSurfaceTension(double coefficient) override;
+    void setAccelerationField(const FluidField& field) override;
+    void clearAccelerationField() override;
+    void setWebGPUContext(const FluidWebGPUContext& context) override;
+    FluidWebGPUContext getWebGPUContext() override;
 
     void upload(const State& state) override;
     State download() const override;

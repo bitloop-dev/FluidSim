@@ -25,6 +25,26 @@ const FluidMixture& FluidGridWebGPU::getLiquidMixture() const { return engine->l
 const FluidMixture& FluidGridWebGPU::getGasMixture() const { return engine->gas_mixture; }
 double FluidGridWebGPU::getGravityY() const { return engine->gravity_y; }
 void FluidGridWebGPU::setGravityY(double acceleration) { engine->gravity_y = acceleration; }
+double FluidGridWebGPU::getSurfaceTension() const { return engine->getSurfaceTension(); }
+void FluidGridWebGPU::setSurfaceTension(double coefficient) { engine->setSurfaceTension(coefficient); }
+void FluidGridWebGPU::setAccelerationField(const FluidField& field)
+{
+    requireUploaded();
+    engine->setAccelerationField(field);
+}
+
+void FluidGridWebGPU::setWebGPUContext(const FluidWebGPUContext& context)
+{
+    engine->setWebGPUContext(context);
+}
+
+FluidWebGPUContext FluidGridWebGPU::getWebGPUContext() { return engine->getWebGPUContext(); }
+
+void FluidGridWebGPU::clearAccelerationField()
+{
+    engine->clearAccelerationField();
+}
+
 void FluidGridWebGPU::upload(const State& state) { engine->upload(convertFluidState<float>(state)); }
 FluidGridBase::State FluidGridWebGPU::download() const
 {
@@ -50,7 +70,7 @@ FluidGridBase::ProjectionResult FluidGridWebGPU::step(double dt, int max_iterati
     if (dt == 0.)
     {
         const double divergence = engine->maxDivergence();
-        return {0, divergence, std::isfinite(divergence) && divergence <= divergence_tolerance};
+        return {0, divergence, std::isfinite(divergence) && divergence <= divergence_tolerance, 0, 0};
     }
     return engine->step(dt, max_iterations, divergence_tolerance, timings);
 }

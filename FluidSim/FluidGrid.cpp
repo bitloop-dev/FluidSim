@@ -70,6 +70,7 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
     selected->configureMaterials(getElements(), getLiquidMixture(), getGasMixture());
     selected->setOrigin(getOrigin()); 
     selected->setGravityY(getGravityY());
+    selected->setSurfaceTension(getSurfaceTension());
 
     backend = std::move(selected); 
 
@@ -108,6 +109,25 @@ const FluidMixture& FluidGrid::getLiquidMixture() const { return backend->getLiq
 const FluidMixture& FluidGrid::getGasMixture() const { return backend->getGasMixture(); }
 double FluidGrid::getGravityY() const { return backend->getGravityY(); }
 void FluidGrid::setGravityY(double acceleration) { backend->setGravityY(acceleration); }
+double FluidGrid::getSurfaceTension() const { return backend->getSurfaceTension(); }
+void FluidGrid::setSurfaceTension(double coefficient) { backend->setSurfaceTension(coefficient); }
+void FluidGrid::setAccelerationField(const FluidField& field)
+{
+    backend->setAccelerationField(field);
+}
+
+void FluidGrid::setWebGPUContext(const FluidWebGPUContext& context)
+{
+    backend->setWebGPUContext(context);
+}
+
+FluidWebGPUContext FluidGrid::getWebGPUContext() { return backend->getWebGPUContext(); }
+
+void FluidGrid::clearAccelerationField()
+{
+    backend->clearAccelerationField();
+}
+
 void FluidGrid::upload(const State& state) { backend->upload(state); initialized = true; }
 FluidGrid::State FluidGrid::download() const { return backend->download(); }
 bool FluidGrid::saveCheckpoint(FluidCheckpoint& checkpoint) const { return backend->saveCheckpoint(checkpoint); }

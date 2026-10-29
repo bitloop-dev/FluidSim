@@ -9,7 +9,8 @@ class PressureMultigridGPU
 public:
     PressureMultigridGPU(Compute& compute, int width, int height);
     void rebuild(const Field& fine_coefficients);
-    const Field& apply(const Field& residual, const Field& residual_stats);
+    // Negative tolerance applies the full cycle for direct preconditioner use.
+    const Field& apply(const Field& residual, const Field& residual_stats, float stop_tolerance = -1);
 
 private:
     friend struct PressureMultigridGPUTestAccess;
@@ -24,6 +25,11 @@ private:
     Compute& compute;
     std::vector<Level> levels;
     Field coarse_factor;
+    float stop_tolerance = -1;
+    // The regression reference can select the original global sweeps.
+    bool use_shared_smoothing = true;
+    bool use_paired_smoothing = true;
+    Kernel shared_smooth, polynomial_pair;
     const Field* fine_coefficients = nullptr;
     const Field* residual_stats = nullptr;
     std::array<float, smoothing_sweeps> smoothing_weights;
@@ -33,9 +39,10 @@ private:
     Kernel pack_coefficients, tile_cycle;
     void buildTransfers(Level& fine, const Level& coarse, std::vector<float>* packed_maps);
     void run(Kernel& kernel, int level, std::initializer_list<const Field*> outputs,
-             std::initializer_list<Compute::Input> inputs, int mode = 0, float relaxation = 0);
+             std::initializer_list<Compute::Input> inputs, int mode = 0, float relaxation = 0, float second_relaxation = 0);
     const Field& coefficients(int level) const;
     void smoothLevel(int level, const Field& rhs, bool reverse, bool from_zero, int sweep);
+    void smoothSweeps(int level, const Field& rhs, bool reverse);
     void cycle(int level, const Field& rhs);
 };
 

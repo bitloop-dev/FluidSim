@@ -228,7 +228,7 @@ void checkpointParity()
             auto invalid = saved;
             switch (corruption)
             {
-            case 0: invalid.metadata["version"] = 2; break;
+            case 0: invalid.metadata["version"] = 999; break;
             case 1: invalid.metadata["backend"] = "another-engine"; break;
             case 2: invalid.metadata["width"] = 34; break;
             case 3: invalid.metadata["scalar"] = "float64"; break;
