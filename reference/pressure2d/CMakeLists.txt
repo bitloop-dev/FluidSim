@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(FluidPressure2D LANGUAGES CXX)
 
-add_library(FluidPressure2D STATIC ../../FluidSim/AmrPressure2D.cpp)
+add_library(FluidPressure2D STATIC ../../FluidSim/AmrPressure2D.cpp ../../FluidSim/AmrPressureTopology2D.cpp)
 target_include_directories(FluidPressure2D PUBLIC ../../FluidSim)
 target_compile_features(FluidPressure2D PUBLIC cxx_std_20)
 if(MSVC)

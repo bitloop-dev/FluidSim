@@ -5,7 +5,7 @@
 
 namespace fluid
 {
-class AmrGas;
+class FluidGridAdaptive;
 struct GasLayout;
 class FluidCellView;
 // Merge/refinement assessment and layout proposals. Resolved neighbours can request finer
@@ -39,6 +39,10 @@ public:
         int waiting = 0, held = 0;
         bool operator==(const Statistics&) const = default;
     };
+    struct Requests {
+        int scale=2;
+        std::vector<std::uint8_t> tiles; // padded requests, tile width=max(16,scale)
+    };
     // Optional observation of the actual selection pass, before regrid. No
     // trace storage or extra error estimates are needed when the pointer is null.
     struct Trace
@@ -69,12 +73,13 @@ public:
 #ifdef FLUIDSIM_HAS_AMR
     // Native material and velocity use the bounded regrid reconstruction;
     // independent face residuals and neighbours also protect resolved detail.
-    static Error estimate(const AmrGas& grid, int x, int y, int scale = 2);
-    void update(const AmrGas& grid, const Tolerances& tolerance, const Stability& stability, double time, double lookahead = 0.0, int maxCellScale = 4, Trace* trace = nullptr);
+    static Error estimate(const FluidGridAdaptive& grid, int x, int y, int scale = 2);
+    void update(const FluidGridAdaptive& grid, const Tolerances& tolerance, const Stability& stability, double time, double lookahead = 0.0, int maxCellScale = 4, Trace* trace = nullptr);
     // Buffer current detail and cluster decisions. Quiet retention keeps its
     // own cells without creating further padding; caller applies the layout.
     // When tracing, pass the same Trace filled by the preceding update.
-    GasLayout proposeLayout(const AmrGas& grid, Trace* trace = nullptr) const;
+    GasLayout proposeLayout(const FluidGridAdaptive& grid, Trace* trace = nullptr) const;
+    static GasLayout clusterRequests(int width,int height,const std::vector<Requests>& requests,Trace* trace=nullptr);
 #endif
     void reset();
 

@@ -139,19 +139,14 @@ bool AmrGas::regrid(GasLayout layout) {
         for (int oldLev = 0; oldLev < data.size(); ++oldLev)
             if ((gridLayout.baseRatio >> oldLev) == ratio) oldFine = &data[oldLev]->conserved;
         // FillPatch copies retained fine cells exactly and interpolates only newly refined cells from restricted real coarse state.
-        // Equal-density labels must not flatten momentum. With density contrast,
-        // one common limiter also preserves m=rho*u across constant-velocity refinement.
-        for (int first=0;first<fields;) {
-            const int count=first==0 ? (equalIngredientDensities ? components : fields) : 2;
-            auto* interpolation=&gasLinearInterpolation;
-            if (oldFine) {
-                FillPatchTwoLevels(target, IntVect(0), 0., {&coarse}, {0.}, {oldFine}, {0.}, first, first, count,
-                                   coarseGeometry, geometry, coarseBC, first, fineBC, first, IntVect(2), interpolation, boundary, first);
-            } else {
-                InterpFromCoarseLevel(target, IntVect(0), 0., coarse, first, first, count, coarseGeometry, geometry,
-                                     coarseBC, first, fineBC, first, IntVect(2), interpolation, boundary, first);
-            }
-            first+=count;
+        // All conserved lanes use the selected project's density-consistent reconstruction.
+        auto* interpolation=&gasLinearInterpolation;
+        if (oldFine) {
+            FillPatchTwoLevels(target, IntVect(0), 0., {&coarse}, {0.}, {oldFine}, {0.}, 0, 0, fields,
+                               coarseGeometry, geometry, coarseBC, 0, fineBC, 0, IntVect(2), interpolation, boundary, 0);
+        } else {
+            InterpFromCoarseLevel(target, IntVect(0), 0., coarse, 0, 0, fields, coarseGeometry, geometry,
+                                 coarseBC, 0, fineBC, 0, IntVect(2), interpolation, boundary, 0);
         }
     };
     // A finer new base may need an intermediate full-domain resolution. This
@@ -218,14 +213,8 @@ void AmrGas::fillGhosts() {
             auto& buffer = *boundaryFill[lev - 1];
             buffer.coarse.setDomainBndry(std::numeric_limits<double>::quiet_NaN(), coarse.geometry);
             FillPatchSingleLevel(buffer.coarse, 0., {&coarse.conserved}, {0.}, 0, 0, components + 2, coarse.geometry, coarseBC, 0);
-            // Match regrid's ingredient/constant-velocity interpolation contract.
-            for (int first=0;first<components+2;) {
-                const int count=first==0 ? (equalIngredientDensities ? components : components+2) : 2;
-                auto* interpolation=&gasLinearInterpolation;
-                FillPatchInterp(buffer.fine, first, buffer.coarse, first, count, IntVect(0), coarse.geometry, fine.geometry,
-                                fine.geometry.Domain(), IntVect(2), interpolation, boundary, first);
-                first+=count;
-            }
+            FillPatchInterp(buffer.fine, 0, buffer.coarse, 0, components+2, IntVect(0), coarse.geometry, fine.geometry,
+                            fine.geometry.Domain(), IntVect(2), &gasLinearInterpolation, boundary, 0);
             fine.conserved.ParallelCopyToGhost(buffer.fine, 0, 0, components + 2, IntVect(0), IntVect(2));
         }
         // With source == destination, AMReX exchanges only ghosts, then applies
@@ -381,7 +370,6 @@ void AmrGas::transport(double dt) {
     fillGhosts();
     const int fields = components + 2;
     const int nc=components;
-    const bool equalDensity=equalIngredientDensities;
     for (auto& entry : data) {
         auto& level = *entry;
         const double halfDt=.5*dt/level.geometry.CellSize(0);
@@ -389,9 +377,8 @@ void AmrGas::transport(double dt) {
         for (MFIter mfi(level.slopes); mfi.isValid(); ++mfi) {
             const auto q=level.conserved.const_array(mfi); const auto slopes=level.slopes.array(mfi);
             ParallelFor(amrex::grow(mfi.validbox(),1),[=](int i,int j,int k) noexcept {
-                const int count=equalDensity ? nc : fields;
                 auto sample=[&](int dx,int dy,int n) { return q(i+dx,j+dy,k,n); };
-                const auto limiter=linearLimiter(count,sample);
+                const auto limiter=linearLimiter(nc,sample);
                 for (int n=0; n<nc; ++n) {
                     const auto s=linearSlope(n,sample,limiter);
                     slopes(i,j,k,n)=s.x; slopes(i,j,k,nc+n)=s.y;

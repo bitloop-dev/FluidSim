@@ -3,7 +3,7 @@
 #include "FluidLinearReconstruction.h"
 #include <cmath>
 #ifdef FLUIDSIM_HAS_AMR
-#include "AmrGas.h"
+#include "FluidGridAdaptive.h"
 #endif
 
 namespace fluid {
@@ -92,7 +92,7 @@ public:
         owners.assign(size_t((width+1)/2)*((height+1)/2),0);
     }
 #ifdef FLUIDSIM_HAS_AMR
-    explicit FluidCellView(const AmrGas& gas) : width(gas.finestWidth()), height(gas.finestHeight()), cellSize(gas.finestCellSize()),
+    explicit FluidCellView(const FluidGridAdaptive& gas) : width(gas.finestWidth()), height(gas.finestHeight()), cellSize(gas.finestCellSize()),
         mixture(&gas.materialMixture()), catalogue(&gas.elements()), acceleration(gas.acceleration()), identity(&gas),
         pressureInterval(gas.pressureInterval()), liquidComponents(gas.liquidIngredientCount()) {
         owners.assign(size_t((width+1)/2)*((height+1)/2),-1);
@@ -122,9 +122,7 @@ public:
         return stride;
     }
     void reconstruct(MaterialPlane& plane,int x,int y,int scale,bool includeMomentum=false) const {
-        bool sharedMomentum=false;
-        for (const auto& component:mixture->components) sharedMomentum|=component.density!=mixture->components.front().density;
-        plane.count=components()+((sharedMomentum || includeMomentum)?2:0);
+        plane.count=components()+(includeMomentum?2:0);
         plane.stencil.assign(5*plane.count,0.); plane.slopes.resize(plane.count);
         constexpr int offsets[5][2]={{0,0},{-1,0},{1,0},{0,-1},{0,1}};
         for (int side=0;side<5;++side) {
@@ -145,7 +143,7 @@ public:
             for (int dy=0;dy<scale;dy+=stride) for (int dx=0;dx<scale;dx+=stride) {
                 const auto c=at(gx+dx,gy+dy);
                 for (int n=0;n<components();++n) plane.stencil[side*plane.count+n]+=c.density(n)/samples;
-                if (sharedMomentum || includeMomentum) for (int d=0;d<2;++d) {
+                if (includeMomentum) for (int d=0;d<2;++d) {
                     const int requested=d?y+scale*offsets[side][1]:x+scale*offsets[side][0];
                     const bool reflected=requested<0 || requested>=(d?height:width);
                     plane.stencil[side*plane.count+components()+d]+=(reflected?-1.:1.)*c.momentum(d)/samples;
@@ -153,14 +151,11 @@ public:
             }
         }
         auto sample=[&](int dx,int dy,int n) { return plane.mean(n,dx<0?1:dx>0?2:dy<0?3:dy>0?4:0); };
-        const auto limiter=linearLimiter(sharedMomentum?plane.count:components(),sample);
-        for (int n=0;n<plane.count;++n) plane.slopes[n]=linearSlope(n,sample,limiter);
-        // Native regrid gives equal-density momentum its own limiter, so
-        // passive ingredient edges cannot flatten an otherwise smooth flow.
-        if (includeMomentum && !sharedMomentum) {
-            auto momentum=[&](int dx,int dy,int d) { return sample(dx,dy,components()+d); };
-            const auto limited=linearLimiter(2,momentum);
-            for(int d=0;d<2;++d) plane.slopes[components()+d]=linearSlope(d,momentum,limited);
+        const auto limiter=linearLimiter(components(),sample);
+        for (int n=0;n<components();++n) plane.slopes[n]=linearSlope(n,sample,limiter);
+        if (includeMomentum) {
+            const auto momentum=linearMomentumSlopes(components(),sample,limiter);
+            for(int d=0;d<2;++d) plane.slopes[components()+d]=momentum[d];
         }
     }
     double materialSample(int x,int y,int ingredient) const {

@@ -84,10 +84,7 @@ struct FluidGrid
     // CPU storage is released by the destructor; there are no device resources to destroy
     void destroy() {}
 
-    struct StepTimings
-    {
-        double transport_ms = 0, forces_ms = 0, pressure_ms = 0;
-    };
+    using StepTimings = FluidStepTimings;
 
     // Optional timings observe the same ordered substep; null performs no clock reads.
     ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr);

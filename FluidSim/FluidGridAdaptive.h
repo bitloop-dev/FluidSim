@@ -4,22 +4,13 @@
 #include "FluidMixture.h"
 
 #include "AmrField2D.h"
+#include "AmrHierarchy2D.h"
 #include "AmrTransfer2D.h"
 #include <array>
 #include <memory>
 #include <vector>
 
 namespace fluid {
-
-struct GasPatch { int x, y, width, height; bool operator==(const GasPatch&) const = default; };
-struct GasLayout {
-    int baseRatio = 1;
-    // Lists are nonempty and add successive 2:1 levels in finest-cell coordinates.
-    // Project-controlled layouts are aligned, disjoint and properly nested,
-    // including the coarse stencil needed by two fine ghost layers.
-    std::vector<std::vector<GasPatch>> refinedPatches;
-    bool operator==(const GasLayout&) const = default;
-};
 
 struct GasStepResult {
     // One final projection per physical step; substeps counts only transport.
@@ -38,7 +29,7 @@ struct GasTotals {
 // One AMR hierarchy for gas and optional liquid phases. Conserved lanes are
 // liquid ingredients, gas ingredients, then cell momentum. All storage and
 // numerical operations are project-owned, strictly 2D CPU code.
-class AmrGas {
+class FluidGridAdaptive {
 public:
     using State = FluidGridState<double>;
     struct Level {
@@ -55,11 +46,11 @@ public:
         AmrField2D<int> active;
     };
 
-    AmrGas(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
-    AmrGas(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
-    ~AmrGas();
-    AmrGas(const AmrGas&) = delete;
-    AmrGas& operator=(const AmrGas&) = delete;
+    FluidGridAdaptive(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
+    FluidGridAdaptive(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
+    ~FluidGridAdaptive();
+    FluidGridAdaptive(const FluidGridAdaptive&) = delete;
+    FluidGridAdaptive& operator=(const FluidGridAdaptive&) = delete;
 
     void upload(const State& state, double tolerance = 1.e-10);
     // Conservative state transfer only; project after a true return before advancing.

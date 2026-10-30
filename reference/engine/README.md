@@ -1,6 +1,6 @@
 # Source-derived 2D CPU fluid hierarchy
 
-`FluidSim/AmrGas.{h,cpp}` is the production engine. Its fields, transfers,
+`FluidSim/FluidGridAdaptive.{h,cpp}` is the production engine. Its fields, transfers,
 clustering and both pressure paths are project-owned code. The application has
 no AMReX headers, linkage or initialization. The frozen upstream implementation
 lives only in `reference/amrex/`, namespace `fluid::reference`, and is linked only
@@ -163,8 +163,10 @@ the CFL bound constant during transport, so it is computed once per `step`.
    cells remain untouched, and no full-state copy is made. Normal
    momentum is odd across a wall, other fields even. Spatial reconstruction uses
    common monotonized-central slope factors and a corner bound per mixture.
-   Differing-density momentum shares its ingredient limiter; equal-density momentum
-   has a separate group so passive labels cannot alter velocity. New fine averages,
+   Momentum uses the parent velocity times the bounded density plane plus a
+   separately limited zero-mean linear residual. Corner-density inequalities
+   bound reconstructed velocity by neighbour extrema without flattening material.
+   New fine averages,
    coarse-cell display and material-error estimates use this same spatial plane.
 2. Reconstruct slopes for valid cells and their immediate face donors. Trace each
    upwind face location back half a step along the normal projected face velocity
@@ -217,9 +219,13 @@ of this method. Closed walls can exchange momentum through pressure; pure
 transport separately conserves total composite momentum and each ingredient.
 
 Use one shared slope limiter for the ingredient group: independent component
-limiting can break the local volume sum. Equal-intrinsic-density momentum has a
-separate limiter so passive labels cannot flatten flow. Spatial planes are bounded
-at their corners; the half-step face sample stays inside that donor. On a single
+limiting can break the local volume sum. Momentum extrema must not flatten
+material. Reconstruct momentum as `m0 + (u0 * densitySlope + residualSlope) dot delta`,
+where `u0=m0/rho0`; limit the residual independently using neighbouring velocities
+and reconstructed corner densities. Symmetric offsets preserve the parent momentum,
+and a constant velocity gives zero residual. This grouping is a project numerical
+choice, mirrored by the AMReX-backed reference adapter, not an upstream pressure
+change. Material planes are bounded at their corners; the half-step face sample stays inside that donor. On a single
 resolution, the timestep limits each cell's actual outgoing face sum to .45:
 `dt * (max(uR,0) + max(-uL,0) + max(vT,0) + max(-vB,0)) / dx <= .45`.
 Nonnegative bounded planes are at most twice their cell mean, so that outgoing

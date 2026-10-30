@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FluidSim WebGPU numerical tests</title>
+<pre id="output"></pre>
+<script>
+const output = document.querySelector('#output');
+const lines = [];
+let finished = false;
+function append(text) {
+    const line = String(text);
+    lines.push(line);
+    output.textContent += line + '\n';
+    fetch('/log', { method: 'POST', body: line });
+}
+function finish(code, reason = '') {
+    if (finished) return;
+    finished = true;
+    fetch('/result', { method: 'POST', body: JSON.stringify({ code, reason, lines }) });
+}
+var Module = {
+    arguments: new URLSearchParams(location.search).getAll('arg'),
+    print: append,
+    printErr: append,
+    onExit: code => finish(code),
+    onAbort: reason => finish(1, String(reason))
+};
+window.addEventListener('error', event => finish(1, event.message));
+window.addEventListener('unhandledrejection', event => finish(1, String(event.reason)));
+</script>
+<script src="FluidSimGPUTests.js"></script>

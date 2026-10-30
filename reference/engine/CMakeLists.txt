@@ -3,8 +3,8 @@ project(FluidCpu2D LANGUAGES CXX)
 
 # The complete CPU engine builds without the framework or any AMReX package/source.
 add_library(FluidCpu2D STATIC
-    ../../FluidSim/AmrGas.cpp ../../FluidSim/AmrField2D.cpp
-    ../../FluidSim/AmrTransfer2D.cpp ../../FluidSim/AmrPressure2D.cpp
+    ../../FluidSim/FluidGridAdaptive.cpp ../../FluidSim/AmrField2D.cpp
+    ../../FluidSim/AmrTransfer2D.cpp ../../FluidSim/AmrPressure2D.cpp ../../FluidSim/AmrPressureTopology2D.cpp
     ../../FluidSim/AmrGasRuntime.cpp)
 target_include_directories(FluidCpu2D PUBLIC ../../FluidSim)
 target_compile_features(FluidCpu2D PUBLIC cxx_std_20)

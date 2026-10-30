@@ -1,60 +1,41 @@
 #pragma once
-#include "FluidGridGPUInternal.h"
-#include <memory>
+#include "FluidWebGPUCompute.h"
 
-namespace fluid { class PressureMultigrid; }
+namespace fluid::webgpu {
 
-namespace fluid::gpu_detail
-{
-
-// The same geometric V-cycle as the CPU, expressed as reusable fragment passes.
+// Fixed symmetric V-cycle, with transpose restriction and a GPU-resident tiny Cholesky solve.
 class PressureMultigridGPU
 {
 public:
-    PressureMultigridGPU(PassRunner& runner, int width, int height);
-    ~PressureMultigridGPU();
-    void rebuild(const Texture& fine_coefficients);
-    const Texture& apply(const Texture& residual, const Texture& residual_stats, float tolerance = 0);
-    void useCPUCoarsePressure(int max_cells);
-    bool usesCPUCoarsePressure() const { return cpu_coarse != nullptr; }
-    bool cpuConverged() const { return cpu_converged; }
+    PressureMultigridGPU(Compute& compute, int width, int height);
+    void rebuild(const Field& fine_coefficients);
+    const Field& apply(const Field& residual, const Field& residual_stats);
 
 private:
     static constexpr int smoothing_sweeps = 5;
     struct Level
     {
         int width, height, spacing;
-        Texture coefficients, rhs, solution, next_solution, residual;
-        Texture prolong_map, restrict_map;
-        Level(int width, int height, int spacing, bool finest);
+        Field coefficients, rhs, solution, next_solution, residual, prolong_map, restrict_map;
+        int prolong_offset = 0, restrict_offset = 0, tile_offset = 0;
+        Level(Compute& compute, int width, int height, int spacing, bool finest);
     };
-
-    PassRunner& runner;
+    Compute& compute;
     std::vector<Level> levels;
-    Texture coarse_factor;
-    const Texture* fine_coefficients = nullptr;
-    const Texture* residual_stats = nullptr;
+    Field coarse_factor;
+    const Field* fine_coefficients = nullptr;
+    const Field* residual_stats = nullptr;
     std::array<float, smoothing_sweeps> smoothing_weights;
-    Program coarsen, smooth_pair, polynomial_smooth, residual, restrict_pass, restrict_cpu, prolong, factor, coarse_solve;
-    std::unique_ptr<PressureMultigrid> cpu_coarse;
-    int cpu_level = 0;
-    bool cpu_matrix_stale = true;
-    bool cpu_converged = false;
-    float cpu_tolerance = 0;
-    Texture cpu_readback;
-    std::vector<float> cpu_pixels;
-    std::vector<double> cpu_rhs, cpu_solution, cpu_right, cpu_down;
-
-    void readCPU(const Texture& texture);
-    void rebuildCPU();
-    void solveCPU(const Texture& rhs);
-
-    void buildTransfers(Level& fine, const Level& coarse);
-    void run(Program& program, int level, std::initializer_list<const Texture*> outputs,
-             std::initializer_list<PassRunner::Input> inputs, int mode = 0, float relaxation = 0);
-    const Texture& coefficients(int level) const;
-    void smoothLevel(int level, const Texture& rhs, bool reverse, bool from_zero, int sweep);
-    void cycle(int level, const Texture& rhs);
+    Kernel coarsen, smooth_pair, polynomial_smooth, residual, restrict_pass, prolong, factor, coarse_solve;
+    int tile_level = -1;
+    Field tile_coefficients, tile_maps;
+    Kernel pack_coefficients, tile_cycle;
+    void buildTransfers(Level& fine, const Level& coarse, std::vector<float>* packed_maps);
+    void run(Kernel& kernel, int level, std::initializer_list<const Field*> outputs,
+             std::initializer_list<Compute::Input> inputs, int mode = 0, float relaxation = 0);
+    const Field& coefficients(int level) const;
+    void smoothLevel(int level, const Field& rhs, bool reverse, bool from_zero, int sweep);
+    void cycle(int level, const Field& rhs);
 };
 
-}
+} // namespace fluid::webgpu

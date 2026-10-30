@@ -1,420 +1,296 @@
 #include "PressureMultigridGPU.h"
-#include "PressureMultigrid.h"
+#include "PressureMultigridGPUShaders.h"
+#include <cmath>
 
-namespace fluid::gpu_detail
+namespace fluid::webgpu {
+
+PressureMultigridGPU::Level::Level(Compute& compute, int w, int h, int s, bool finest) :
+    width(w), height(h), spacing(s), coefficients(finest ? Field{} : compute.field(w,h,4)),
+    rhs(finest ? Field{} : compute.field(w,h)), solution(compute.field(w,h)), next_solution(compute.field(w,h)), residual(compute.field(w,h)) {}
+
+PressureMultigridGPU::PressureMultigridGPU(Compute& compute, int width, int height) : compute(compute)
 {
-
-PressureMultigridGPU::~PressureMultigridGPU() = default;
-
-PressureMultigridGPU::Level::Level(int w, int h, int s, bool finest) :
-    width(w), height(h), spacing(s), coefficients(finest ? Texture() : Texture(w, h, 4)),
-    rhs(finest ? Texture() : Texture(w, h)), solution(w, h), next_solution(w, h), residual(w, h)
-{}
-
-PressureMultigridGPU::PressureMultigridGPU(PassRunner& runner, int width, int height) : runner(runner)
-{
-    // D^-1 A has eigenvalues in [0,2]; target its upper spectrum with a fixed Chebyshev polynomial.
-    for (int i = 0; i < smoothing_sweeps; ++i)
-        smoothing_weights[i] = float(1.0 / (1.1 + 0.9 * std::cos(3.14159265358979323846 * (i + 0.5) / smoothing_sweeps)));
-    int w = width, h = height, spacing = 1;
+    // D^-1 A has eigenvalues in [0,2]; reverse the fixed Chebyshev weights after the coarse correction.
+    for (int i=0; i<smoothing_sweeps; ++i)
+        smoothing_weights[i]=float(1.0/(1.1+0.9*std::cos(3.14159265358979323846*(i+0.5)/smoothing_sweeps)));
+    int w=width, h=height, spacing=1;
     for (;;)
     {
-        levels.emplace_back(w, h, spacing, levels.empty());
-        if (w * h <= 16) break;
-        w = (w + 1) / 2; h = (h + 1) / 2; spacing *= 2;
+        levels.emplace_back(compute,w,h,spacing,levels.empty());
+        if (w*h<=16) break;
+        w=(w+1)/2; h=(h+1)/2; spacing*=2;
     }
-    for (size_t i = 0; i + 1 < levels.size(); ++i)
-        buildTransfers(levels[i], levels[i + 1]);
-    const int unknowns = std::max(1, w * h - 1);
-    coarse_factor = Texture(unknowns, unknowns);
-
-    const std::string geometry = common + R"(
-        uniform ivec2 domain_size;
-        uniform float spacing, mean_divisor;
-        uniform sampler2D rhs_stats;
-        float center(int i, float step, int extent) { return 0.5 * (float(i) * step + min(float(i + 1) * step, float(extent))); }
-        float rhsAt(sampler2D rhs, ivec2 p)
-        {
-            float mean = 0.0;
-            if (mean_divisor > 0.0)
-            {
-                float sum = at(rhs_stats, ivec2(0));
-                mean = sum / mean_divisor;
-                // Correct reciprocal rounding before removing the mean on odd grids.
-                mean += (sum - mean * mean_divisor) / mean_divisor;
-            }
-            return at(rhs, p) - mean;
-        }
-        float product(sampler2D source, sampler2D coefficients, ivec2 p)
-        {
-            vec4 a = texelFetch(coefficients, p, 0);
-            float c = at(source, p);
-            return (a.x * (c - at(source, max(p - ivec2(1, 0), ivec2(0)))) + a.y * (c - at(source, min(p + ivec2(1, 0), grid_size - 1)))) +
-                   (a.z * (c - at(source, max(p - ivec2(0, 1), ivec2(0)))) + a.w * (c - at(source, min(p + ivec2(0, 1), grid_size - 1))));
-        }
-    )";
-    auto build = [&](Program& p, const char* name, const char* body) { runner.build(p, name, geometry, body); };
-    build(coarsen, "multigrid coarse conductances", R"(
-        uniform sampler2D source;
-        float face(ivec2 p, int axis)
-        {
-            ivec2 fine_size = textureSize(source, 0);
-            int coordinate = p[axis], extent = grid_size[axis];
-            if (coordinate == 0 || coordinate == extent) return 0.0;
-            int edge = 2 * coordinate;
-            float step = spacing * 0.5;
-            float before = (center(edge - 1, step, domain_size[axis]) - center(coordinate - 1, spacing, domain_size[axis])) /
-                           (center(edge - 1, step, domain_size[axis]) - center(edge - 2, step, domain_size[axis]));
-            float after = edge + 1 < fine_size[axis] ?
-                (center(coordinate, spacing, domain_size[axis]) - center(edge, step, domain_size[axis])) /
-                (center(edge + 1, step, domain_size[axis]) - center(edge, step, domain_size[axis])) : 0.0;
-            int perpendicular = 1 - axis;
-            float value = 0.0;
-            // Conductances add in parallel; resistances add along each normal path.
-            for (int j = 0; j < 2; ++j)
-            {
-                ivec2 q; q[axis] = edge - 1; q[perpendicular] = 2 * p[perpendicular] + j;
-                if (q[perpendicular] >= fine_size[perpendicular]) continue;
-                ivec2 direction = axis == 0 ? ivec2(1, 0) : ivec2(0, 1);
-                int channel = axis == 0 ? 1 : 3;
-                float resistance = before / texelFetch(source, q - direction, 0)[channel] + 1.0 / texelFetch(source, q, 0)[channel];
-                if (after != 0.0) resistance += after / texelFetch(source, q + direction, 0)[channel];
-                value += 1.0 / resistance;
-            }
-            return value;
-        }
-        void main()
-        {
-            ivec2 p = cell();
-            output0 = vec4(face(p, 0), face(p + ivec2(1, 0), 0), face(p, 1), face(p + ivec2(0, 1), 1));
-        }
-    )");
-    build(smooth_pair, "multigrid fused red black sweep", R"(
-        uniform sampler2D source, rhs, coefficients;
-        float firstColor(ivec2 p)
-        {
-            p = clamp(p, ivec2(0), grid_size - 1);
-            vec4 a = texelFetch(coefficients, p, 0);
-            float diagonal = (a.x + a.y) + (a.z + a.w), value = rhsAt(rhs, p);
-            if (mode < 2)
-                value += (a.x * at(source, max(p - ivec2(1, 0), ivec2(0))) + a.y * at(source, min(p + ivec2(1, 0), grid_size - 1))) +
-                         (a.z * at(source, max(p - ivec2(0, 1), ivec2(0))) + a.w * at(source, min(p + ivec2(0, 1), grid_size - 1)));
-            return diagonal > 0.0 ? value / diagonal : 0.0;
-        }
-        void main()
-        {
-            ivec2 p = cell();
-            if ((p.x + p.y) % 2 == mode % 2) { output0 = vec4(firstColor(p)); return; }
-            vec4 a = texelFetch(coefficients, p, 0);
-            float diagonal = (a.x + a.y) + (a.z + a.w);
-            // Recompute the new opposite-colour neighbours instead of issuing a second draw.
-            float value = rhsAt(rhs, p) +
-                (a.x * firstColor(p - ivec2(1, 0)) + a.y * firstColor(p + ivec2(1, 0))) +
-                (a.z * firstColor(p - ivec2(0, 1)) + a.w * firstColor(p + ivec2(0, 1)));
-            output0 = vec4(diagonal > 0.0 ? value / diagonal : 0.0);
-        }
-    )");
-    build(polynomial_smooth, "multigrid polynomial smoothing", R"(
-        uniform sampler2D source, rhs, coefficients;
-        uniform float relaxation;
-        void main()
-        {
-            ivec2 p = cell();
-            vec4 a = texelFetch(coefficients, p, 0);
-            float diagonal = (a.x + a.y) + (a.z + a.w);
-            float value = rhsAt(rhs, p);
-            if (mode == 0) value -= product(source, coefficients, p);
-            output0 = vec4((mode == 0 ? at(source, p) : 0.0) + (diagonal > 0.0 ? relaxation * value / diagonal : 0.0));
-        }
-    )");
-    build(residual, "multigrid residual", R"(
-        uniform sampler2D source, rhs, coefficients;
-        void main() { output0 = vec4(rhsAt(rhs, cell()) - product(source, coefficients, cell())); }
-    )");
-    const char* restriction = R"(
-        uniform sampler2D source, maps;
-        void main()
-        {
-            ivec2 p = cell(), base = p * 2 - 1, size = textureSize(source, 0);
-            vec4 wx = texelFetch(maps, ivec2(p.x, 0), 0), wy = texelFetch(maps, ivec2(p.y, 1), 0);
-            float value = 0.0;
-            for (int y = 0; y < 4; ++y)
-            {
-                float horizontal = 0.0;
-                for (int x = 0; x < 4; ++x)
-                {
-                    ivec2 q = base + ivec2(x, y);
-                    if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, size))) continue;
-                    horizontal += wx[x] * at(source, q);
-                }
-                value += wy[y] * horizontal;
-            }
-            output0 = vec4(value);
-#ifdef CPU_COARSE
-            vec4 stats = texelFetch(rhs_stats, ivec2(0), 0);
-            output0 = vec4(value, stats.g, stats.a, 0);
-#endif
-        }
-    )";
-    build(restrict_pass, "multigrid transpose restriction", restriction);
-    runner.build(restrict_cpu, "multigrid CPU restriction and statistics", geometry + "\n#define CPU_COARSE\n", restriction);
-    build(prolong, "multigrid prolong correction", R"(
-        uniform sampler2D source, coarse, maps;
-        void main()
-        {
-            ivec2 p = cell();
-            vec3 px = texelFetch(maps, ivec2(p.x, 0), 0).rgb, py = texelFetch(maps, ivec2(p.y, 1), 0).rgb;
-            float a = (1.0 - px.z) * at(coarse, ivec2(px.x, py.x)) + px.z * at(coarse, ivec2(px.y, py.x));
-            float b = (1.0 - px.z) * at(coarse, ivec2(px.x, py.y)) + px.z * at(coarse, ivec2(px.y, py.y));
-            output0 = vec4(at(source, p) + (1.0 - py.z) * a + py.z * b);
-        }
-    )");
-    build(factor, "multigrid coarse Cholesky", R"(
-        uniform sampler2D coefficients;
-        void main()
-        {
-            ivec2 target = cell();
-            if (target.x > target.y) { output0 = vec4(0); return; }
-            int n = grid_size.x * grid_size.y - 1;
-            if (n == 0) { output0 = vec4(1); return; }
-            float lower[225];
-            // Each tiny output computes the required part of the same pinned factor.
-            for (int row = 0; row <= target.y; ++row)
-            {
-                int index = row + 1;
-                ivec2 p = ivec2(index % grid_size.x, index / grid_size.x);
-                vec4 a = texelFetch(coefficients, p, 0);
-                for (int col = 0; col <= row; ++col)
-                {
-                    float value = col == row ? (a.x + a.y) + (a.z + a.w) :
-                        col == row - 1 && p.x > 0 ? -a.x : col == row - grid_size.x && p.y > 0 ? -a.z : 0.0;
-                    for (int k = 0; k < col; ++k) value -= lower[row * 15 + k] * lower[col * 15 + k];
-                    if (row == col)
-                    {
-                        // A negative pivot marks numerical failure without a CPU readback.
-                        if (value <= 0.0 || !finite(value)) { output0 = vec4(-1); return; }
-                        value = sqrt(value);
-                    }
-                    else value /= lower[col * 15 + col];
-                    lower[row * 15 + col] = value;
-                    if (row == target.y && col == target.x) { output0 = vec4(value); return; }
-                }
-            }
-        }
-    )");
-    build(coarse_solve, "multigrid coarse solve", R"(
-        uniform sampler2D rhs, factor;
-        void main()
-        {
-            int count = grid_size.x * grid_size.y, n = count - 1;
-            float values[15], mean = 0.0;
-            for (int i = 0; i < count; ++i) mean += rhsAt(rhs, ivec2(i % grid_size.x, i / grid_size.x));
-            mean /= float(count);
-            for (int row = 0; row < n; ++row)
-            {
-                float diagonal = at(factor, ivec2(row, row));
-                // An unusable factor drops only the coarse correction; fine-grid CG still checks accuracy.
-                if (diagonal <= 0.0 || !finite(diagonal)) { output0 = vec4(0); return; }
-                float value = rhsAt(rhs, ivec2((row + 1) % grid_size.x, (row + 1) / grid_size.x)) - mean;
-                for (int col = 0; col < row; ++col) value -= at(factor, ivec2(col, row)) * values[col];
-                values[row] = value / diagonal;
-            }
-            for (int row = n - 1; row >= 0; --row)
-            {
-                float value = values[row];
-                for (int col = row + 1; col < n; ++col) value -= at(factor, ivec2(row, col)) * values[col];
-                values[row] = value / at(factor, ivec2(row, row));
-            }
-            mean = 0.0;
-            for (int i = 0; i < n; ++i) mean += values[i];
-            mean /= float(count);
-            int index = cell().y * grid_size.x + cell().x;
-            output0 = vec4((index == 0 ? 0.0 : values[index - 1]) - mean);
-        }
-    )");
-}
-
-void PressureMultigridGPU::buildTransfers(Level& fine, const Level& coarse)
-{
-    const int fine_extent = std::max(fine.width, fine.height), coarse_extent = std::max(coarse.width, coarse.height);
-    fine.prolong_map = Texture(fine_extent, 2, 4);
-    fine.restrict_map = Texture(coarse_extent, 2, 4);
-    std::vector<float> interpolation(size_t(fine_extent) * 8), restriction(size_t(coarse_extent) * 8);
-    for (int axis = 0; axis < 2; ++axis)
+    int tile_cells=0;
+    for (int i=0; i+1<int(levels.size()); ++i)
     {
-        const int size = axis == 0 ? fine.width : fine.height, parent_size = axis == 0 ? coarse.width : coarse.height;
-        const int extent = axis == 0 ? levels.front().width : levels.front().height;
-        auto center = [&](int i, int spacing) { return 0.5 * (i * spacing + std::min((i + 1) * spacing, extent)); };
-        for (int f = 0; f < size; ++f)
+        int count=0;
+        for (int l=i; l<int(levels.size()); ++l) count+=levels[l].width*levels[l].height;
+        if (levels[i].width*levels[i].height<=1024 && levels.size()-i<=4 && count<=1360 &&
+            (levels[i].width&(levels[i].width-1))==0 && (levels[i].height&(levels[i].height-1))==0)
         {
-            const int parent = f / 2;
-            const int first = std::max(0, parent - int(center(f, fine.spacing) < center(parent, coarse.spacing)));
-            const int second = std::min(first + 1, parent_size - 1);
-            const float weight = first == second ? 0.0f : float(std::clamp((center(f, fine.spacing) - center(first, coarse.spacing)) /
-                (center(second, coarse.spacing) - center(first, coarse.spacing)), 0.0, 1.0));
-            const int i = (axis * fine_extent + f) * 4;
-            interpolation[i] = float(first); interpolation[i + 1] = float(second); interpolation[i + 2] = weight;
-            // Store the exact transpose weights, for fine indices 2*c-1 through 2*c+2.
-            restriction[(axis * coarse_extent + first) * 4 + f - (2 * first - 1)] += 1.0f - weight;
-            if (weight != 0.0f) restriction[(axis * coarse_extent + second) * 4 + f - (2 * second - 1)] += weight;
+            tile_level=i; tile_cells=count;
+            int offset=0;
+            for (int l=i; l<int(levels.size()); ++l) { levels[l].tile_offset=offset; offset+=levels[l].width*levels[l].height; }
+            break;
         }
     }
-    glBindTexture(GL_TEXTURE_2D, fine.prolong_map.id);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fine_extent, 2, GL_RGBA, GL_FLOAT, interpolation.data());
-    glBindTexture(GL_TEXTURE_2D, fine.restrict_map.id);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, coarse_extent, 2, GL_RGBA, GL_FLOAT, restriction.data());
-}
+    std::vector<float> packed_maps;
+    for (size_t i=0; i+1<levels.size(); ++i)
+        buildTransfers(levels[i],levels[i+1],tile_level>=0 && int(i)>=tile_level ? &packed_maps : nullptr);
+    const int unknowns=std::max(1,w*h-1);
+    coarse_factor=compute.field(unknowns,unknowns);
 
-void PressureMultigridGPU::run(Program& program, int level, std::initializer_list<const Texture*> outputs,
-                             std::initializer_list<PassRunner::Input> inputs, int mode, float relaxation)
-{
-    runner.bind(program, outputs, inputs);
-    glUniform2i(program.location("grid_size"), levels[level].width, levels[level].height);
-    glUniform2i(program.location("domain_size"), levels.front().width, levels.front().height);
-    program.scalar("spacing", float(levels[level].spacing));
-    program.scalar("mean_divisor", level == 0 ? float(levels.front().width * levels.front().height) : 0.0f);
-    program.integer("mode", mode);
-    program.scalar("relaxation", relaxation);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-}
-
-const Texture& PressureMultigridGPU::coefficients(int level) const
-{
-    return level == 0 ? *fine_coefficients : levels[level].coefficients;
-}
-
-void PressureMultigridGPU::rebuild(const Texture& fine)
-{
-    fine_coefficients = &fine;
-    const int last = cpu_coarse ? cpu_level : int(levels.size()) - 1;
-    for (int i = 1; i <= last; ++i)
-        run(coarsen, i, {&levels[i].coefficients}, {{"source", &coefficients(i - 1)}});
-    if (cpu_coarse) cpu_matrix_stale = true;
-    else run(factor, last, {&coarse_factor}, {{"coefficients", &coefficients(last)}});
-}
-
-void PressureMultigridGPU::useCPUCoarsePressure(int max_cells)
-{
-    cpu_coarse.reset();
-    cpu_level = 0;
-    cpu_converged = false;
-    if (max_cells == 0) return;
-    while (cpu_level + 1 < int(levels.size()) && levels[cpu_level].width * levels[cpu_level].height > max_cells) ++cpu_level;
-    const auto& level = levels[cpu_level];
-    cpu_coarse = std::make_unique<PressureMultigrid>(level.width, level.height);
-    cpu_matrix_stale = true;
-    cpu_readback = Texture(level.width, level.height, 4);
-    cpu_rhs.resize(size_t(level.width) * level.height);
-    cpu_right.assign(size_t(level.width + 1) * level.height, 0.0);
-    cpu_down.assign(size_t(level.width) * (level.height + 1), 0.0);
-}
-
-void PressureMultigridGPU::readCPU(const Texture& texture)
-{
-    runner.target({&texture});
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-#ifndef __EMSCRIPTEN__
-    const int channels = texture.channels == 1 ? 1 : 4;
-    cpu_pixels.resize(size_t(texture.width) * texture.height * channels);
-    glReadPixels(0, 0, texture.width, texture.height, channels == 1 ? GL_RED : GL_RGBA, GL_FLOAT, cpu_pixels.data());
-#else
-    cpu_pixels.resize(size_t(texture.width) * texture.height * 4);
-    glReadPixels(0, 0, texture.width, texture.height, GL_RGBA, GL_FLOAT, cpu_pixels.data());
-#endif
-}
-
-void PressureMultigridGPU::rebuildCPU()
-{
-    const auto& level = levels[cpu_level];
-    readCPU(coefficients(cpu_level));
-    for (int y = 0; y < level.height; ++y)
-    for (int x = 0; x < level.width; ++x)
-    {
-        const int i = y * level.width + x;
-        cpu_right[y * (level.width + 1) + x + 1] = cpu_pixels[4 * i + 1];
-        cpu_down[(y + 1) * level.width + x] = cpu_pixels[4 * i + 3];
+    const std::string rhs_helpers=R"wgsl(
+fn rhsAt(p: vec2i) -> f32 {
+    let divisor=params.level.y;
+    if (divisor>0.0) {
+        // Center the numerator before division so a constant RHS cancels exactly on odd grids.
+        return fma(rhs(p).x,divisor,-rhs_stats(vec2i(0)).x)/divisor;
     }
-    if (!cpu_coarse->rebuild(cpu_right, cpu_down))
-        throw std::runtime_error("FluidGridGPU coarse pressure factorization failed");
+    return rhs(p).x;
+}
+)wgsl";
+    const std::string product_helper=R"wgsl(
+fn product(p: vec2i) -> f32 {
+    let a=weights(p); let c=source(p).x;
+    return (a.x*(c-source(p-vec2i(1,0)).x)+a.y*(c-source(p+vec2i(1,0)).x))+
+           (a.z*(c-source(p-vec2i(0,1)).x)+a.w*(c-source(p+vec2i(0,1)).x));
+}
+)wgsl";
+    compute.build(coarsen,"fluid MG coarse conductances",1,{"source"},R"wgsl(
+fn center(i: i32, step: f32, extent: f32) -> f32 { return 0.5*(f32(i)*step+min(f32(i+1)*step,extent)); }
+fn face(p: vec2i, axis: u32) -> f32 {
+    let fine_size=sourceSize(); let coordinate=p[axis]; let extent=gridSize()[axis];
+    if (coordinate==0||coordinate==extent) { return 0.0; }
+    let edge=2*coordinate; let spacing=params.level.x; let step=spacing*0.5; let domain=params.level.zw[axis];
+    let before=(center(edge-1,step,domain)-center(coordinate-1,spacing,domain))/(center(edge-1,step,domain)-center(edge-2,step,domain));
+    var after=0.0;
+    if (edge+1<fine_size[axis]) { after=(center(coordinate,spacing,domain)-center(edge,step,domain))/(center(edge+1,step,domain)-center(edge,step,domain)); }
+    let perpendicular=1u-axis; var value=0.0;
+    for (var j=0; j<2; j++) {
+        var q=vec2i(0); q[axis]=edge-1; q[perpendicular]=2*p[perpendicular]+j;
+        if (q[perpendicular]>=fine_size[perpendicular]) { continue; }
+        let direction=select(vec2i(0,1),vec2i(1,0),axis==0u); let channel=select(3u,1u,axis==0u);
+        var resistance=before/source(q-direction)[channel]+1.0/source(q)[channel];
+        if (after!=0.0) { resistance+=after/source(q+direction)[channel]; }
+        value+=1.0/resistance;
+    }
+    return value;
+}
+fn execute() { let p=cell(); write0(p,vec4f(face(p,0u),face(p+vec2i(1,0),0u),face(p,1u),face(p+vec2i(0,1),1u))); }
+)wgsl");
+    compute.build(smooth_pair,"fluid MG symmetric red black",1,{"source","rhs","weights","rhs_stats"},R"wgsl(
+fn firstColor(point: vec2i) -> f32 {
+    let p=clamp(point,vec2i(0),gridSize()-1); let a=weights(p); let diagonal=(a.x+a.y)+(a.z+a.w); var value=rhsAt(p);
+    if (mode()<2) { value+=(a.x*source(p-vec2i(1,0)).x+a.y*source(p+vec2i(1,0)).x)+(a.z*source(p-vec2i(0,1)).x+a.w*source(p+vec2i(0,1)).x); }
+    if (diagonal>0.0) { return value/diagonal; } return 0.0;
+}
+fn execute() {
+    let p=cell(); if ((p.x+p.y)%2==mode()%2) { write0(p,vec4f(firstColor(p))); return; }
+    let a=weights(p); let diagonal=(a.x+a.y)+(a.z+a.w);
+    let value=rhsAt(p)+(a.x*firstColor(p-vec2i(1,0))+a.y*firstColor(p+vec2i(1,0)))+(a.z*firstColor(p-vec2i(0,1))+a.w*firstColor(p+vec2i(0,1)));
+    var result=0.0; if (diagonal>0.0) { result=value/diagonal; } write0(p,vec4f(result));
+}
+)wgsl",rhs_helpers);
+    compute.build(polynomial_smooth,"fluid MG polynomial smoother",1,{"source","rhs","weights","rhs_stats"},R"wgsl(
+fn execute() {
+    let p=cell(); let a=weights(p); let diagonal=(a.x+a.y)+(a.z+a.w); var value=rhsAt(p); var result=0.0;
+    if (mode()==0) { value-=product(p); result=source(p).x; }
+    if (diagonal>0.0) { result+=params.value.w*value/diagonal; } write0(p,vec4f(result));
+}
+)wgsl",rhs_helpers+product_helper);
+    compute.build(residual,"fluid MG residual",1,{"source","rhs","weights","rhs_stats"},R"wgsl(
+fn execute() {
+    write0(cell(),vec4f(rhsAt(cell())-product(cell())));
+}
+)wgsl",rhs_helpers+product_helper);
+    compute.build(restrict_pass,"fluid MG transpose restriction",1,{"source","maps"},R"wgsl(
+fn execute() {
+    let p=cell(); let base=p*2-1; let wx=maps(vec2i(p.x,0)); let wy=maps(vec2i(p.y,1)); var value=0.0;
+    for (var y=0; y<4; y++) {
+        var horizontal=0.0;
+        for (var x=0; x<4; x++) {
+            let q=base+vec2i(x,y); if (any(q<vec2i(0))||any(q>=sourceSize())) { continue; }
+            horizontal+=wx[x]*source(q).x;
+        }
+        value+=wy[y]*horizontal;
+    }
+    write0(p,vec4f(value));
+}
+)wgsl");
+    compute.build(prolong,"fluid MG prolongation",1,{"source","coarse","maps"},R"wgsl(
+fn execute() {
+    let p=cell(); let px=maps(vec2i(p.x,0)); let py=maps(vec2i(p.y,1));
+    let a=(1.0-px.z)*coarse(vec2i(i32(px.x),i32(py.x))).x+px.z*coarse(vec2i(i32(px.y),i32(py.x))).x;
+    let b=(1.0-px.z)*coarse(vec2i(i32(px.x),i32(py.y))).x+px.z*coarse(vec2i(i32(px.y),i32(py.y))).x;
+    write0(p,vec4f(source(p).x+(1.0-py.z)*a+py.z*b));
+}
+)wgsl");
+    compute.build(factor,"fluid MG tiny Cholesky",1,{"weights"},R"wgsl(
+fn execute() {
+    if (any(cell()!=vec2i(0))) { return; }
+    let n=gridSize().x*gridSize().y-1;
+    if (n==0) { write0(vec2i(0),vec4f(1)); return; }
+    var lower: array<f32,225>;
+    for (var row=0; row<n; row++) {
+        let index=row+1; let p=vec2i(index%gridSize().x,index/gridSize().x); let a=weights(p);
+        for (var col=0; col<=row; col++) {
+            var value=0.0;
+            if (col==row) { value=(a.x+a.y)+(a.z+a.w); }
+            else if (col==row-1 && p.x>0) { value=-a.x; }
+            else if (col==row-gridSize().x && p.y>0) { value=-a.z; }
+            for (var k=0; k<col; k++) { value-=lower[row*15+k]*lower[col*15+k]; }
+            if (row==col) {
+                if (value<=0.0||!finite(value)) { write0(vec2i(row,row),vec4f(-1)); return; }
+                value=sqrt(value);
+            } else { value/=lower[col*15+col]; }
+            lower[row*15+col]=value; write0(vec2i(col,row),vec4f(value));
+        }
+    }
+}
+)wgsl");
+    compute.build(coarse_solve,"fluid MG tiny solve",1,{"rhs","factor","rhs_stats"},R"wgsl(
+fn execute() {
+    // Keep validity outside nested-loop exits: DXC can miscompile an early return here.
+    let count=gridSize().x*gridSize().y; let n=count-1; var values: array<f32,15>; var mean=0.0; var valid=true;
+    for (var i=0; i<count; i++) { mean+=rhsAt(vec2i(i%gridSize().x,i/gridSize().x)); } mean/=f32(count);
+    for (var row=0; row<n; row++) {
+        let diagonal=factor(vec2i(row,row)).x;
+        valid = valid && diagonal>0.0 && finite(diagonal);
+        var value=rhsAt(vec2i((row+1)%gridSize().x,(row+1)/gridSize().x))-mean;
+        for (var col=0; col<row; col++) { value-=factor(vec2i(col,row)).x*values[col]; } values[row]=value/diagonal;
+    }
+    for (var row=n-1; row>=0; row--) {
+        var value=values[row];
+        for (var col=row+1; col<n; col++) { value-=factor(vec2i(row,col)).x*values[col]; }
+        values[row]=value/factor(vec2i(row,row)).x;
+    }
+    mean=0.0; for (var i=0; i<n; i++) { mean+=values[i]; } mean/=f32(count);
+    let index=cell().y*gridSize().x+cell().x; var value=0.0; if (index!=0) { value=values[index-1]; }
+    write0(cell(),vec4f(select(0.0,value-mean,valid)));
+}
+)wgsl",rhs_helpers);
+    if (tile_level>=0)
+    {
+        tile_coefficients=compute.field(tile_cells,1,4);
+        tile_maps=compute.field(int(packed_maps.size()),1);
+        compute.write(tile_maps,packed_maps);
+        compute.build(pack_coefficients,"fluid MG packed coarse coefficients",1,{"source"},R"wgsl(
+fn execute() {
+    let p=cell(); let first=4*(mode()+p.y*gridSize().x+p.x); let a=source(p);
+    output0Data[first]=a.x; output0Data[first+1]=a.y; output0Data[first+2]=a.z; output0Data[first+3]=a.w;
+}
+)wgsl");
+        compute.build(tile_cycle,"fluid MG shared coarse cycle",1,{"rhs","rhs_stats","packed","maps","factor"},coarse_cycle_shader,rhs_helpers,true,{16,16});
+    }
 }
 
-void PressureMultigridGPU::solveCPU(const Texture& rhs)
+void PressureMultigridGPU::buildTransfers(Level& fine, const Level& coarse, std::vector<float>* packed_maps)
 {
-    const auto& level = levels[cpu_level];
-    double mean = 0.0;
-    float maximum = 0, invalid = 0;
-    if (cpu_level == 0)
+    const int fine_extent=std::max(fine.width,fine.height), coarse_extent=std::max(coarse.width,coarse.height);
+    fine.prolong_map=compute.field(fine_extent,2,4); fine.restrict_map=compute.field(coarse_extent,2,4);
+    std::vector<float> interpolation(size_t(fine_extent)*8), restriction(size_t(coarse_extent)*8);
+    for (int axis=0; axis<2; ++axis)
     {
-        readCPU(*residual_stats);
-        mean = double(cpu_pixels[0]) / double(level.width * level.height);
-        maximum = cpu_pixels[1];
-        invalid = cpu_pixels[3];
+        const int size=axis==0?fine.width:fine.height, parent_size=axis==0?coarse.width:coarse.height;
+        const int extent=axis==0?levels.front().width:levels.front().height;
+        auto center=[&](int i,int spacing) { return 0.5*(i*spacing+std::min((i+1)*spacing,extent)); };
+        for (int f=0; f<size; ++f)
+        {
+            const int parent=f/2;
+            const int first=std::max(0,parent-int(center(f,fine.spacing)<center(parent,coarse.spacing)));
+            const int second=std::min(first+1,parent_size-1);
+            const float weight=first==second?0.0f:float(std::clamp((center(f,fine.spacing)-center(first,coarse.spacing))/(center(second,coarse.spacing)-center(first,coarse.spacing)),0.0,1.0));
+            const int i=(axis*fine_extent+f)*4;
+            interpolation[i]=float(first); interpolation[i+1]=float(second); interpolation[i+2]=weight;
+            restriction[(axis*coarse_extent+first)*4+f-(2*first-1)]+=1.0f-weight;
+            if (weight!=0.0f) restriction[(axis*coarse_extent+second)*4+f-(2*second-1)]+=weight;
+        }
     }
-    readCPU(rhs);
-    if (cpu_level != 0) { maximum = cpu_pixels[1]; invalid = cpu_pixels[2]; }
-    // Carry convergence with the coarse RHS instead of adding a scalar GPU round trip.
-    if (cpu_tolerance > 0 && invalid == 0 && maximum <= cpu_tolerance) { cpu_converged = true; return; }
-    const size_t stride = cpu_pixels.size() / cpu_rhs.size();
-    for (size_t i = 0; i < cpu_rhs.size(); ++i) cpu_rhs[i] = double(cpu_pixels[stride * i]) - mean;
-    if (cpu_matrix_stale)
+    compute.write(fine.prolong_map,interpolation); compute.write(fine.restrict_map,restriction);
+    if (packed_maps)
     {
-        rebuildCPU();
-        cpu_matrix_stale = false;
+        fine.prolong_offset=int(packed_maps->size()); packed_maps->insert(packed_maps->end(),interpolation.begin(),interpolation.end());
+        fine.restrict_offset=int(packed_maps->size()); packed_maps->insert(packed_maps->end(),restriction.begin(),restriction.end());
     }
-    // This is a correction to the same global pressure problem, never a separate tank.
-    cpu_coarse->apply(cpu_rhs, cpu_solution, 0.0);
-    for (size_t i = 0; i < cpu_rhs.size(); ++i) cpu_pixels[i] = float(cpu_solution[i]);
-    glBindTexture(GL_TEXTURE_2D, level.solution.id);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, level.width, level.height, GL_RED, GL_FLOAT, cpu_pixels.data());
 }
 
-void PressureMultigridGPU::smoothLevel(int index, const Texture& rhs, bool reverse, bool from_zero, int sweep)
+void PressureMultigridGPU::run(Kernel& kernel, int index, std::initializer_list<const Field*> outputs,
+                             std::initializer_list<Compute::Input> inputs, int mode, float relaxation)
 {
-    auto& level = levels[index];
-    const bool polynomial = level.width * level.height > 65536;
-    const int mode = polynomial ? int(from_zero) : int(reverse) + (from_zero ? 2 : 0);
-    const float weight = polynomial ? smoothing_weights[reverse ? smoothing_sweeps - 1 - sweep : sweep] : 0.0f;
-    run(polynomial ? polynomial_smooth : smooth_pair, index, {&level.next_solution}, {{"source", &level.solution}, {"rhs", &rhs},
-        {"coefficients", &coefficients(index)}, {"rhs_stats", residual_stats}}, mode, weight);
+    Parameters p;
+    p.grid={levels[index].width,levels[index].height,mode,0};
+    p.value[3]=relaxation;
+    p.level={float(levels[index].spacing),index==0?float(levels.front().width*levels.front().height):0.0f,float(levels.front().width),float(levels.front().height)};
+    compute.run(kernel,outputs,inputs,p);
+}
+
+const Field& PressureMultigridGPU::coefficients(int level) const { return level==0?*fine_coefficients:levels[level].coefficients; }
+
+void PressureMultigridGPU::rebuild(const Field& fine)
+{
+    fine_coefficients=&fine;
+    const int last=int(levels.size())-1;
+    for (int i=1; i<=last; ++i) run(coarsen,i,{&levels[i].coefficients},{{"source",&coefficients(i-1)}});
+    run(factor,last,{&coarse_factor},{{"weights",&coefficients(last)}});
+    for (int i=tile_level; i>=0 && i<=last; ++i)
+    {
+        const auto& level=levels[i]; Parameters p;
+        p.grid={level.width,level.height,level.tile_offset,0};
+        compute.run(pack_coefficients,{&tile_coefficients},{{"source",&coefficients(i)}},p,{unsigned(level.width),unsigned(level.height),1});
+    }
+}
+
+void PressureMultigridGPU::smoothLevel(int index, const Field& rhs, bool reverse, bool from_zero, int sweep)
+{
+    auto& level=levels[index];
+    const bool polynomial=level.width*level.height>65536;
+    const int mode=polynomial?int(from_zero):int(reverse)+(from_zero?2:0);
+    const float weight=polynomial?smoothing_weights[reverse?smoothing_sweeps-1-sweep:sweep]:0.0f;
+    run(polynomial?polynomial_smooth:smooth_pair,index,{&level.next_solution},
+        {{"source",&level.solution},{"rhs",&rhs},{"weights",&coefficients(index)},{"rhs_stats",residual_stats}},mode,weight);
     level.solution.swap(level.next_solution);
 }
 
-void PressureMultigridGPU::cycle(int index, const Texture& rhs)
+void PressureMultigridGPU::cycle(int index, const Field& rhs)
 {
-    auto& fine = levels[index];
-    if (cpu_coarse && index == cpu_level)
+    auto& fine=levels[index];
+    if (index==tile_level)
     {
-        solveCPU(rhs);
+        // Execute the same coarse V-cycle locally, preserving every level and transfer weight.
+        Parameters p;
+        p.grid={fine.width,fine.height,0,int(levels.size())-index};
+        p.level={float(fine.spacing),index==0?float(fine.width*fine.height):0.f,float(levels.front().width),float(levels.front().height)};
+        for (int i=index; i<int(levels.size()); ++i)
+        {
+            const auto& l=levels[i];
+            p.vectors[i-index]={float(l.width),float(l.height),float(l.spacing),float(l.tile_offset)};
+            p.vectors[i-index+4]={float(l.prolong_offset),float(l.restrict_offset),float(std::max(l.width,l.height)),
+                i+1<int(levels.size())?float(std::max(levels[i+1].width,levels[i+1].height)):0.f};
+        }
+        compute.run(tile_cycle,{&fine.solution},{{"rhs",&rhs},{"rhs_stats",residual_stats},{"packed",&tile_coefficients},
+            {"maps",&tile_maps},{"factor",&coarse_factor}},p,{16,16,1});
         return;
     }
-    if (index + 1 == int(levels.size()))
+    if (index+1==int(levels.size()))
     {
-        run(coarse_solve, index, {&fine.solution}, {{"rhs", &rhs}, {"factor", &coarse_factor}, {"rhs_stats", residual_stats}});
+        run(coarse_solve,index,{&fine.solution},{{"rhs",&rhs},{"factor",&coarse_factor},{"rhs_stats",residual_stats}});
         return;
     }
-    auto& coarse = levels[index + 1];
-    smoothLevel(index, rhs, false, true, 0);
-    for (int sweep = 1; sweep < smoothing_sweeps; ++sweep) smoothLevel(index, rhs, false, false, sweep);
-    run(residual, index, {&fine.residual}, {{"source", &fine.solution}, {"rhs", &rhs},
-        {"coefficients", &coefficients(index)}, {"rhs_stats", residual_stats}});
-    const bool to_cpu = cpu_coarse && index + 1 == cpu_level;
-    if (to_cpu)
-        run(restrict_cpu, index, {&cpu_readback}, {{"source", &fine.residual}, {"maps", &fine.restrict_map}, {"rhs_stats", residual_stats}});
-    else run(restrict_pass, index, {&coarse.rhs}, {{"source", &fine.residual}, {"maps", &fine.restrict_map}});
-    cycle(index + 1, to_cpu ? cpu_readback : coarse.rhs);
-    if (cpu_converged) return;
-    run(prolong, index, {&fine.next_solution}, {{"source", &fine.solution}, {"coarse", &coarse.solution}, {"maps", &fine.prolong_map}});
+    auto& coarse=levels[index+1];
+    smoothLevel(index,rhs,false,true,0);
+    for (int sweep=1; sweep<smoothing_sweeps; ++sweep) smoothLevel(index,rhs,false,false,sweep);
+    run(residual,index,{&fine.residual},{{"source",&fine.solution},{"rhs",&rhs},{"weights",&coefficients(index)},{"rhs_stats",residual_stats}});
+    run(restrict_pass,index,{&coarse.rhs},{{"source",&fine.residual},{"maps",&fine.restrict_map}});
+    cycle(index+1,coarse.rhs);
+    run(prolong,index,{&fine.next_solution},{{"source",&fine.solution},{"coarse",&coarse.solution},{"maps",&fine.prolong_map}});
     fine.solution.swap(fine.next_solution);
-    for (int sweep = 0; sweep < smoothing_sweeps; ++sweep) smoothLevel(index, rhs, true, false, sweep);
+    for (int sweep=0; sweep<smoothing_sweeps; ++sweep) smoothLevel(index,rhs,true,false,sweep);
 }
 
-const Texture& PressureMultigridGPU::apply(const Texture& residual, const Texture& stats, float tolerance)
+const Field& PressureMultigridGPU::apply(const Field& residual, const Field& stats)
 {
-    residual_stats = &stats;
-    cpu_tolerance = tolerance;
-    cpu_converged = false;
-    cycle(0, residual);
-    return levels.front().solution;
+    residual_stats=&stats; cycle(0,residual); return levels.front().solution;
 }
 
-}
+} // namespace fluid::webgpu

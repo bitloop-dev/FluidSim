@@ -99,7 +99,7 @@ void uniformProtectionAndStability() {
 void nativeViews() {
     fluid::AmrGasRuntime runtime;
     FluidGrid source(32,32,.7); const auto state=configure(source);
-    fluid::AmrGas grid(32,32,.7,source.elements,source.gas_mixture,{2,{{{8,8,16,16}}}},8);
+    fluid::FluidGridAdaptive grid(32,32,.7,source.elements,source.gas_mixture,{2,{{{8,8,16,16}}}},8);
     grid.upload(state); Preview p; Preview::Tolerances t;
     const auto before=grid.totals();
     fluid::FluidCellView view(grid);

@@ -229,13 +229,13 @@ void FluidCoarseningPreview::update(const FluidGrid& grid,const Tolerances& t,co
     updateView(FluidCellView(grid),t,s,time,lookahead,2);
 }
 #ifdef FLUIDSIM_HAS_AMR
-FluidCoarseningPreview::Error FluidCoarseningPreview::estimate(const AmrGas& grid,int x,int y,int scale) {
+FluidCoarseningPreview::Error FluidCoarseningPreview::estimate(const FluidGridAdaptive& grid,int x,int y,int scale) {
     FluidCellView::MaterialPlane plane; return fineError(FluidCellView(grid),x,y,scale,plane);
 }
-void FluidCoarseningPreview::update(const AmrGas& grid,const Tolerances& t,const Stability& s,double time,double lookahead,int maxCellScale,Trace* trace) {
+void FluidCoarseningPreview::update(const FluidGridAdaptive& grid,const Tolerances& t,const Stability& s,double time,double lookahead,int maxCellScale,Trace* trace) {
     updateView(FluidCellView(grid),t,s,time,lookahead,maxCellScale,trace);
 }
-GasLayout FluidCoarseningPreview::proposeLayout(const AmrGas& grid,Trace* trace) const {
+GasLayout FluidCoarseningPreview::proposeLayout(const FluidGridAdaptive& grid,Trace* trace) const {
     if (trace) trace->fallback_scale=0;
     auto mark=[&](std::vector<std::uint8_t>& tags,int tile,int x0,int y0,int x1,int y1) {
         const int nx=(grid.finestWidth()+tile-1)/tile;
@@ -260,50 +260,55 @@ GasLayout FluidCoarseningPreview::proposeLayout(const AmrGas& grid,Trace* trace)
         if (observed) observed->padded=observed->nested=tags;
         return tags;
     };
+    std::vector<Requests> masks;
+    for (size_t lev=0;lev<assessments.size();++lev) {
+        const auto& level=assessments[lev];
+        masks.push_back({level.scale,requests(level,trace?&trace->levels[lev]:nullptr,std::max(16,level.scale))});
+    }
+    return clusterRequests(grid.finestWidth(),grid.finestHeight(),masks,trace);
+}
+GasLayout FluidCoarseningPreview::clusterRequests(int width,int height,const std::vector<Requests>& requests,Trace* trace) {
+    if (trace) trace->fallback_scale=0;
+    auto mark=[&](std::vector<std::uint8_t>& tags,int tile,int x0,int y0,int x1,int y1) {
+        const int nx=(width+tile-1)/tile;
+        for (int y=std::max(0,y0)/tile;y<=std::min(height-1,y1)/tile;++y)
+            for (int x=std::max(0,x0)/tile;x<=std::min(width-1,x1)/tile;++x) tags[y*nx+x]=1;
+    };
     auto cluster=[&](const std::vector<std::uint8_t>& tags,int tile) {
-        const int nx=(grid.finestWidth()+tile-1)/tile,ny=(grid.finestHeight()+tile-1)/tile;
+        const int nx=(width+tile-1)/tile,ny=(height+tile-1)/tile;
         std::vector<std::array<int,2>> points;
         for (int y=0;y<ny;++y) for (int x=0;x<nx;++x) if (tags[y*nx+x]) points.push_back({x,y});
         std::vector<GasPatch> patches;
         if (points.empty()) return patches;
         for (const auto& box:clusterAmrTags(std::move(points),.7)) {
             const int x=tile*box.smallEnd(0),y=tile*box.smallEnd(1);
-            patches.push_back({x,y,std::min(grid.finestWidth(),tile*(box.bigEnd(0)+1))-x,
-                                  std::min(grid.finestHeight(),tile*(box.bigEnd(1)+1))-y});
+            patches.push_back({x,y,std::min(width,tile*(box.bigEnd(0)+1))-x,
+                                  std::min(height,tile*(box.bigEnd(1)+1))-y});
         }
         return patches;
     };
     auto nearlyFull=[&](const std::vector<GasPatch>& patches) {
         int area=0; for (const auto& p:patches) area+=p.width*p.height;
-        return area>=3*grid.finestWidth()*grid.finestHeight()/4;
+        return area>=3*width*height/4;
     };
-    GasLayout layout{assessments.back().scale,{}};
-    // Build from fine to coarse so every child patch has valid parents for
-    // its two ghost layers and interpolation stencil at each 2:1 join.
-    for (size_t lev=0;lev<assessments.size();++lev) {
-        // Preserve 16-cell packing on fine levels. Coarser child patches must
-        // also align to whole parent cells for conservative 2:1 transfers.
-        const int tile=std::max(16,assessments[lev].scale);
-        auto* observed=trace?&trace->levels[lev]:nullptr;
-        auto tags=requests(assessments[lev],observed,tile);
-        const int buffer=assessments[lev].scale;
+    GasLayout layout{requests.back().scale,{}};
+    // Parent padding is topological; retained history never becomes a new detail source.
+    for (size_t lev=0;lev<requests.size();++lev) {
+        const auto& request=requests[lev];
+        const int tile=std::max(16,request.scale);
+        auto tags=request.tiles;
         if (!layout.refinedPatches.empty()) for (const auto& p:layout.refinedPatches.back())
-            mark(tags,tile,p.x-buffer,p.y-buffer,p.x+p.width+buffer-1,p.y+p.height+buffer-1);
-        if (observed) observed->nested=tags;
+            mark(tags,tile,p.x-request.scale,p.y-request.scale,p.x+p.width+request.scale-1,p.y+p.height+request.scale-1);
+        if (trace) trace->levels[lev].nested=tags;
         auto patches=cluster(tags,tile);
         if (nearlyFull(patches)) {
-            layout.baseRatio=assessments[lev].scale/2;
-            if (trace) {
-                trace->fallback_scale=layout.baseRatio;
-                for (size_t next=lev+1;next<assessments.size();++next)
-                    requests(assessments[next],&trace->levels[next],std::max(16,assessments[next].scale));
-            }
+            layout.baseRatio=request.scale/2;
+            if (trace) trace->fallback_scale=layout.baseRatio;
             break;
         }
         layout.refinedPatches.push_back(std::move(patches));
     }
     std::reverse(layout.refinedPatches.begin(),layout.refinedPatches.end());
-    // Empty finer lists are not physical levels; nesting guarantees they trail.
     while (!layout.refinedPatches.empty() && layout.refinedPatches.back().empty()) layout.refinedPatches.pop_back();
     return layout;
 }

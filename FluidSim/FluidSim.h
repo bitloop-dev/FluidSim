@@ -1,12 +1,19 @@
 #pragma once
 #include <bitloop.h>
 #include "FluidGrid.h"
+#include "FluidGridGPU.h"
+#include "FluidGridWebGL.h"
 #ifdef FLUIDSIM_HAS_AMR
-#include "AmrGas.h"
+#include "FluidGridAdaptive.h"
+#include "FluidGridAdaptiveGPU.h"
+#include "FluidCoarseningGPU.h"
 #include "AmrGasRuntime.h"
 #endif
 #include <memory>
+#include <optional>
 #include "FluidGridDisplay.h"
+#include "FluidShader.h"
+#include "FluidLiquidDepth.h"
 #include "FluidCoarseningPreview.h"
 #include <utility>
 
@@ -16,6 +23,8 @@ using namespace bl;
 using fluid::FluidGrid;
 using fluid::ElementId;
 using fluid::FluidGridDisplay;
+
+enum FluidEngine { CPU_UNIFORM, CPU_ADAPTIVE, GPU_UNIFORM, GPU_ADAPTIVE, GPU_WEBGL };
 
 enum ScenarioType
 {
@@ -40,17 +49,17 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     CameraNavigator  navigator;
 
     /// ─────── Variables ───────
-    int grid_w = 512;
-    int grid_h = 512;
+    int grid_w = 1024;
+    int grid_h = 720;
 
     std::vector<Scenario> scenarios = {
         {COSINE_WAVES, 0, 50, 0.04},
-        {CRASHING_WAVE, 40, 120, 0.08},
+        {CRASHING_WAVE, 40, 120, 0.04},
         {LOCAL_COARSE_PATCH, 0, 121, 0.08, 25},
         {MOVING_CLOUD_DETAIL, 0, 401, 0.08, 100}
     };
 
-    const int scenario_index = CRASHING_WAVE;
+    int scenario_index = CRASHING_WAVE;
 
     Scenario scenario = scenarios[scenario_index];
     bool gasScenario() const { return scenario.type==LOCAL_COARSE_PATCH || scenario.type==MOVING_CLOUD_DETAIL; }
@@ -67,25 +76,51 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
 
     fluid::ElementCatalogue elements;
     fluid::FluidMixture liquid_mixture, gas_mixture;
-    std::unique_ptr<FluidGrid> uniform;
+
+    std::unique_ptr<FluidGrid>             uniform_cpu;
+    std::unique_ptr<fluid::FluidGridGPU>   uniform_gpu;
+    std::unique_ptr<fluid::FluidGridWebGL> uniform_webgl;
+    FluidGridDisplay::MaterialTextures webgl_material{};
 #ifdef FLUIDSIM_HAS_AMR
+    std::unique_ptr<fluid::FluidGridAdaptive>    adaptive_cpu;
+    std::unique_ptr<fluid::FluidGridAdaptiveGPU> adaptive_gpu;
+    std::unique_ptr<fluid::FluidCoarseningGPU>   gpu_preview;
+
     std::unique_ptr<fluid::AmrGasRuntime> amr_runtime;
-    std::unique_ptr<fluid::AmrGas> gas;
 #endif
-    bool amr_native = false;
+
+    int engine_index = GPU_ADAPTIVE;
+
+    bool usesGPU() const { return engine_index >= GPU_UNIFORM; }
+    bool perlin_clouds = true;
+    fluid::FluidMaterialPixels gpu_material;
+    std::uint64_t gpu_labels_revision = ~std::uint64_t(0);
+    std::uint64_t gpu_preview_revision = 0;
+    double gpu_display_ms = 0, last_frame_ms = 0, initialization_ms = 0;
+    double last_frame_interval_ms = 0;
+    mutable double last_render_ms = 0;
+    bool profile_stages = true;
+    bool frame_stage_timings_available = false;
+    int frame_substeps = 0;
+    FluidGrid::StepTimings frame_physics_timings;
+    void prepareDisplay();
+    bool adaptive_engine = true;
     int amr_workers = 0;
     int simulated_cells = 0, allocated_cells = 0, simulation_blocks = 0, fine_patches = 0, level_count = 1;
-    int coarse_scale = 32; // maximum physical cell width in finest-cell units
+    int coarse_scale = 4; // maximum physical cell width in finest-cell units
     double last_divergence = 0;
     void updateCellCounts();
     std::uint32_t materialTexture() const;
+    FluidGridDisplay::MaterialTextures materialTextures() const;
+    fluid::FluidMixture displayMixture() const;
     std::uint32_t resolutionTexture() const;
     std::string failure_reason;
     double physics_seconds = 0, last_physics_ms = 0;
     double last_remap_ms = 0;
     int processed_frames = 0, patch_changes = 0;
 
-    float atmosphere_damping = scenario.type==MOVING_CLOUD_DETAIL ? 0.0f : 2.0f; // s^-1; zero disables damping
+    float atmosphere_damping = scenario.type==MOVING_CLOUD_DETAIL ? 0.0f : 0.0f; // s^-1; zero disables damping
+    double projection_tolerance = 1e-3;
     fluid::FluidCoarseningPreview coarsening_preview;
 
     // The wave trial accepts some cloud smoothing; liquid still stays at 1x1.
@@ -113,44 +148,11 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     ElementId red_element{};
     ElementId cloud_element{};
 
-    const char* fluid_shader_src = R"(
-        #version 300 es
-        precision highp float;
-
-        uniform sampler2D u_color;
-        uniform sampler2D u_coarsening;
-        uniform float u_coarsening_opacity;
-        uniform vec2 u_grid_size;
-        uniform sampler2D u_resolution;
-        uniform float u_mask_opacity;
-        in vec2 v_uv;
-        out vec4 outColor;
-        void main()
-        {
-            outColor = texture(u_color, v_uv);
-            vec2 cell = v_uv * u_grid_size;
-            if (u_coarsening_opacity > 0.0)
-            {
-                int label = int(round(255.0 * texelFetch(u_coarsening, ivec2(cell) / 2, 0).r));
-                vec3 fill = vec3(0.55); // unassessed block/physical edge
-                if (label == 2) fill = vec3(0.65, 0.3, 0.85); // protected liquid/buffer
-                if (label == 3) fill = vec3(1.0, 0.7, 0.05); // retain fine detail / wait for quiet
-                if (label == 4) fill = vec3(0.15, 0.85, 0.3); // candidate merge
-                if (label == 5) fill = vec3(1.0, 0.15, 0.15); // resolved coarse detail
-                if (label == 6) fill = vec3(1.0, 0.45, 0.05); // approaching feature
-                // No fill means no detected refinement trigger, not known lost detail.
-                if (label != 0) outColor.rgb = mix(outColor.rgb, fill, u_coarsening_opacity);
-            }
-            float scale = round(255.0 * texelFetch(u_resolution, ivec2(cell) / 2, 0).r);
-            vec3 tint = scale > 16.5 ? vec3(0.95, 0.25, 0.2) : scale > 8.5 ? vec3(0.1, 0.85, 0.9) : scale > 4.5 ? vec3(0.85, 0.3, 0.9) : scale > 2.5 ? vec3(0.95, 0.55, 0.15) : scale > 1.5 ? vec3(0.15, 0.8, 0.25) : vec3(0.15, 0.35, 0.95);
-            vec2 q = cell / scale;
-            vec2 edge = min(fract(q), 1.0 - fract(q));
-            vec2 line = 1.0 - smoothstep(vec2(0.0), fwidth(q) * 1.25, edge);
-            outColor.rgb = mix(outColor.rgb, tint, u_mask_opacity * max(line.x, line.y));
-        }
-    )";
-
     ShaderSurface surface;
+    fluid::FluidLiquidDepth liquid_depth_map;
+    bool liquid_depth_shading = true;
+    float liquid_depth_scale = 32.0f;
+    float liquid_deep_brightness = 0.16f;
     FluidGridDisplay fluid_display;
     static constexpr int display_scale = 3;
     bool resolution_overlay = true;
@@ -158,23 +160,51 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     mutable double last_display_ms = 0;
     void initializePool(double amplitude = 0.04);
     void restartSimulation();
-    void renderFluidSurface() const;
+    void renderFluidSurface(bool overlays = true) const;
 
 #ifdef BITLOOP_DEV_MODE
-    FluidGrid::StepTimings frame_physics_timings;
     int frame_pressure_iterations = 0;
     std::vector<double> initial_liquid_mass, initial_gas_mass;
     mutable CapturePreprocessor snapshot_preprocessor;
+    fluid::GasTotals gpu_totals;
+    fluid::FluidGridGPU::State uniform_gpu_state;
+    void inspectGPUState();
 #endif
 
     /// ─────── Methods ───────
     
 
     /// ─────── Launch config ───────
-    struct Config {};
+    struct Config {
+        std::optional<int> size, scenario, max_cell, engine, capture_stride;
+        std::optional<bool> webgpu, adaptive, coarse_control, clouds, profile_stages;
+        std::optional<double> damping, frame_time, velocity_tolerance, pressure_tolerance, density_tolerance, ingredient_tolerance, projection_tolerance;
+    };
 
-    FluidSim_Scene(Config& info [[maybe_unused]])
+    FluidSim_Scene(Config& info)
     {
+        if (info.size) grid_w=grid_h=*info.size;
+        if (info.scenario) scenario_index=*info.scenario;
+        scenario=scenarios[scenario_index];
+        if (info.frame_time) scenario.frame_time=*info.frame_time;
+        if (info.capture_stride) scenario.capture_stride=*info.capture_stride;
+        world_w=grid_w*cell_size; world_h=grid_h*cell_size;
+        if (info.scenario) atmosphere_damping=scenario.type==MOVING_CLOUD_DETAIL?0.f:2.f;
+        if (info.damping) atmosphere_damping=float(*info.damping);
+        if (info.projection_tolerance) projection_tolerance=*info.projection_tolerance;
+        refinement_lookahead=scenario.frame_time;
+        if (info.scenario) coarsening_tolerances=scenario.type==CRASHING_WAVE ? fluid::FluidCoarseningPreview::Tolerances{10.,10.,.5,.5} : fluid::FluidCoarseningPreview::Tolerances{};
+        if (info.velocity_tolerance) coarsening_tolerances.velocity=*info.velocity_tolerance;
+        if (info.pressure_tolerance) coarsening_tolerances.pressure_gradient=*info.pressure_tolerance;
+        if (info.density_tolerance) coarsening_tolerances.density=*info.density_tolerance;
+        if (info.ingredient_tolerance) coarsening_tolerances.ingredient=*info.ingredient_tolerance;
+        if (info.webgpu) engine_index=*info.webgpu ? GPU_ADAPTIVE : CPU_ADAPTIVE;
+        engine_index=info.engine.value_or(engine_index);
+        adaptive_grid=info.adaptive.value_or(adaptive_grid);
+        uniform_coarse=info.coarse_control.value_or(uniform_coarse);
+        perlin_clouds=info.clouds.value_or(perlin_clouds);
+        profile_stages=info.profile_stages.value_or(profile_stages);
+        coarse_scale=info.max_cell.value_or(coarse_scale);
         air_element = elements.add({
             "Air", {0.015f, 0.025f, 0.06f}
         });

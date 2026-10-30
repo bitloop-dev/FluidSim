@@ -39,6 +39,25 @@ template<class T> struct AmrArray2D {
     T& operator()(int i,int j,int n=0) const { return values[index(i,j)+n*plane]; }
 };
 
+// Geometry and addressing only, shared by CPU arrays and packed GPU storage.
+struct AmrFieldLayout2D {
+    struct Patch {
+        AmrBox2D box;
+        int ghosts, stride, plane, offset;
+        int index(int x,int y) const { return (y-box.y+ghosts)*stride+x-box.x+ghosts; }
+    };
+    int components=0, elements=0;
+    std::vector<Patch> patches;
+    AmrFieldLayout2D() = default;
+    AmrFieldLayout2D(const std::vector<AmrBox2D>& boxes,int count,int ghosts) : components(count) {
+        for (const auto& box:boxes) {
+            const int stride=box.width+2*ghosts, plane=stride*(box.height+2*ghosts);
+            patches.push_back({box,ghosts,stride,plane,elements});
+            elements+=plane*count;
+        }
+    }
+};
+
 template<class T> class AmrField2D {
 public:
     struct Patch { AmrBox2D box; int ghosts, plane; std::vector<T> values; };
@@ -52,6 +71,15 @@ public:
     int size() const { return int(data.size()); }
     int nComp() const { return count; }
     AmrBox2D box(int p) const { return data[p].box; }
+    AmrFieldLayout2D layout() const {
+        AmrFieldLayout2D result;
+        result.components=count;
+        for (const auto& p:data) {
+            result.patches.push_back({p.box,p.ghosts,p.box.width+2*p.ghosts,p.plane,result.elements});
+            result.elements+=p.plane*count;
+        }
+        return result;
+    }
     AmrArray2D<T> array(int p) { auto& a=data[p];return {a.values.data(),a.box.x-a.ghosts,a.box.y-a.ghosts,a.box.width+2*a.ghosts,a.plane}; }
     AmrArray2D<const T> const_array(int p) const { const auto& a=data[p];return {a.values.data(),a.box.x-a.ghosts,a.box.y-a.ghosts,a.box.width+2*a.ghosts,a.plane}; }
     void setVal(T value) { for(auto& p:data) std::fill(p.values.begin(),p.values.end(),value); }

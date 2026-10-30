@@ -10,7 +10,7 @@
 #include <numbers>
 #include <stdexcept>
 
-using fluid::AmrGas;
+using fluid::FluidGridAdaptive;
 using Preview=fluid::FluidCoarseningPreview;
 using Clock=std::chrono::steady_clock;
 namespace {
@@ -54,8 +54,8 @@ struct Fixture {
     Fixture(double contrast=1.) {
         mixture.components={{catalogue.add({"Air"}),.1},{catalogue.add({"Cloud"}),.1*contrast}};
     }
-    AmrGas::State state(int n,double world,double speed,bool cloudy=true) const {
-        AmrGas::State s;
+    FluidGridAdaptive::State state(int n,double world,double speed,bool cloudy=true) const {
+        FluidGridAdaptive::State s;
         const double h=world/n, pi=std::numbers::pi;
         s.gas_mass.assign(2,std::vector<double>(n*n));
         s.u.resize((n+1)*n); s.v.resize(n*(n+1));
@@ -85,7 +85,7 @@ void liquidTranslation() {
         state.liquid_fraction[i]=wet;state.liquid_mass[0][i]=wet?100.:0.;
         if(wet)for(auto& mass:state.gas_mass)mass[i]=0.;
     }
-    AmrGas grid(n,n,1.,f.catalogue,liquid,f.mixture,{4,{{{8,0,48,n}},{{16,0,32,n}}}});
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,liquid,f.mixture,{4,{{{8,0,48,n}},{{16,0,32,n}}}});
     grid.upload(state);const auto initial=grid.totals();
     // Prescribed interior translation isolates the geometric operator. Closed
     // end walls are far from the slab; their pure-gas split corrections cancel.
@@ -118,7 +118,7 @@ void liquidSliverRoundoff() {
     s.liquid_mass.assign(1,std::vector<double>(n*n,100.*(1.-8e-16)));
     s.liquid_fraction.assign(n*n,1.-8e-16);
     for(auto& mass:s.gas_mass)std::fill(mass.begin(),mass.end(),.1*5e-18);
-    AmrGas grid(n,n,1.,f.catalogue,liquid,f.mixture,{});grid.upload(s);
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,liquid,f.mixture,{});grid.upload(s);
     const auto initial=grid.totals();
     for(const auto& level:grid.levels())for(int patchIndex=0;patchIndex<level->velocity[0].size();++patchIndex) {
         auto u=level->velocity[0].array(patchIndex);
@@ -155,7 +155,7 @@ void transportTimeStep() {
                 for(auto& mass:state.gas_mass)mass[i]*=1.-fraction;
             }
         }
-        AmrGas grid(n,n,h,f.catalogue,liquid,f.mixture,{ratio,{}},16);grid.upload(state);
+        FluidGridAdaptive grid(n,n,h,f.catalogue,liquid,f.mixture,{ratio,{}},16);grid.upload(state);
         require(std::isinf(grid.stableTimeStep()),"Still transport should need no CFL subdivisions");
         auto& level=*grid.levels()[0];
         for(int d=0;d<2;++d)for(int patchIndex=0;patchIndex<level.velocity[d].size();++patchIndex) {
@@ -183,7 +183,7 @@ void transportTimeStep() {
         std::cout<<"transport_cfl,phases="<<(twoPhase?2:1)<<",cell_ratio="<<ratio<<",limit_gain="<<dt/oldLimit<<",PASS\n";
     }
     Fixture f;
-    AmrGas outgoing(n,n,h,f.catalogue,f.mixture,{},16);
+    FluidGridAdaptive outgoing(n,n,h,f.catalogue,f.mixture,{},16);
     outgoing.upload(f.state(n,n*h,0.));
     // A deliberately non-projected field checks that all four outgoing faces
     // count, even when signs oppose. Do not advance this diagnostic field.
@@ -195,7 +195,7 @@ void transportTimeStep() {
         });
     }
     require(std::abs(outgoing.stableTimeStep()/(.45*h/32.)-1.)<1e-12,"Opposing outgoing faces were cancelled or omitted");
-    AmrGas joined(n,n,h,f.catalogue,f.mixture,{2,{{{16,16,32,32}}}},16);
+    FluidGridAdaptive joined(n,n,h,f.catalogue,f.mixture,{2,{{{16,16,32,32}}}},16);
     joined.upload(f.state(n,n*h,0.));
     auto& fine=*joined.levels()[1];
     // Two opposing fine faces have zero signed coarse average. Preserve the
@@ -218,7 +218,7 @@ void subcycledLiquidStep() {
         for(auto& mass:s.gas_mass)mass[i]*=1.-fraction;
     }
     for(const fluid::GasLayout layout:{fluid::GasLayout{},fluid::GasLayout{4,{{{8,8,48,48}},{{16,16,32,32}}}}}) {
-        AmrGas grid(n,n,1.,f.catalogue,liquid,f.mixture,layout);grid.upload(s);
+        FluidGridAdaptive grid(n,n,1.,f.catalogue,liquid,f.mixture,layout);grid.upload(s);
         const auto initial=grid.totals();
         constexpr double dt=.12,tolerance=1e-9;
         require(dt>2.*grid.stableTimeStep(),"Subcycled liquid fixture needs several transport steps");
@@ -254,7 +254,7 @@ void liquidSelectionAndTransport(int steps=100) {
         s.liquid_mass[0][i]=100.*fraction*.75;s.liquid_mass[1][i]=300.*fraction*.25;
         for(auto& gas:s.gas_mass)gas[i]*=1.-fraction;
     }
-    AmrGas grid(n,n,1.,f.catalogue,liquid,f.mixture,{});grid.upload(s);
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,liquid,f.mixture,{});grid.upload(s);
     const auto initial=grid.totals();Preview preview;bool coarsened=false;
     for(int step=0;step<steps;++step) {
         if(step%10==0) {
@@ -288,7 +288,7 @@ bool fineAt(const fluid::GasLayout& layout,int x,int y) {
 }
 void selectionTraceIsObservation(int maximum=4) {
     Fixture f; constexpr int n=128;
-    AmrGas grid(n,n,1.,f.catalogue,f.mixture,{});
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{});
     auto state=f.state(n,n,.25,false);
     for (int y=0;y<n;++y) for (int x=0;x<n;++x) {
         const double cloud=std::hypot(x-40.,y-64.)<6?.9:.1;
@@ -319,7 +319,7 @@ void selectionTraceIsObservation(int maximum=4) {
 }
 void selectionCases() {
     Fixture f; constexpr int n=96;
-    AmrGas grid(n,n,1.,f.catalogue,f.mixture,{}); auto state=f.state(n,n,0.,false); grid.upload(state);
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{}); auto state=f.state(n,n,0.,false); grid.upload(state);
     Preview p; Preview::Tolerances t; Preview::Stability stability;
     p.update(grid,t,stability,0,.4,2);
     require(p.proposeLayout(grid).baseRatio==1,"Initial quiet dwell must retain fine data");
@@ -361,7 +361,7 @@ void selectionCases() {
 void staticSelectionSettles() {
     Fixture f;
     for(int n:{512,1024}) {
-    AmrGas grid(n,n,1.,f.catalogue,f.mixture,{}); grid.upload(f.state(n,n,0.));
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{}); grid.upload(f.state(n,n,0.));
     Preview p; int lateChanges=0,changes=0;
     for (int i=0;i<20;++i) {
         p.update(grid,{},{},i*.32,.4,2);
@@ -383,7 +383,7 @@ void materialSelectionConsistency() {
             const double share=.1+.004*(x+y+1);
             state.gas_mass[0][y*n+x]=.1*(1-share); state.gas_mass[1][y*n+x]=.1*share;
         }
-        AmrGas grid(n,n,1.,f.catalogue,f.mixture,initial); grid.upload(state);
+        FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,initial); grid.upload(state);
         Preview p; Preview::Tolerances t; t.ingredient=1e-10;
         p.update(grid,t,{1.,0.},0,0,2);
         for(int y=2;y<p.height-2;++y) for(int x=2;x<p.width-2;++x)
@@ -397,7 +397,7 @@ void materialSelectionConsistency() {
             const double share=x<n/2?.1:.9;
             state.gas_mass[0][y*n+x]=.1*(1-share); state.gas_mass[1][y*n+x]=.1*share;
         }
-        AmrGas grid(n,n,1.,f.catalogue,f.mixture,startCoarse?fluid::GasLayout{2,{}}:fluid::GasLayout{}); grid.upload(state);
+        FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,startCoarse?fluid::GasLayout{2,{}}:fluid::GasLayout{}); grid.upload(state);
         Preview p; int lateChanges=0;
         for(int check=0;check<32;++check) {
             p.update(grid,{},{},check*.32,.4,2);
@@ -414,7 +414,7 @@ void paddingDoesNotPropagate() {
     Fixture f; constexpr int n=128;
     const fluid::GasLayout layouts[]={{2,{{{48,48,16,16}}}},{2,{{{0,0,16,16},{96,96,16,16}}}}};
     for(const auto& initial:layouts) {
-        AmrGas grid(n,n,1.,f.catalogue,f.mixture,initial); grid.upload(f.state(n,n,0.,false));
+        FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,initial); grid.upload(f.state(n,n,0.,false));
         Preview p;
         // Exercise repeated checks within and beyond the quiet dwell. No flow
         // or material feature can justify spreading these initial fine patches.
@@ -432,7 +432,7 @@ void paddingDoesNotPropagate() {
     // A real feature still gets padding, and newly padded quiet cells cannot
     // propagate that padding after the feature has disappeared.
     const fluid::GasLayout initial{2,{{{48,48,16,16}}}};
-    AmrGas grid(n,n,1.,f.catalogue,f.mixture,initial); auto state=f.state(n,n,0.,false);
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,initial); auto state=f.state(n,n,0.,false);
     for(int y=48;y<64;++y) for(int x=48;x<64;++x) {
         const double share=x%2?.9:.1;
         state.gas_mass[0][y*n+x]=.1*(1-share); state.gas_mass[1][y*n+x]=.1*share;
@@ -450,6 +450,44 @@ void paddingDoesNotPropagate() {
     }
     std::cout<<"padding,PASS,quiet_retention_without_growth,real_detail_buffered\n";
 }
+void reconstructionContract() {
+    constexpr int offsets[5][2]={{0,0},{-1,0},{1,0},{0,-1},{0,1}};
+    for(double contrast:{1.,10.,1000.}) for(int tick=0;tick<64;++tick) for(bool constant:{false,true}) {
+        std::array<std::array<double,6>,5> values{};
+        std::array<double,2> low{1e30,1e30},high{-1e30,-1e30};
+        for(int side=0;side<5;++side) {
+            const int x=offsets[side][0],y=offsets[side][1];
+            const double share=.5+.06*x+.04*y;
+            values[side][2]=.1*(1-share);values[side][3]=.1*contrast*share;
+            const double rho=values[side][2]+values[side][3];
+            for(int d=0;d<2;++d) {
+                const double velocity=(d?-.3:.7)+(constant?0.:.4*std::sin(.17*tick+(d?y:x)*.8));
+                values[side][4+d]=rho*velocity;low[d]=std::min(low[d],velocity);high[d]=std::max(high[d],velocity);
+            }
+        }
+        auto sample=[&](int x,int y,int n){return values[x<0?1:x>0?2:y<0?3:y>0?4:0][n];};
+        const auto limiter=fluid::linearLimiter(4,sample);
+        require(std::abs(limiter.x-1.)<1e-13 && std::abs(limiter.y-1.)<1e-13,"Moving momentum extrema flattened smooth material");
+        const auto momentum=fluid::linearMomentumSlopes(4,sample,limiter);
+        std::array<double,6> average{};
+        for(double y:{-.5,-.25,.25,.5})for(double x:{-.5,-.25,.25,.5}) {
+            double rho=0.,volume=0.;
+            for(int n=0;n<4;++n) {
+                const auto slope=fluid::linearSlope(n,sample,limiter);const double q=sample(0,0,n)+x*slope.x+y*slope.y;
+                average[n]+=q/16.;rho+=q;volume+=q/(n<2?100.:n==2?.1:.1*contrast);
+                require(q>=0.,"Reconstruction made a negative ingredient");
+            }
+            require(std::abs(volume-1.)<1e-13,"Reconstruction broke the mixture volume identity");
+            for(int d=0;d<2;++d) {
+                const double m=sample(0,0,4+d)+x*momentum[d].x+y*momentum[d].y;average[4+d]+=m/16.;
+                require(m/rho>=low[d]-1e-13 && m/rho<=high[d]+1e-13,"Reconstruction overshot neighbouring velocity bounds");
+                if(constant)require(std::abs(m/rho-(d?-.3:.7))<1e-13,"Refinement changed constant velocity across density variation");
+            }
+        }
+        for(int n=0;n<6;++n)require(std::abs(average[n]-sample(0,0,n))<1e-12,"Reconstruction changed a conserved cell average");
+    }
+    std::cout<<"reconstruction,PASS,moving_extrema,volume,momentum,constant_velocity,velocity_bounds\n";
+}
 void representationContract() {
     constexpr int n=64;
     for(int scale:{2,4,8,16,32}) for(double contrast:{1.,10.}) for(int pattern=0;pattern<4;++pattern) {
@@ -458,7 +496,7 @@ void representationContract() {
             const double share=pattern==0?.5:pattern==1?.1+.006*(x+y+1):pattern==2?.5+.3*std::sin(.21*x)*std::cos(.17*y):(x+y)%2?.9:.1;
             state.gas_mass[0][y*n+x]=.1*(1-share); state.gas_mass[1][y*n+x]=.1*contrast*share;
         }
-        AmrGas grid(n,n,1.,f.catalogue,f.mixture,{}); grid.upload(state);
+        FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{}); grid.upload(state);
         std::vector<Preview::Error> estimates;
         for(int y=0;y<n;y+=scale) for(int x=0;x<n;x+=scale) estimates.push_back(Preview::estimate(grid,x,y,scale));
         grid.regrid({scale,{}});
@@ -506,7 +544,7 @@ void threeSizeSelection() {
         if (x>=32 && x<48 && y>=32 && y<48) share=(x+y)%2?.9:.1;
         state.gas_mass[0][y*n+x]=.1*(1-share); state.gas_mass[1][y*n+x]=.1*share;
     }
-    AmrGas grid(n,n,1.,f.catalogue,f.mixture,{}); grid.upload(state);
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{}); grid.upload(state);
     Preview p; p.update(grid,{},{1.,0.},0,.4,4);
     const auto layout=p.proposeLayout(grid);
     require(layout.baseRatio==4 && layout.refinedPatches.size()==2,"Separated detail must produce all three physical sizes");
@@ -543,7 +581,7 @@ void fourSizeSelection() {
         if(x>=32 && x<48 && y>=32 && y<48)share=(x+y)%2?.9:.1;
         state.gas_mass[0][y*n+x]=.1*(1-share);state.gas_mass[1][y*n+x]=.1*share;
     }
-    AmrGas grid(n,n,1.,f.catalogue,f.mixture,{});grid.upload(state);
+    FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{});grid.upload(state);
     const auto initial=grid.totals(); Preview p; Preview::Trace trace;
     p.update(grid,{},{1.,0.},0,.4,8,&trace);
     const auto layout=p.proposeLayout(grid,&trace);
@@ -589,7 +627,7 @@ void deeperSelection() {
             const double share=(x+y)%2?.9:.1;
             state.gas_mass[0][y*n+x]=.1*(1-share);state.gas_mass[1][y*n+x]=.1*share;
         }
-        AmrGas grid(n,n,1.,f.catalogue,f.mixture,{});grid.upload(state);
+        FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{});grid.upload(state);
         const auto initial=grid.totals();Preview p;Preview::Trace trace;
         p.update(grid,{},{1.,0.},0,.4,maximum,&trace);
         const auto layout=p.proposeLayout(grid,&trace);
@@ -632,7 +670,7 @@ void deeperSelection() {
 
         // Only the first quadrant changes; a truncated 64-bit footprint can
         // miss this while the later samples remain identical.
-        AmrGas history(n,n,1.,f.catalogue,f.mixture,{2,{{{64,64,16,16}}}});history.upload(f.state(n,n,0.,false));
+        FluidGridAdaptive history(n,n,1.,f.catalogue,f.mixture,{2,{{{64,64,16,16}}}});history.upload(f.state(n,n,0.,false));
         p.reset();p.update(history,{},{1.,.24},0,0,maximum);
         p.update(history,{},{1.,.24},.32,0,maximum,&trace);
         const int changed=(64/maximum)*trace.levels.back().width+64/maximum,unchanged=changed+1;
@@ -655,7 +693,7 @@ void velocityRepresentationContract() {
             const double share=pattern==1?.5:.5+.3*std::sin(.07*x)*std::cos(.11*y);
             state.gas_mass[0][y*n+x]=.1*(1-share); state.gas_mass[1][y*n+x]=.1*contrast*share;
         }
-        AmrGas grid(n,n,1.,f.catalogue,f.mixture,{child,{}}); grid.upload(state);
+        FluidGridAdaptive grid(n,n,1.,f.catalogue,f.mixture,{child,{}}); grid.upload(state);
         auto velocity=[&](double x,double y,int d) {
             if(pattern==0)return d?-.2:.4;
             if(pattern==1 || pattern==5)return d?-.01*(x-n*.5):.01*(y-n*.5);
@@ -713,7 +751,7 @@ void smoothCoarseningEvolution() {
     constexpr int n=256; Fixture f;
     const auto state=f.state(n,n,2.);
     for(int scale:{2,4}) {
-        AmrGas fine(n,n,1.,f.catalogue,f.mixture,{}),coarse(n,n,1.,f.catalogue,f.mixture,{});
+        FluidGridAdaptive fine(n,n,1.,f.catalogue,f.mixture,{}),coarse(n,n,1.,f.catalogue,f.mixture,{});
         fine.upload(state); coarse.upload(state);
         Preview preview; Preview::Trace trace;
         preview.update(fine,{},{},0.,0.,scale,&trace);
@@ -763,7 +801,7 @@ struct Measurement {
     std::vector<double> cloud,velocity;
 };
 Measurement run(int n,int steps,double world,bool adaptive,bool health,double contrast=1.,double ingredientTolerance=.02,int maxCellScale=2) {
-    Fixture f(contrast); AmrGas grid(n,n,world/n,f.catalogue,f.mixture,{});
+    Fixture f(contrast); FluidGridAdaptive grid(n,n,world/n,f.catalogue,f.mixture,{});
     auto initialState=f.state(n,world,health?.5:2.);
     if (health) for (int y=0;y<n;++y) for (int x=0;x<n;++x) {
         const double r=std::hypot((x+.5)/n-.35,(y+.5)/n-.35);
@@ -839,6 +877,7 @@ int main(int argc,char** argv) {
         bl::Thread::setMaxThreads(8); fluid::AmrGasRuntime runtime;
         std::cout<<"n,mode,contrast,steps,total_ms,physics_ms,selection_ms,remap_ms,peak_remap_ms,changes,active_fraction,allocated_fraction,mass_error,volume_error,divergence,status\n";
 
+        if(argc>1 && std::string(argv[1])=="reconstruction") { reconstructionContract(); representationContract(); velocityRepresentationContract(); return 0; }
         if(argc>1 && std::string(argv[1])=="velocity") { velocityRepresentationContract(); smoothCoarseningEvolution(); return 0; }
         if(argc>1 && std::string(argv[1])=="cfl") { transportTimeStep(); subcycledLiquidStep(); return 0; }
         if(argc>1 && (std::string(argv[1])=="liquid" || std::string(argv[1])=="liquid-short")) { liquidTranslation(); liquidSliverRoundoff(); subcycledLiquidStep(); liquidSelectionAndTransport(std::string(argv[1])=="liquid-short"?96:100); return 0; }
@@ -863,6 +902,7 @@ int main(int argc,char** argv) {
             staticSelectionSettles();
             materialSelectionConsistency();
             paddingDoesNotPropagate();
+            reconstructionContract();
             representationContract();
             velocityRepresentationContract();
             smoothCoarseningEvolution();

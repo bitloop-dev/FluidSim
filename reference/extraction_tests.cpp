@@ -1,4 +1,4 @@
-#include "../FluidSim/AmrGas.h"
+#include "../FluidSim/FluidGridAdaptive.h"
 #include "amrex/AmrGas.h"
 #include "amrex/AmrGasRuntime.h"
 #include <AMReX_Cluster.H>
@@ -8,7 +8,7 @@
 #include <random>
 #include <stdexcept>
 
-using fluid::AmrGas;
+using fluid::FluidGridAdaptive;
 using Upstream=fluid::reference::AmrGas;
 namespace {
 void require(bool value,const char* message) {if(!value)throw std::runtime_error(message);}
@@ -39,14 +39,14 @@ void match(fluid::AmrField2D<double>& own,const amrex::MultiFab& ref) {
         fluid::forCells(own.box(p),own.nComp(),[&](int x,int y,int n){a(x,y,n)=b(x,y,0,n);});
     }
 }
-void matchState(AmrGas& own,const Upstream& ref) {
+void matchState(FluidGridAdaptive& own,const Upstream& ref) {
     for(int lev=0;lev<int(own.levels().size());++lev) {
         auto& a=*own.levels()[lev];const auto& b=*ref.levels()[lev];
         match(a.conserved,b.conserved);match(a.pressure,b.pressure);
         for(int d=0;d<2;++d)match(a.velocity[d],b.velocity[d]);
     }
 }
-double stateError(const AmrGas& own,const Upstream& ref,bool faces=true,int ghosts=0) {
+double stateError(const FluidGridAdaptive& own,const Upstream& ref,bool faces=true,int ghosts=0) {
     double error=0.;
     for(int lev=0;lev<int(own.levels().size());++lev) {
         const auto& a=*own.levels()[lev];const auto& b=*ref.levels()[lev];
@@ -89,7 +89,7 @@ void engine(bool liquid,double contrast,int ingredients) {
     fluid::FluidMixture gas,water;
     for(int k=0;k<ingredients;++k)gas.components.push_back({catalogue.add({"gas"}),k==0?.1:.1*contrast});
     if(liquid)water.components.push_back({catalogue.add({"water"}),100.});
-    AmrGas::State state;
+    FluidGridAdaptive::State state;
     state.gas_mass.assign(ingredients,std::vector<double>(n*n));
     if(liquid){state.liquid_mass.assign(1,std::vector<double>(n*n));state.liquid_fraction.resize(n*n);}
     state.u.resize((n+1)*n);state.v.resize(n*(n+1));
@@ -105,7 +105,7 @@ void engine(bool liquid,double contrast,int ingredients) {
     }
     const std::vector<fluid::GasLayout> layouts{{},{4,{{{0,16,112,112}},{{16,32,80,80}}}},{32,{}},
         {32,{{{0,0,128,128}},{{0,0,128,128}},{{0,0,128,128}},{{8,8,112,112}},{{24,24,80,80}}}}, {}};
-    AmrGas own(n,n,1.,catalogue,water,gas,{},32);
+    FluidGridAdaptive own(n,n,1.,catalogue,water,gas,{},32);
     Upstream ref(n,n,1.,catalogue,water,gas,{},32);
     own.upload(state,1e-10);ref.upload(state,1e-10);
     double projection=stateError(own,ref),transfer=0.,transport=0.,ghost=0.;
