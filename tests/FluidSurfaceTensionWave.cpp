@@ -1,5 +1,5 @@
 // Evolving benchmark of the actual scene, including its initializer and frame scheduling.
-#include "FluidSim.h"
+#include "scenarios/CrashingWave.h"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -11,8 +11,8 @@ using namespace bl;
 namespace fs = std::filesystem;
 struct WaveProject : BasicProject
 {
-    SceneHandle<FluidSim::FluidSim_Scene> source;
-    void projectPrepare(Layout&) override { source = create<FluidSim::FluidSim_Scene>(); }
+    SceneHandle<FluidSim::CrashingWave> source;
+    void projectPrepare(Layout&) override { source = create<FluidSim::CrashingWave>(); }
 };
 
 void compareUniformBackends(const std::string& prefix)
@@ -106,8 +106,8 @@ void compareUniformBackends(const std::string& prefix)
     };
     for (int frame = 1; frame <= 200; ++frame)
     {
-        cpu.viewportProcess(nullptr, .02);
-        gpu.viewportProcess(nullptr, .02);
+        cpu.sceneProcess(.02);
+        gpu.sceneProcess(.02);
         if (cpu.simulation_failed || gpu.simulation_failed) throw std::runtime_error("Paired wave failed at frame " + std::to_string(frame));
         if (cpu.frame_statistics.substeps != gpu.frame_statistics.substeps)
             throw std::runtime_error("CPU/GPU physical subdivision differs");
@@ -191,8 +191,7 @@ int main(int argc, char** argv)
                     scene.world_h * (.55 + .2 * std::cos(angle))
                 };
             }
-            // The headless fixture has no mounted viewport; invoke the scene's actual update.
-            scene.viewportProcess(nullptr, .02);
+            project.processHeadlessFrame(.02);
             if (scene.simulation_failed) throw std::runtime_error("Wave projection failed at frame " + std::to_string(frame));
             const auto& t = scene.frame_statistics;
             if (t.substeps == 0) throw std::runtime_error("Wave fixture did not advance the actual scene");

@@ -1,4 +1,4 @@
-#include "FluidSim.h"
+#include "scenarios/CrashingWave.h"
 #include "MouseAttraction.h"
 #ifndef __EMSCRIPTEN__
 #include "FluidAppearanceTests.h"
@@ -20,13 +20,13 @@ void require(bool condition, const char* message)
 
 struct TestProject : BasicProject
 {
-    SceneHandle<FluidSim::FluidSim_Scene> source;
+    SceneHandle<FluidSim::CrashingWave> source;
     bool mount_scene = false;
     Viewport* viewport = nullptr;
 
     void projectPrepare(Layout& layout) override
     {
-        source = create<FluidSim::FluidSim_Scene>();
+        source = create<FluidSim::CrashingWave>();
         if (mount_scene)
             viewport = &layout.add(source, "main");
     }
@@ -82,7 +82,8 @@ void drop(TestProject& project, const fs::path& path)
     event.type = EventType::DROP_FILE;
     event.drop.data = path.string();
     project.queueHeadlessInputEvent(event);
-    project.processHeadlessFrame(.02);
+    // Dispatch the drop without advancing the state we are comparing.
+    project.processHeadlessFrame(0.);
 }
 
 void run(const fs::path& root)
@@ -159,9 +160,14 @@ void run(const fs::path& root)
     drop(project, root / "truncated.webp");
     assertUnchanged();
     broken = saved;
-    broken.scene["scene_elements"][0] = 999;
+    broken.scene["scenario_state"]["elements"][0] = 999;
     writeImage(root / "bad-element.webp", broken);
     drop(project, root / "bad-element.webp");
+    assertUnchanged();
+    broken = saved;
+    broken.scene["scenario"] = "another-scenario";
+    writeImage(root / "wrong-scenario.webp", broken);
+    drop(project, root / "wrong-scenario.webp");
     assertUnchanged();
     broken = saved;
     broken.scene["projection_tolerance"] = 0;

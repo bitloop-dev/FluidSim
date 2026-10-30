@@ -1,5 +1,5 @@
 #pragma once
-#include "FluidSim.h"
+#include "scenarios/CrashingWave.h"
 #include <SDL3/SDL.h>
 #include <glad/glad.h>
 #include <fstream>
@@ -9,8 +9,8 @@ namespace fluid::test
 {
 struct AppearanceProject : bl::BasicProject
 {
-    bl::SceneHandle<FluidSim::FluidSim_Scene> source;
-    void projectPrepare(bl::Layout&) override { source = create<FluidSim::FluidSim_Scene>(); }
+    bl::SceneHandle<FluidSim::CrashingWave> source;
+    void projectPrepare(bl::Layout&) override { source = create<FluidSim::CrashingWave>(); }
 };
 
 inline void liquidAppearance(const std::filesystem::path& output, const std::filesystem::path& saved_wave = {})
@@ -60,7 +60,7 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
 
     FluidGridDisplay display;
     bl::ShaderSurface surface;
-    surface.setFragmentSource(FluidSim::FluidSim_Scene::fluid_shader_src);
+    surface.setFragmentSource(FluidSim::CrashingWave::fluid_shader_src);
     auto render = [&](int w, int h, const std::vector<float>& rgba, float range = 4.f, float brightness = .6f)
     {
         surface.render(w, h, [&](const bl::ShaderSurface& shader)

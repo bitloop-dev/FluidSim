@@ -4,7 +4,9 @@ Stage 1 geometric material transport and Stage 2 consistent mass/momentum transp
 
 The engines use the component system: configure the element catalogue and liquid/gas mixtures, then upload component masses alongside `liquid_fraction`, the total liquid volume fraction. Density, momentum and displayed colours come from those masses. Engine geometry uses liquid/gas terminology; Water, Red, Air and Cloud are scene ingredients. Several miscible ingredients share each phase's geometry; adding an ingredient does not add another interface reconstruction or pressure solve.
 
-The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas ingredient. Air and Cloud share density 0.1; three fixed Perlin scales divide the initial gas volume between them. Noise is evaluated only in `initializePool()`, then ordinary component transport carries the clouds. This visualizes atmospheric flow without adding condensation or evaporation physics.
+The CrashingWave scenario initializes blue Water and Red liquid, plus Air and a cyan Cloud gas ingredient. Air and Cloud share density 0.1; three fixed Perlin scales divide the initial gas volume between them. Noise is evaluated only in `CrashingWave::initialFluidState()`, then ordinary component transport carries the clouds. This visualizes atmospheric flow without adding condensation or evaporation physics.
+
+SplashCubes uses the same Perlin gas distribution with black Air and white Cloud. Two initially stationary liquid squares sit side by side around the domain centre: red on the left, blue on the right, each side 30% of the shorter domain dimension with a 6% gap. Exact rectangle/cell overlap supplies partial edge cells. Water/Red retain the existing colours and densities 10/30, gas density remains 0.1, and the default 1024x720 grid, gravity 500, surface tension 20000 and timing policy match CrashingWave. The closed bottom wall supplies the ground; ordinary fluid transport/projection produces the fall, splash and miscible-liquid mixing.
 
 ## Where things belong
 
@@ -31,12 +33,49 @@ The scene initializes blue Water and Red liquid, plus Air and a cyan Cloud gas i
 | `FluidSim/FluidSnapshot.h/.cpp` | Versioned WebP XMP envelope, Brotli-1/base64 checkpoint packet and native RGBA conversion |
 | `FluidSim/FluidGridEdit.h` | Staged replacements, validation and sparse commit ordering |
 | `FluidSim/FluidGridDisplay.h/.cpp` | Render-thread adapter consuming common derived colours, plus legacy GPU texture overload |
-| `FluidSim/FluidSim.h/.cpp` | Scene initialization, timing, failure reporting, camera, rendering and captures |
+| `FluidSim/FluidSim.h/.cpp` | Project controls and scene/viewport declarations |
+| `FluidSim/FluidScene.h/.inl` | Shared scene state, lifecycle, timing, failure reporting, camera, rendering and captures |
+| `FluidSim/FluidSceneUI.inl` | Shared buffered sidebar controls, instantiated for each concrete scenario |
+| `FluidSim/scenarios/CrashingWave.h/.cpp` | Wave defaults, material catalogue, initial state and scenario snapshot data |
+| `FluidSim/scenarios/SplashCubes.h/.cpp` | Centred falling squares, black/white atmosphere and scenario snapshot data |
+| `FluidSim/scenarios/PerlinAtmosphere.h` | Shared initial three-scale gas pattern; no ongoing noise forcing |
 | `tests/FluidGridTests.cpp` | Existing direct FluidGridCPU numerical regressions |
 | `tests/FluidGridAPITests.cpp` | Common configuration, exact CPU/wrapper/base state and step parity, edits, colours and failure forwarding |
 | `tests/FluidGridWebGLTests.cpp` | Retained legacy GPU/CPU and display comparisons in a hidden graphics context |
 
 `FluidSimEngine` is the project-local library shared by the scene and CPU/API tests. It depends on Bitloop's vector type and thread pool, with no Scene, camera, OpenGL or UI code. The existing CPU numerical implementation is renamed to `FluidGridCPU`; its function bodies are unchanged. Palette colour calculation moved from the display adapter to a read-only CPU operation, with its original arithmetic and traversal. Packaging the engine separately remains a later decision.
+
+## Scene structure
+
+`FluidScene<Derived>` inherits `bl::Scene<Derived>` so Bitloop constructs the concrete scenario's UI and buffers both inherited and scenario-specific members. Each instance owns its grid, settings, display resources, camera and clocks. The project's **Scenario** selector chooses Splash Cubes (the default) or Crashing Wave; the viewport-count control creates independent instances of the selected scenario on project start. Existing instance IDs remain `scene-0`, `scene-1`, etc. Each scenario's `Config::settings` holds its own initial values.
+
+Define a scenario in `FluidSim/scenarios/`, derive from `FluidScene<MyScenario>`, supply a stable `scenario_id`, and give it a display `name()`. Its `Config` derives from the base launch config and supplies `FluidSceneSettings`; the scenario constructor passes these to the base and configures its material catalogue. `CrashingWave::Config::settings` is the place to change its initial resolution, gravity and tension. Passing a different config to `create<CrashingWave>(id, config)` creates another independently configured instance.
+
+Implement `initialFluidState()` to supply material and velocity arrays. The shared startup/restart path uploads them, observes display colours, resets clocks/statistics and reports failures. Startup, stepping and common cleanup are final lifecycle hooks. Optional `beforeFluidFrame(dt)` runs on the fluid owner once per simulated scene frame, before the common substeps; `dt` is the selected simulation frame time. The engine still owns each ordered physical substep. Scene-specific resource cleanup can use Bitloop's `sceneStop()`.
+
+Physics advances in `sceneProcess()`, once per project frame, including scenes without a viewport. `viewportProcess()` does not advance physics. Mounting a second view of a scene therefore does not double its simulation speed. Instances still share Bitloop's project scheduler and frame budget.
+
+The inherited UI is sufficient when a scenario needs only common controls. To add controls, derive its nested `UI` from `Base::UI`, inherit the constructor, and call the common sidebar:
+
+```cpp
+struct UI : Base::UI
+{
+    using Base::UI::UI;
+    void sidebar() override
+    {
+        Base::UI::sidebar();
+        // Scenario controls use bl_scoped / bl_schedule as usual.
+    }
+};
+```
+
+`drawScenario(viewport)` adds world-space drawing after the fluid surface. `viewportDraw()` and `renderFluidSurface()` can also be overridden; the latter is shared by viewport and native-image rendering. Native captures omit viewport annotations by default. Override `captureFluidImage()` for a custom capture image while keeping the shared checkpoint envelope. Capture scheduling remains project-owned.
+
+Scene snapshot payload version **2** records `scenario` and a separate `scenario_state`. Both scenarios store their ingredient IDs there. Override `captureScenarioState()`, `validateScenarioState()` and `restoreScenarioState()` for additional persistent state. Validation runs against the replacement grid before the live simulation changes; restore only commits already validated values. Wrong-scenario images and old version-1 scene payloads are rejected explicitly; the backend checkpoint format is unchanged.
+
+`FluidSceneTests` checks four independent wave instances against direct engine stepping, zero/two-view scheduling, isolated restart, concrete buffered UI construction/edits, shared-sidebar extension, owner-scheduled actions, and custom image/state capture. `FluidSnapshotSceneTests` covers invalid/wrong-scenario payload rejection and the existing native rendering checks. The extraction also retained exact native checkpoint bytes and raw images after a matched 200-frame/4-second production wave run.
+
+`FluidSplashCubesTests` checks exact initial liquid volumes, separated/centred squares, zero velocities, original liquid colours and matching Perlin gas proportions on rectangular, odd and portrait grids. Its optional `<output-directory> <frames>` arguments run the production WebGPU scene with per-frame finite-state, fraction, mass and phase-consistency checks and selected shaded images; the evolving check requires floor contact and mixed-liquid cells.
 
 ## Liquid appearance
 
@@ -80,7 +119,7 @@ Direct fused/separate shader checks cover both axes, pure/mixed fractions, froze
 
 `setSurfaceTension(sigma)` / `getSurfaceTension()` select a constant liquid-gas coefficient in scene units. Zero is the engine default and preserves the original numerical path; the scene supplies its own initial coefficient below. Both CPU/DISABLED and GPU/DISABLED support nonzero values and the scene control. Adaptive backends reject them, including pre-upload backend changes that would discard an enabled coefficient. No ingredient-to-ingredient tension, viscosity, bubble deletion or ambient-pressure replacement is introduced.
 
-The scene exposes **Surface Tension** beside Pressure Quality, committing nonnegative finite values on Enter/blur through the simulation owner. Set the single scenario's initial physics values in `FluidSim_Scene`'s member initializers in `FluidSim.h`: `surface_tension`, `gravity_y` (positive down), `projection_tolerance`, grid dimensions and timestep policy. The constructor forwards gravity and tension to the selected engine; launch config does not contain duplicate physics settings. Engine member defaults are library defaults, not scene controls: backend selection preserves the current backend's settings, which can override a newly constructed GPU backend's defaults. Launch config currently handles checkpoint storage and image resume. Restart retains live settings; checkpoint/image restore intentionally restores saved gravity and tension. Rebuild/relaunch after editing source defaults; Restart alone does not reload C++ source.
+The scene exposes **Surface Tension** beside Pressure Quality, committing nonnegative finite values on Enter/blur through the simulation owner. Set initial physics values through each scenario's `Config::settings` in `scenarios/CrashingWave.h` or `scenarios/SplashCubes.h`: `surface_tension`, `gravity_y` (positive down), `projection_tolerance`, grid dimensions and timestep policy. The base constructor forwards gravity and tension to the selected engine. Engine member defaults are library defaults, not scene controls: backend selection preserves the current backend's settings, which can override a newly constructed GPU backend's defaults. The CLI launch-config parser currently exposes checkpoint storage and image resume only. Restart retains live settings; checkpoint/image restore intentionally restores saved gravity and tension. Rebuild/relaunch after editing source defaults; Restart alone does not reload C++ source.
 
 The retained crashing-wave benchmark used1024x720, dx1, gravity100, liquid densities100/300, gas density.1 and two .01 steps per .02 frame. A useful trial coefficient was10000; pressure tolerance.1 balanced weak tension more accurately than the then-selected tolerance1. These are the recorded benchmark settings, independent of later scenario edits.
 
@@ -125,7 +164,7 @@ An active acceleration field replaces `gravity_y`; values use simulation distanc
 
 Each complete physics substep averages adjacent cell accelerations onto U/V faces and adds `dt * acceleration` before pressure projection. CPU performs this calculation in double, WebGPU in float; both consume the field's float samples. Closed-wall normal faces remain zero. The same stored field applies to every CPU or WebGPU capillary subdivision; transport-only CFL subdivisions retain their existing behavior. Native `applyGravity()` remains the legacy uniform-only granular operation. Field generation is explicit, so a scene controls when its formula/parameters change; pressure still determines the resulting incompressible motion.
 
-The example lives in `FluidSim/MouseAttraction.h`, separate from engine kernels, with equivalent CPU and WGSL formulas. **Mouse attraction** is available on both uniform backends. The target follows camera-transformed pointer coordinates; leaving the viewport keeps the last target. Disable it to return to `gravity_y`. Initial enable/strength/positive softening radius live beside gravity/tension in `FluidSim.h`; no launch-config override. The scene owns its field and producer, generates once per frame, and retains its target/parameters in supported snapshots. CPU uses its callback directly, without a WebGPU context.
+The example lives in `FluidSim/MouseAttraction.h`, separate from engine kernels, with equivalent CPU and WGSL formulas. **Mouse attraction** is available on both uniform backends. The target follows camera-transformed pointer coordinates; leaving the viewport keeps the last target. Disable it to return to `gravity_y`. Initial enable/strength/positive softening radius live in `FluidScene.h`; a scenario can set these inherited members in its constructor. There is no launch-config override. The scene owns its field and producer, generates once per frame, and retains its target/parameters in supported snapshots. CPU uses its callback directly, without a WebGPU context.
 
 For example, after grid initialization:
 
