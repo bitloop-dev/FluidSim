@@ -1,40 +1,17 @@
 #include "CrashingWave.h"
 #include "PerlinAtmosphere.h"
+#include "ChemicalMaterials.h"
 
 SIM_BEG;
 
 CrashingWave::CrashingWave(const Config& config) : Base(config.settings, config)
 {
-    fluid::ElementCatalogue elements;
-    fluid::FluidMixture liquid_mixture, gas_mixture;
-
-    air_element = elements.add({
-        "Air", {0.015f, 0.025f, 0.06f}
-    });
-
-    water_element = elements.add({
-        "Water", {0.1f, 0.35f, 1.0f}
-    });
-
-    red_element = elements.add({
-        "Red fluid", {0.95f, 0.25f, 0.15f}
-    });
-
-    cloud_element = elements.add({
-        "Cloud", {0.0f, 1.0f, 1.0f}
-    });
-
-    liquid_mixture.components = {
-        {water_element, 10.0},
-        {red_element, 30.0}
-    };
-
-    const double atmosphere_density = 0.1;
-    gas_mixture.components = {
-        {air_element, atmosphere_density},
-        {cloud_element, atmosphere_density}
-    };
-    fluid.configureMaterials(std::move(elements), std::move(liquid_mixture), std::move(gas_mixture));
+    ChemicalMaterials materials({.015f, .025f, .06f}, {0.f, 1.f, 1.f});
+    hydrogen_substance = materials.hydrogen;
+    water_substance = materials.water;
+    glycerol_substance = materials.glycerol;
+    helium_substance = materials.helium;
+    fluid.configureMaterials(std::move(materials.substances), std::move(materials.liquid), std::move(materials.gas));
 }
 
 FluidGrid::State CrashingWave::initialFluidState() const
@@ -69,7 +46,7 @@ FluidGrid::State CrashingWave::initialFluidState() const
 
             initial.liquid_fraction[i] = Scalar(fraction);
 
-            // Fill the left quarter's liquid with Red; use Water elsewhere.
+            // Fill the left quarter's liquid with glycerol; use water elsewhere.
             const double red_share = x < fluid.getWidth() / 4 ? 1.0 : 0.0;
 
             for (size_t k = 0; k < fluid.getLiquidMixture().components.size(); ++k)
@@ -78,9 +55,9 @@ FluidGrid::State CrashingWave::initialFluidState() const
 
                 double share = 0.0;
 
-                if (component.element == water_element)
+                if (component.substance == water_substance)
                     share = 1.0 - red_share;
-                else if (component.element == red_element)
+                else if (component.substance == glycerol_substance)
                     share = red_share;
 
                 // Split the existing liquid volume between its ingredients.
@@ -95,12 +72,12 @@ FluidGrid::State CrashingWave::initialFluidState() const
                 const auto& component = fluid.getGasMixture().components[k];
 
                 double share = 0.0;
-                if (component.element == air_element)
+                if (component.substance == hydrogen_substance)
                     share = 1.0 - cloud_share;
-                else if (component.element == cloud_element)
+                else if (component.substance == helium_substance)
                     share = cloud_share;
 
-                // Clouds replace air within the existing gas volume.
+                // Helium replaces hydrogen within the existing gas volume.
                 initial.gas_mass[k][i] =
                     Scalar(component.density * (1.0 - fraction) * cell_volume * share);
             }
@@ -112,24 +89,24 @@ FluidGrid::State CrashingWave::initialFluidState() const
 
 JSON::json CrashingWave::captureScenarioState() const
 {
-    return {{"elements", {air_element, water_element, red_element, cloud_element}}};
+    return {{"substances", {hydrogen_substance, water_substance, glycerol_substance, helium_substance}}};
 }
 
 void CrashingWave::validateScenarioState(const JSON::json& state, const FluidGrid& restored) const
 {
-    const auto ids = state.at("elements").get<std::array<fluid::ElementId, 4>>();
+    const auto ids = state.at(state.contains("substances") ? "substances" : "elements").get<std::array<fluid::SubstanceId, 4>>();
     for (const auto id : ids)
-        if (id >= restored.getElements().size())
-            throw std::runtime_error("Invalid saved CrashingWave element");
+        if (id >= restored.getSubstances().size())
+            throw std::runtime_error("Invalid saved CrashingWave substance");
 }
 
 void CrashingWave::restoreScenarioState(const JSON::json& state)
 {
-    const auto ids = state.at("elements").get<std::array<fluid::ElementId, 4>>();
-    air_element = ids[0];
-    water_element = ids[1];
-    red_element = ids[2];
-    cloud_element = ids[3];
+    const auto ids = state.at(state.contains("substances") ? "substances" : "elements").get<std::array<fluid::SubstanceId, 4>>();
+    hydrogen_substance = ids[0];
+    water_substance = ids[1];
+    glycerol_substance = ids[2];
+    helium_substance = ids[3];
 }
 
 SIM_END;

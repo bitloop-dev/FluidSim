@@ -337,13 +337,13 @@ void zeroTimeAndFailedProjectionAreHandled()
 void miscibleComponentsConserveMassAndVolume()
 {
     FluidGridCPU grid(32, 32, 2.0);
-    const auto water = grid.elements.add({"Water"});
-    const auto red = grid.elements.add({"Red"});
-    const auto heavy = grid.elements.add({"Heavy"});
-    const auto unused = grid.elements.add({"Unused"});
-    const auto air = grid.elements.add({"Air"});
+    const auto water = grid.substances.add({"Water"});
+    const auto red = grid.substances.add({"Red"});
+    const auto heavy = grid.substances.add({"Heavy"});
+    const auto unused = grid.substances.add({"Unused"});
+    const auto air = grid.substances.add({"Air"});
     grid.liquid_mixture.components = {{water, 100.0}, {red, 100.0}, {heavy, 200.0}, {unused, 1000.0}};
-    // The same element can occupy either phase without sharing its mass field.
+    // The same substance can occupy either phase without sharing its mass field.
     grid.gas_mixture.components = {{air, 0.1}, {water, 0.2}};
     FluidGridCPU::State state;
     const size_t count = size_t(grid.width) * grid.height;

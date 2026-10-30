@@ -1,7 +1,7 @@
 #pragma once
 #include "FluidGridTypes.h"
 #include "FluidGridEdit.h"
-#include "ElementCatalogue.h"
+#include "SubstanceCatalogue.h"
 #include "FluidMixture.h"
 #include "FluidCheckpoint.h"
 #include "FluidField.h"
@@ -36,8 +36,8 @@ public:
     virtual bool requiresRenderThread() const = 0;
 
     // Configure membership/order before upload; changing mixtures requires another upload.
-    virtual void configureMaterials(ElementCatalogue elements, FluidMixture liquid, FluidMixture gas) = 0;
-    virtual const ElementCatalogue& getElements() const = 0;
+    virtual void configureMaterials(SubstanceCatalogue substances, FluidMixture liquid, FluidMixture gas) = 0;
+    virtual const SubstanceCatalogue& getSubstances() const = 0;
     virtual const FluidMixture& getLiquidMixture() const = 0;
     virtual const FluidMixture& getGasMixture() const = 0;
     virtual double getGravityY() const = 0;

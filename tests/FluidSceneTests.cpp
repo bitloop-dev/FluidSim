@@ -58,7 +58,7 @@ void checkIndependentWaves()
         auto& scene = *project.waves[i];
         scene.profile_stages = false;
         controls[i] = std::make_unique<fluid::FluidGrid>(scene.grid_w, scene.grid_h, scene.cell_size);
-        controls[i]->configureMaterials(scene.fluid.getElements(),
+        controls[i]->configureMaterials(scene.fluid.getSubstances(),
             scene.fluid.getLiquidMixture(), scene.fluid.getGasMixture());
         controls[i]->setGravityY(scene.gravity_y);
         controls[i]->upload(scene.fluid.download());
@@ -107,10 +107,10 @@ struct ExtensionScene : FluidSim::FluidScene<ExtensionScene>
     explicit ExtensionScene(const Config& config)
         : Base({.grid_w = 16, .grid_h = 12}, config)
     {
-        fluid::ElementCatalogue elements;
-        const auto liquid = elements.add({"Liquid", {0, 0, 1}});
-        const auto gas = elements.add({"Gas", {0, 0, 0}});
-        fluid.configureMaterials(std::move(elements), {{{liquid, 1.}}}, {{{gas, .1}}});
+        fluid::SubstanceCatalogue substances;
+        const auto liquid = substances.add({"Liquid", {0, 0, 1}});
+        const auto gas = substances.add({"Gas", {0, 0, 0}});
+        fluid.configureMaterials(std::move(substances), {{{liquid, 1.}}}, {{{gas, .1}}});
     }
 
     FluidGrid::State initialFluidState() const override

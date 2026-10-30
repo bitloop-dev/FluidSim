@@ -22,9 +22,9 @@ FluidGridAdaptiveCPU::FluidGridAdaptiveCPU(int w, int h, double dx, int scale, F
 }
 FluidGridAdaptiveCPU::~FluidGridAdaptiveCPU() = default;
 
-void FluidGridAdaptiveCPU::configureMaterials(ElementCatalogue catalogue, FluidMixture liquid_mixture, FluidMixture gas_mixture)
+void FluidGridAdaptiveCPU::configureMaterials(SubstanceCatalogue catalogue, FluidMixture liquid_mixture, FluidMixture gas_mixture)
 {
-    elements = std::move(catalogue); liquid = std::move(liquid_mixture); gas = std::move(gas_mixture);
+    substances = std::move(catalogue); liquid = std::move(liquid_mixture); gas = std::move(gas_mixture);
     destroy(); // Membership/order changes require initialization, as on the common API.
 }
 void FluidGridAdaptiveCPU::setAdaptiveSettings(const FluidAdaptiveSettings& value)
@@ -40,7 +40,7 @@ const FluidGridAdaptive& FluidGridAdaptiveCPU::native() const
 void FluidGridAdaptiveCPU::upload(const State& state)
 {
     // Start fully resolved. The existing selector may subsequently release quiet gas.
-    auto initialized = std::make_unique<FluidGridAdaptive>(width, height, cell_size, elements, liquid, gas, GasLayout{});
+    auto initialized = std::make_unique<FluidGridAdaptive>(width, height, cell_size, substances, liquid, gas, GasLayout{});
     initialized->upload(state);
     engine = std::move(initialized);
     simulation_time = next_refinement_time = 0.; refinement_checks = 0; selector.reset();
@@ -137,7 +137,7 @@ void FluidGridAdaptiveCPU::writeColorPixels(std::vector<float>& pixels, bool liq
                     for (int k = 0; k < view.components(); ++k)
                     {
                         const auto& component = view.mixture->components[k];
-                        const auto& c = (*view.catalogue)[component.element].color;
+                        const auto& c = (*view.catalogue)[component.substance].color;
                         const double q = p.scale == 1 ? p.q(x, y, k) : plane.value(k, (dx + .5) / p.scale - .5, (dy + .5) / p.scale - .5);
                         for (int channel = 0; channel < 3; ++channel) color[channel] += float(q / component.density * c[channel]);
                         if (liquid_fraction_alpha && k < view.liquidComponents) color[3] += float(q / component.density);

@@ -27,8 +27,8 @@ public:
         Level();
         ~Level();
     };
-    FluidGridAdaptiveGPU(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
-    FluidGridAdaptiveGPU(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout,
+    FluidGridAdaptiveGPU(int width, int height, double cellSize, SubstanceCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
+    FluidGridAdaptiveGPU(int width, int height, double cellSize, SubstanceCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout,
               int maxGridSize = 64);
     ~FluidGridAdaptiveGPU();
     FluidGridAdaptiveGPU(const FluidGridAdaptiveGPU&) = delete;
@@ -51,7 +51,7 @@ public:
     webgpu::Compute& commands() const;
     webgpu::Compute& compute() const { return commands(); }
     const std::vector<std::unique_ptr<Level>>& levels() const;
-    const ElementCatalogue& elements() const;
+    const SubstanceCatalogue& substances() const;
     const FluidMixture& gasMixture() const;
     const FluidMixture& materialMixture() const;
     int liquidIngredientCount() const;

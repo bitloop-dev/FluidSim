@@ -67,7 +67,7 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
         selected = std::move(engine);
     }
 
-    selected->configureMaterials(getElements(), getLiquidMixture(), getGasMixture());
+    selected->configureMaterials(getSubstances(), getLiquidMixture(), getGasMixture());
     selected->setOrigin(getOrigin()); 
     selected->setGravityY(getGravityY());
     selected->setSurfaceTension(getSurfaceTension());
@@ -99,12 +99,12 @@ void FluidGrid::setOrigin(bl::DVec2 origin) { backend->setOrigin(origin); }
 
 bool FluidGrid::requiresRenderThread() const { return backend->requiresRenderThread(); }
 
-void FluidGrid::configureMaterials(ElementCatalogue elements, FluidMixture liquid, FluidMixture gas)
+void FluidGrid::configureMaterials(SubstanceCatalogue substances, FluidMixture liquid, FluidMixture gas)
 {
-    backend->configureMaterials(std::move(elements), std::move(liquid), std::move(gas));
+    backend->configureMaterials(std::move(substances), std::move(liquid), std::move(gas));
 }
 
-const ElementCatalogue& FluidGrid::getElements() const { return backend->getElements(); }
+const SubstanceCatalogue& FluidGrid::getSubstances() const { return backend->getSubstances(); }
 const FluidMixture& FluidGrid::getLiquidMixture() const { return backend->getLiquidMixture(); }
 const FluidMixture& FluidGrid::getGasMixture() const { return backend->getGasMixture(); }
 double FluidGrid::getGravityY() const { return backend->getGravityY(); }

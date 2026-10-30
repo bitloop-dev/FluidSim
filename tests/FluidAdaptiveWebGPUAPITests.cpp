@@ -23,15 +23,15 @@ bool same(const FluidGridBase::State& a,const FluidGridBase::State& b)
 }
 struct Fixture
 {
-    ElementCatalogue elements;FluidMixture liquid,gas;
+    SubstanceCatalogue substances;FluidMixture liquid,gas;
     Fixture(bool mixed=false,double contrast=1.)
     {
-        gas.components={{elements.add({"Air",{.1f,.2f,.3f}}),.1},{elements.add({"Cloud",{0.f,1.f,1.f}}),.1*contrast}};
-        if(mixed)liquid.components={{elements.add({"Water",{0.f,0.f,1.f}}),100.}};
+        gas.components={{substances.add({"Air",{.1f,.2f,.3f}}),.1},{substances.add({"Cloud",{0.f,1.f,1.f}}),.1*contrast}};
+        if(mixed)liquid.components={{substances.add({"Water",{0.f,0.f,1.f}}),100.}};
     }
     FluidGridBase::State configure(FluidGridBase& grid,bool moving=true,bool wet=true) const
     {
-        grid.configureMaterials(elements,liquid,gas);grid.setGravityY(0.);
+        grid.configureMaterials(substances,liquid,gas);grid.setGravityY(0.);
         const int w=grid.getWidth(),h=grid.getHeight();const double area=grid.getCellSize()*grid.getCellSize();
         FluidGridBase::State s;s.liquid_fraction.resize(w*h);s.gas_mass.assign(2,std::vector<double>(w*h));
         if(!liquid.components.empty())s.liquid_mass.assign(1,std::vector<double>(w*h));
@@ -72,7 +72,7 @@ void manualParity()
         Fixture f(mixed,3.);FluidAdaptiveSettings off;off.automatic_refinement=false;
         FluidGridAdaptiveWebGPU backend(32,32,1.,4,off);FluidGridBase& api=backend;
         auto initial=f.configure(api);backend.setGravityY(.8);
-        FluidGridAdaptiveGPU raw(32,32,1.,f.elements,f.liquid,f.gas,{});raw.upload(initial);
+        FluidGridAdaptiveGPU raw(32,32,1.,f.substances,f.liquid,f.gas,{});raw.upload(initial);
         compareNative(raw,backend.native());auto before=api.download();api.step(0.,2000,1e-3);
         require(same(before,api.download()) && backend.refinementChecks()==0,"Zero-time adaptive GPU call changed state or selected layout");
         for(int frame=0;frame<24;++frame)
@@ -128,7 +128,7 @@ void saveLayout(const std::filesystem::path& path,const FluidGridAdaptiveGPU& gr
 void automaticParity(const std::filesystem::path& path)
 {
     Fixture f;FluidAdaptiveSettings settings;FluidGridAdaptiveWebGPU backend(96,96,1.,4,settings);
-    auto initial=f.configure(backend);FluidGridAdaptiveGPU raw(96,96,1.,f.elements,f.gas,{});raw.upload(initial);
+    auto initial=f.configure(backend);FluidGridAdaptiveGPU raw(96,96,1.,f.substances,f.gas,{});raw.upload(initial);
     FluidCoarseningGPU selection;double time=0.,next=0.;int checks=0,changes=0;auto previous=raw.layout();const auto mass0=raw.totals().ingredientMass;
     for(int frame=0;frame<200;++frame)
     {
@@ -153,7 +153,7 @@ void automaticParity(const std::filesystem::path& path)
     }
     for(size_t i=0;i<96*96;++i)for(int channel=0;channel<3;++channel)
     {
-        double color=0.;for(size_t k=0;k<f.gas.components.size();++k)color+=raster.gas_mass[k][i]/f.gas.components[k].density*f.elements[f.gas.components[k].element].color[channel];
+        double color=0.;for(size_t k=0;k<f.gas.components.size();++k)color+=raster.gas_mass[k][i]/f.gas.components[k].density*f.substances[f.gas.components[k].substance].color[channel];
         require(std::abs(pixels[4*i+channel]-color)<2e-5,"Common raster differs from native bounded material display");
     }
     compareNative(raw,backend.native());

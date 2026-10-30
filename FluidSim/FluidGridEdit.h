@@ -16,7 +16,7 @@ struct CellEdit
 {
     int x, y;
     Phase phase;
-    ElementId element;
+    SubstanceId substance;
 };
 
 struct ResolvedCellEdit
@@ -44,13 +44,13 @@ struct CellEditBatch
             if (change.x < 0 || change.x >= width || change.y < 0 || change.y >= height)
                 throw std::out_of_range("Fluid grid edit cell is outside the grid");
 
-            if (i == 0 || change.phase != changes[i - 1].phase || change.element != changes[i - 1].element)
+            if (i == 0 || change.phase != changes[i - 1].phase || change.substance != changes[i - 1].substance)
             {
                 const auto& mixture = change.phase == Phase::Liquid ? liquid : gas;
                 const auto found = std::find_if(mixture.components.begin(), mixture.components.end(),
-                    [&](const MixtureComponent& candidate) { return candidate.element == change.element; });
+                    [&](const MixtureComponent& candidate) { return candidate.substance == change.substance; });
                 if (found == mixture.components.end())
-                    throw std::invalid_argument("Fluid grid edit element is not configured in the selected phase");
+                    throw std::invalid_argument("Fluid grid edit substance is not configured in the selected phase");
                 component = size_t(found - mixture.components.begin()) + (change.phase == Phase::Liquid ? 0 : liquid.components.size());
                 mass = found->density * cell_volume;
             }
@@ -99,9 +99,9 @@ public:
     bool empty() const { return batch.changes.empty(); }
     void clear() { batch.changes.clear(); batch.cells.clear(); }
 
-    void setCell(int x, int y, Phase phase, ElementId element)
+    void setCell(int x, int y, Phase phase, SubstanceId substance)
     {
-        batch.changes.push_back({x, y, phase, element});
+        batch.changes.push_back({x, y, phase, substance});
     }
 
     // The last write to a cell wins. Successful commits clear commands and retain capacity.

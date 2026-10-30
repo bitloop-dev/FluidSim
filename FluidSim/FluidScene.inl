@@ -42,7 +42,7 @@ void FluidScene<Derived>::restartSimulation()
         replacement.setAdaptiveSettings(adaptive_settings);
         replacement.setDevice(fluid_device);
         replacement.setAdaptiveMode(adaptive_mode);
-        replacement.configureMaterials(fluid.getElements(), fluid.getLiquidMixture(), fluid.getGasMixture());
+        replacement.configureMaterials(fluid.getSubstances(), fluid.getLiquidMixture(), fluid.getGasMixture());
         replacement.setOrigin(fluid.getOrigin());
         replacement.setGravityY(gravity_y);
         replacement.setSurfaceTension(surface_tension);
@@ -307,7 +307,7 @@ template<class Derived>
 JSON::json FluidScene<Derived>::captureSceneState() const
 {
     return {
-        {"version", 2}, {"scenario", Derived::scenario_id}, {"simulation_time", simulation_time}, {"real_time", real_time},
+        {"version", 3}, {"scenario", Derived::scenario_id}, {"simulation_time", simulation_time}, {"real_time", real_time},
         {"simulation_failed", simulation_failed}, {"projection_tolerance", projection_tolerance},
         {"profile_stages", profile_stages}, {"frame_time", frame_time},
         {"liquid_tint_depth", liquid_tint_depth}, {"liquid_deep_brightness", liquid_deep_brightness},
@@ -370,7 +370,7 @@ template<class Derived>
 void FluidScene<Derived>::restoreSceneState(const JSON::json& scene, const fluid::FluidCheckpoint& checkpoint,
     int width, int height, double spacing)
 {
-    if (scene.at("version") != 2)
+    if (scene.at("version") != 2 && scene.at("version") != 3)
         throw std::runtime_error("Unsupported fluid scene snapshot version");
     if (scene.at("scenario") != Derived::scenario_id)
         throw std::runtime_error("Snapshot belongs to a different fluid scenario");

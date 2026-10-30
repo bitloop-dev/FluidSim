@@ -16,7 +16,7 @@ void require(bool ok, const char* message) {
         throw std::runtime_error(message);
 }
 struct Fixture {
-    ElementCatalogue catalogue;
+    SubstanceCatalogue catalogue;
     FluidMixture liquid, gas;
     Fixture(bool wet, bool contrast, int count = 6) {
         for (int n = 0; n < count; ++n) {
@@ -285,7 +285,7 @@ void colorCases() {
         for (int x = 0; x < n; ++x) {
             std::array<double, 3> expected{};
             for (int k = 0; k < gpu.ingredientCount(); ++k) {
-                const auto& c = f.catalogue[f.gas.components[k].element].color;
+                const auto& c = f.catalogue[f.gas.components[k].substance].color;
                 const double fraction = view.materialSample(x, y, k);
                 for (int d = 0; d < 3; ++d)
                     expected[d] += fraction * c[d];
@@ -334,7 +334,7 @@ void reconstructionCases() {
             require(gpu.colorPixels()==pixels,"Moving momentum extrema changed an unchanged GPU material image");
             FluidCellView view(cpu);double error=0.;
             for(int y=0;y<n;y+=3)for(int x=0;x<n;x+=3)for(int d=0;d<3;++d) {
-                double expected=0.;for(int k=0;k<4;++k)expected+=view.materialSample(x,y,k)*cpu.elements()[cpu.materialMixture().components[k].element].color[d];
+                double expected=0.;for(int k=0;k<4;++k)expected+=view.materialSample(x,y,k)*cpu.substances()[cpu.materialMixture().components[k].substance].color[d];
                 error=std::max(error,std::abs(expected-pixels[(y*n+x)*4+d]));
             }
             require(error<2e-6,"CPU/GPU smooth-label display differs");
@@ -390,7 +390,7 @@ void behavior(int ticks) {
 }
 void wavePressureCase() {
     constexpr int n = 512;
-    ElementCatalogue catalogue;
+    SubstanceCatalogue catalogue;
     FluidMixture liquid, gas;
     liquid.components = {{catalogue.add({"Water", {0, 0, 1}}), 100.}, {catalogue.add({"Red", {1, 0, 0}}), 300.}};
     gas.components = {{catalogue.add({"Air", {0, 0, 0}}), .1}, {catalogue.add({"Cloud", {1, 1, 1}}), .1}};

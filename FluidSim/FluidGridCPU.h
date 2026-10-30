@@ -1,7 +1,7 @@
 #pragma once
 #include "FluidGridBase.h"
 #include "PressureMultigrid.h"
-#include "ElementCatalogue.h"
+#include "SubstanceCatalogue.h"
 #include "FluidMixture.h"
 #include "FluidSurfaceTensionCPU.h"
 
@@ -20,7 +20,7 @@ struct FluidGridCPU final : FluidGridBase
 
     static constexpr bool requires_render_thread = false;
 
-    ElementCatalogue elements;
+    SubstanceCatalogue substances;
     FluidMixture liquid_mixture;
     FluidMixture gas_mixture;
 
@@ -62,13 +62,13 @@ struct FluidGridCPU final : FluidGridBase
     bl::DVec2 getOrigin() const override { return origin; }
     void setOrigin(bl::DVec2 position) override { origin = position; }
     bool requiresRenderThread() const override { return false; }
-    void configureMaterials(ElementCatalogue catalogue, FluidMixture liquid, FluidMixture gas) override
+    void configureMaterials(SubstanceCatalogue catalogue, FluidMixture liquid, FluidMixture gas) override
     {
-        elements = std::move(catalogue);
+        substances = std::move(catalogue);
         liquid_mixture = std::move(liquid);
         gas_mixture = std::move(gas);
     }
-    const ElementCatalogue& getElements() const override { return elements; }
+    const SubstanceCatalogue& getSubstances() const override { return substances; }
     const FluidMixture& getLiquidMixture() const override { return liquid_mixture; }
     const FluidMixture& getGasMixture() const override { return gas_mixture; }
     double getGravityY() const override { return gravity_y; }

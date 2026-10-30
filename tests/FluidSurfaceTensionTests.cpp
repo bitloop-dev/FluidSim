@@ -1,3 +1,4 @@
+#include "FluidCheckpointTestHelpers.h"
 #include "UniformWebGPU/FluidGridGPU.h"
 #include "FluidGrid.h"
 #include "FluidTestSetup.h"
@@ -178,7 +179,7 @@ void subdivisionAndResume()
         require(a.step(.005,2000,.001).converged&&resumed.step(.005,2000,.001).converged,"Resumed projection failed");
         require(same(a.download(),resumed.download()),"Surface-tension resume changed trajectory");
     }
-    a.setSurfaceTension(0); a.saveCheckpoint(saved); saved.metadata["version"]=1; saved.metadata.erase("surface_tension");
+    a.setSurfaceTension(0); a.saveCheckpoint(saved); makeLegacyCheckpoint(saved, 1);
     resumed.loadCheckpoint(saved); require(resumed.getSurfaceTension()==0,"Legacy checkpoint did not disable tension");
     require(same(a.download(),resumed.download()),"Legacy checkpoint changed native state");
     FluidGrid unsupported(8,8,1);

@@ -49,7 +49,7 @@ struct FluidGridAdaptiveGPU::Impl {
     double cellSize, lastPressureInterval = 0.;
     std::array<double, 2> lastAcceleration{};
     bool equalDensity;
-    ElementCatalogue catalogue;
+    SubstanceCatalogue catalogue;
     FluidMixture liquidPhase, gasPhase, mixture;
     GasLayout gridLayout;
     long long activeCells = 0, allocatedCells = 0;
@@ -67,7 +67,7 @@ struct FluidGridAdaptiveGPU::Impl {
     std::vector<Kernel*> kernels;
     std::vector<Field> reductions;
 
-    Impl(int w, int h, double dx, ElementCatalogue cat, FluidMixture liquid, FluidMixture gas, GasLayout layout, int maximum)
+    Impl(int w, int h, double dx, SubstanceCatalogue cat, FluidMixture liquid, FluidMixture gas, GasLayout layout, int maximum)
         : width(w), height(h), maxGridSize(maximum), components(int(liquid.components.size() + gas.components.size())),
           liquidComponents(int(liquid.components.size())), cellSize(dx), catalogue(std::move(cat)), liquidPhase(std::move(liquid)), gasPhase(std::move(gas)),
           mixture(liquidPhase), gridLayout(std::move(layout)) {
@@ -84,7 +84,7 @@ struct FluidGridAdaptiveGPU::Impl {
         palette = packed(components * 4, "adaptive display palette");
         std::vector<float> colors;
         for (const auto& c : mixture.components) {
-            const auto& rgb = catalogue[c.element].color;
+            const auto& rgb = catalogue[c.substance].color;
             colors.insert(colors.end(), {rgb[0], rgb[1], rgb[2], float(c.density)});
         }
         runner.write(palette, colors);
@@ -619,9 +619,9 @@ struct FluidGridAdaptiveGPU::Impl {
     }
 };
 
-FluidGridAdaptiveGPU::FluidGridAdaptiveGPU(int w, int h, double dx, ElementCatalogue cat, FluidMixture gas, GasLayout layout, int maximum)
+FluidGridAdaptiveGPU::FluidGridAdaptiveGPU(int w, int h, double dx, SubstanceCatalogue cat, FluidMixture gas, GasLayout layout, int maximum)
     : FluidGridAdaptiveGPU(w, h, dx, std::move(cat), {}, std::move(gas), std::move(layout), maximum) {}
-FluidGridAdaptiveGPU::FluidGridAdaptiveGPU(int w, int h, double dx, ElementCatalogue cat, FluidMixture liquid, FluidMixture gas, GasLayout layout, int maximum)
+FluidGridAdaptiveGPU::FluidGridAdaptiveGPU(int w, int h, double dx, SubstanceCatalogue cat, FluidMixture liquid, FluidMixture gas, GasLayout layout, int maximum)
     : impl(std::make_unique<Impl>(w, h, dx, std::move(cat), std::move(liquid), std::move(gas), std::move(layout), maximum)) {}
 FluidGridAdaptiveGPU::~FluidGridAdaptiveGPU() {
     impl->runner.flush();
@@ -788,7 +788,7 @@ webgpu::Compute& FluidGridAdaptiveGPU::commands() const {
 const std::vector<std::unique_ptr<FluidGridAdaptiveGPU::Level>>& FluidGridAdaptiveGPU::levels() const {
     return impl->data;
 }
-const ElementCatalogue& FluidGridAdaptiveGPU::elements() const {
+const SubstanceCatalogue& FluidGridAdaptiveGPU::substances() const {
     return impl->catalogue;
 }
 const FluidMixture& FluidGridAdaptiveGPU::gasMixture() const {

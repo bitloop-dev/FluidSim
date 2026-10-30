@@ -1,12 +1,12 @@
 #pragma once
-#include "ElementCatalogue.h"
+#include "SubstanceCatalogue.h"
 #include <vector>
 
 namespace fluid
 {
     struct MixtureComponent
     {
-        ElementId element;
+        SubstanceId substance;
 
         // Density of this ingredient under this mixture's model.
         double density;

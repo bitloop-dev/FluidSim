@@ -19,7 +19,7 @@ void require(bool value, const char* message) { if (!value) throw std::runtime_e
 void expectNear(double a, double b, const char* message) { require(std::abs(a-b) < 1e-10, message); }
 FluidGridCPU::State configure(FluidGridCPU& g, double density_b = 0.1)
 {
-    const auto a = g.elements.add({"A", {0,0,0}}), b = g.elements.add({"B", {0,1,1}}), w = g.elements.add({"Liquid", {1,0,0}});
+    const auto a = g.substances.add({"A", {0,0,0}}), b = g.substances.add({"B", {0,1,1}}), w = g.substances.add({"Liquid", {1,0,0}});
     g.gas_mixture.components = {{a,0.1},{b,density_b}};
     g.liquid_mixture.components = {{w,100}};
     g.gravity_y = 0;
@@ -99,7 +99,7 @@ void uniformProtectionAndStability() {
 void nativeViews() {
     fluid::AmrGasRuntime runtime;
     FluidGridCPU source(32,32,.7); const auto state=configure(source);
-    fluid::FluidGridAdaptive grid(32,32,.7,source.elements,source.gas_mixture,{2,{{{8,8,16,16}}}},8);
+    fluid::FluidGridAdaptive grid(32,32,.7,source.substances,source.gas_mixture,{2,{{{8,8,16,16}}}},8);
     grid.upload(state); Preview p; Preview::Tolerances t;
     const auto before=grid.totals();
     fluid::FluidCellView view(grid);

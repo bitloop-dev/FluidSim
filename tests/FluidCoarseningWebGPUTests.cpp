@@ -15,7 +15,7 @@ using Preview=FluidCoarseningPreview;
 namespace {
 void require(bool ok,const char* text) { if(!ok) throw std::runtime_error(text); }
 struct Fixture {
-    ElementCatalogue catalogue;
+    SubstanceCatalogue catalogue;
     FluidMixture liquid,gas;
     int n;
     Fixture(int n=64,double contrast=1.,bool wet=false):n(n) {

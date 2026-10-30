@@ -19,17 +19,17 @@ static_assert(std::is_base_of_v<FluidGridBase, FluidGridAdaptiveCPU> && !std::is
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 struct Fixture
 {
-    ElementCatalogue elements;
+    SubstanceCatalogue substances;
     FluidMixture gas, liquid;
     Fixture(bool mixed = false, double contrast = 1.)
     {
-        gas.components = {{elements.add({"Air", {.1f, .2f, .3f}}), .1},
-                          {elements.add({"Cloud", {0.f, 1.f, 1.f}}), .1 * contrast}};
-        if (mixed) liquid.components = {{elements.add({"Water", {0.f, 0.f, 1.f}}), 100.}};
+        gas.components = {{substances.add({"Air", {.1f, .2f, .3f}}), .1},
+                          {substances.add({"Cloud", {0.f, 1.f, 1.f}}), .1 * contrast}};
+        if (mixed) liquid.components = {{substances.add({"Water", {0.f, 0.f, 1.f}}), 100.}};
     }
     FluidGridBase::State configure(FluidGridBase& grid, bool moving = true) const
     {
-        grid.configureMaterials(elements, liquid, gas); grid.setGravityY(0.);
+        grid.configureMaterials(substances, liquid, gas); grid.setGravityY(0.);
         const int w = grid.getWidth(), h = grid.getHeight();
         const double area = grid.getCellSize() * grid.getCellSize();
         FluidGridBase::State s;
@@ -84,7 +84,7 @@ void manualParity()
         Fixture f(mixed,3.); FluidAdaptiveSettings settings; settings.automatic_refinement=false;
         FluidGridAdaptiveCPU backend(32,32,1.,4,settings); FluidGridBase& api=backend;
         auto initial=f.configure(api); backend.setGravityY(.8);
-        FluidGridAdaptive raw(32,32,1.,f.elements,f.liquid,f.gas,{}); raw.upload(initial);
+        FluidGridAdaptive raw(32,32,1.,f.substances,f.liquid,f.gas,{}); raw.upload(initial);
         compareNative(raw,backend.native());
         const auto before=api.download(); require(api.step(0.).converged,"Zero-time step failed");
         require(before.gas_mass==api.download().gas_mass && backend.refinementChecks()==0,"Zero-time step ran selection or changed state");
@@ -122,7 +122,7 @@ void automaticParity(const std::filesystem::path& directory)
 {
     Fixture f; FluidAdaptiveSettings settings;
     FluidGridAdaptiveCPU backend(96,96,1.,4,settings); auto initial=f.configure(backend);
-    FluidGridAdaptive raw(96,96,1.,f.elements,f.gas,{}); raw.upload(initial);
+    FluidGridAdaptive raw(96,96,1.,f.substances,f.gas,{}); raw.upload(initial);
     FluidCoarseningPreview selection; double time=0., next=0.; int checks=0, changes=0;
     auto old=raw.layout(); const auto mass0=raw.totals().ingredientMass;
     for(int frame=0;frame<200;++frame)
@@ -150,7 +150,7 @@ void automaticParity(const std::filesystem::path& directory)
     for(size_t i=0;i<raster.gas_mass[0].size();++i)for(int c=0;c<3;++c)
     {
         float expected=0.; for(size_t k=0;k<f.gas.components.size();++k)
-            expected+=float(raster.gas_mass[k][i]/f.gas.components[k].density*f.elements[f.gas.components[k].element].color[c]);
+            expected+=float(raster.gas_mass[k][i]/f.gas.components[k].density*f.substances[f.gas.components[k].substance].color[c]);
         require(std::abs(pixels[4*i+c]-expected)<1e-6,"Display differs from the bounded material reconstruction");
     }
     // Sparse edits in a quiet coarse region must refine locally, replace only
@@ -174,7 +174,7 @@ void selectionAndLifecycle()
 {
     for(auto mode:{AdaptiveMode::MAX_2,AdaptiveMode::MAX_4,AdaptiveMode::MAX_8,AdaptiveMode::MAX_16,AdaptiveMode::MAX_32})
     {
-        FluidGrid grid(32,32,2.); Fixture f; grid.configureMaterials(f.elements,{},f.gas); grid.setOrigin({2.,3.}); grid.setGravityY(0.);
+        FluidGrid grid(32,32,2.); Fixture f; grid.configureMaterials(f.substances,{},f.gas); grid.setOrigin({2.,3.}); grid.setGravityY(0.);
         grid.setAdaptiveMode(mode);
         require(grid.getAdaptiveMode()==mode && grid.getOrigin().x==2. && grid.getGasMixture().components.size()==2,"Mode selection lost configuration");
         f.configure(grid,false); FluidGridBase& api=grid;

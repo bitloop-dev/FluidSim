@@ -97,10 +97,10 @@ struct FluidGridAdaptive::PressureWorkspace
     }
 };
 
-FluidGridAdaptive::FluidGridAdaptive(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize)
+FluidGridAdaptive::FluidGridAdaptive(int width, int height, double cellSize, SubstanceCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize)
     : FluidGridAdaptive(width,height,cellSize,std::move(catalogue),{},std::move(gasMixture),std::move(layout),maxGridSize) {}
 
-FluidGridAdaptive::FluidGridAdaptive(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout, int maxGridSize)
+FluidGridAdaptive::FluidGridAdaptive(int width, int height, double cellSize, SubstanceCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout, int maxGridSize)
     : width(width), height(height), components(static_cast<int>(liquidMixture.components.size()+gasMixture.components.size())),
       maxGridSize(maxGridSize), liquidComponents(static_cast<int>(liquidMixture.components.size())), cellSize(cellSize),
       catalogue(std::move(catalogue)), mixture(liquidMixture), liquidPhase(std::move(liquidMixture)),

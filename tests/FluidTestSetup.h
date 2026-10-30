@@ -9,10 +9,10 @@ template<class Grid>
 void uploadTestMaterials(Grid& grid, typename Grid::State state)
 {
     using Scalar = typename Grid::Scalar;
-    if (grid.elements.size() == 0)
+    if (grid.substances.size() == 0)
     {
-        const auto water = grid.elements.add({"Water", {0.0f, 0.0f, 1.0f}});
-        const auto air = grid.elements.add({"Air", {0.0f, 0.0f, 0.0f}});
+        const auto water = grid.substances.add({"Water", {0.0f, 0.0f, 1.0f}});
+        const auto air = grid.substances.add({"Air", {0.0f, 0.0f, 0.0f}});
         grid.liquid_mixture.components = {{water, 100.0}};
         grid.gas_mixture.components = {{air, 0.1}};
     }
@@ -35,8 +35,8 @@ void uploadTestMaterials(Grid& grid, typename Grid::State state)
 inline FluidGridCPU::State initializeTestMaterials(
     FluidGridCPU& grid, double liquid_density = 100.0, double gas_density = 0.1)
 {
-    const auto water = grid.elements.add({"Water", {0.0f, 0.0f, 1.0f}});
-    const auto air = grid.elements.add({"Air", {0.0f, 0.0f, 0.0f}});
+    const auto water = grid.substances.add({"Water", {0.0f, 0.0f, 1.0f}});
+    const auto air = grid.substances.add({"Air", {0.0f, 0.0f, 0.0f}});
     grid.liquid_mixture.components = {{water, liquid_density}};
     grid.gas_mixture.components = {{air, gas_density}};
 

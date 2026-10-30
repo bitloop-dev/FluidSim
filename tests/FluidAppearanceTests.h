@@ -23,12 +23,12 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
         FluidGrid grid(64, 48, .5);
         grid.setDevice(device);
         grid.setAdaptiveMode(mode);
-        ElementCatalogue elements;
+        SubstanceCatalogue substances;
         FluidMixture liquid, gas;
         for (int k = 0; k < count; ++k)
-            liquid.components.push_back({elements.add({"Liquid", {.1f, .35f, 1.f}}), 10. + k});
-        gas.components.push_back({elements.add({"Gas", {.015f, .025f, .06f}}), .1});
-        grid.configureMaterials(elements, liquid, gas);
+            liquid.components.push_back({substances.add({"Liquid", {.1f, .35f, 1.f}}), 10. + k});
+        gas.components.push_back({substances.add({"Gas", {.015f, .025f, .06f}}), .1});
+        grid.configureMaterials(substances, liquid, gas);
         FluidGrid::State state;
         state.liquid_fraction.assign(64 * 48, .37);
         for (auto& ingredient : liquid.components)

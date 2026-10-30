@@ -22,10 +22,10 @@ void require(bool condition, const char* message)
 
 FluidGridWebGL::State pool(FluidGridWebGL& grid)
 {
-    const auto water = grid.elements.add({"Water", {0, 0, 1}});
-    const auto red = grid.elements.add({"Red", {1, 0, 0}});
-    const auto air = grid.elements.add({"Air", {0, 0, 0}});
-    const auto cloud = grid.elements.add({"Cloud", {0, 1, 1}});
+    const auto water = grid.substances.add({"Water", {0, 0, 1}});
+    const auto red = grid.substances.add({"Red", {1, 0, 0}});
+    const auto air = grid.substances.add({"Air", {0, 0, 0}});
+    const auto cloud = grid.substances.add({"Cloud", {0, 1, 1}});
     grid.liquid_mixture.components = {{water, 100}, {red, 100}};
     grid.gas_mixture.components = {{air, 0.1}, {cloud, 0.1}};
     FluidGridWebGL::State state;

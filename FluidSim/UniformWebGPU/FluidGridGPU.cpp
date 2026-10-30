@@ -238,25 +238,38 @@ bool FluidGridGPU::saveCheckpoint(FluidCheckpoint& checkpoint) const
 {
     if (!gpu) throw std::logic_error("Upload before saving a WebGPU checkpoint");
     using bl::JSON::json;
+    json chemical_elements = json::array();
+    for (ElementId id = 0; id < substances.elementCount(); ++id)
+    {
+        const auto& element = substances.getElement(id);
+        chemical_elements.push_back({{"name", element.name}, {"symbol", element.symbol}, {"atomic_mass", element.atomic_mass}});
+    }
     json catalogue = json::array();
-    for (ElementId id = 0; id < elements.size(); ++id)
-        catalogue.push_back({{"name", elements[id].name}, {"color", elements[id].color}});
+    for (SubstanceId id = 0; id < substances.size(); ++id)
+    {
+        json composition = json::array();
+        for (const auto& constituent : substances[id].composition)
+            composition.push_back({{"element", constituent.element}, {"count", constituent.count}});
+        catalogue.push_back({{"name", substances[id].name}, {"color", substances[id].color},
+            {"composition", std::move(composition)}});
+    }
     auto mixtureMetadata = [](const FluidMixture& mixture)
     {
         json result = json::array();
         for (const auto& component : mixture.components)
-            result.push_back({{"element", component.element}, {"density", component.density}});
+            result.push_back({{"substance", component.substance}, {"density", component.density}});
         return result;
     };
 
     checkpoint.metadata = {
-        {"backend", "webgpu-uniform"}, {"version", 3}, {"scalar", "float32"},
+        {"backend", "webgpu-uniform"}, {"version", 4}, {"scalar", "float32"},
         {"byte_order", std::endian::native == std::endian::little ? "little" : "big"},
         {"width", width}, {"height", height}, {"cell_size", cell_size},
         {"origin", {origin.x, origin.y}}, {"gravity_y", gravity_y}, {"gas_damping_rate", gas_damping_rate},
         {"surface_tension", surface_tension},
         {"acceleration_field", gpu->acceleration.has_value()},
-        {"preconditioner", int(pressure_preconditioner)}, {"elements", std::move(catalogue)},
+        {"preconditioner", int(pressure_preconditioner)}, {"substances", std::move(catalogue)},
+        {"elements", std::move(chemical_elements)},
         {"liquid_mixture", mixtureMetadata(liquid_mixture)}, {"gas_mixture", mixtureMetadata(gas_mixture)},
         {"previous_solve_iterations", gpu->previous_solve_iterations}, {"solver_tolerance", gpu->tolerance},
         {"cached_outflow", gpu->cached_outflow}, {"velocity_stats_valid", gpu->velocity_stats_valid}
@@ -291,26 +304,54 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
 {
     const auto& meta = checkpoint.metadata;
     const char* byte_order = std::endian::native == std::endian::little ? "little" : "big";
+    const int version = meta.at("version").get<int>();
     if (meta.at("backend") != "webgpu-uniform" ||
-        (meta.at("version") != 1 && meta.at("version") != 2 && meta.at("version") != 3) ||
+        (version < 1 || version > 4) ||
         meta.at("scalar") != "float32" || meta.at("byte_order") != byte_order)
         throw std::runtime_error("Incompatible uniform WebGPU checkpoint format");
     if (meta.at("width") != width || meta.at("height") != height || meta.at("cell_size") != cell_size)
         throw std::runtime_error("Checkpoint geometry does not match the fluid grid");
 
     // Validate file structure before replacing live state. Physical model inputs keep their normal contract.
-    ElementCatalogue restored_elements;
-    for (const auto& element : meta.at("elements"))
-        restored_elements.add({element.at("name").get<std::string>(), element.at("color").get<std::array<float, 3>>()});
+    SubstanceCatalogue restored_substances;
+    if (version >= 4)
+    {
+        for (const auto& entry : meta.at("elements"))
+        {
+            Element element{entry.at("name").get<std::string>(), entry.at("symbol").get<std::string>(),
+                entry.at("atomic_mass").get<double>()};
+            if (!std::isfinite(element.atomic_mass) || element.atomic_mass <= 0.)
+                throw std::runtime_error("Checkpoint has an invalid atomic mass");
+            restored_substances.addElement(std::move(element));
+        }
+    }
+    // Earlier checkpoints contain ingredient identities but no chemical composition.
+    for (const auto& entry : meta.at(version >= 4 ? "substances" : "elements"))
+    {
+        Substance substance{entry.at("name").get<std::string>(), entry.at("color").get<std::array<float, 3>>()};
+        if (version >= 4)
+        {
+            for (const auto& constituent : entry.at("composition"))
+            {
+                const auto element = constituent.at("element").get<std::int64_t>();
+                const auto count = constituent.at("count").get<std::int64_t>();
+                if (element < 0 || std::uint64_t(element) >= restored_substances.elementCount() ||
+                    count <= 0 || std::uint64_t(count) > std::numeric_limits<std::uint32_t>::max())
+                    throw std::runtime_error("Checkpoint has an invalid substance composition");
+                substance.composition.push_back({ElementId(element), std::uint32_t(count)});
+            }
+        }
+        restored_substances.add(std::move(substance));
+    }
     auto readMixture = [&](const bl::JSON::json& entries)
     {
         FluidMixture result;
         for (const auto& entry : entries)
         {
-            const auto element = entry.at("element").get<ElementId>();
-            if (element >= restored_elements.size())
-                throw std::runtime_error("Checkpoint mixture references a missing element");
-            result.components.push_back({element, entry.at("density").get<double>()});
+            const auto substance = entry.at(version >= 4 ? "substance" : "element").get<SubstanceId>();
+            if (substance >= restored_substances.size())
+                throw std::runtime_error("Checkpoint mixture references a missing substance");
+            result.components.push_back({substance, entry.at("density").get<double>()});
         }
         return result;
     };
@@ -319,7 +360,7 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
     const auto restored_origin = meta.at("origin").get<std::array<double, 2>>();
     const double restored_gravity = meta.at("gravity_y").get<double>();
     const double restored_damping = meta.at("gas_damping_rate").get<double>();
-    const double restored_tension = meta.at("version") == 1 ? 0. : meta.at("surface_tension").get<double>();
+    const double restored_tension = version == 1 ? 0. : meta.at("surface_tension").get<double>();
     if (!std::isfinite(float(restored_tension)) || restored_tension < 0.)
         throw std::runtime_error("Invalid saved surface tension");
     const int preconditioner = meta.at("preconditioner").get<int>();
@@ -329,7 +370,7 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
     const float tolerance = meta.at("solver_tolerance").get<float>();
     const float outflow = meta.at("cached_outflow").get<float>();
     const bool stats_valid = meta.at("velocity_stats_valid").get<bool>();
-    const bool has_acceleration = meta.at("version") == 3 && meta.at("acceleration_field").get<bool>();
+    const bool has_acceleration = version >= 3 && meta.at("acceleration_field").get<bool>();
     const size_t groups = (liquid.components.size() + gas.components.size() + 3) / 4;
     const size_t cells = size_t(width) * height;
     const size_t count = (3 + 4 * groups + (has_acceleration ? 2 : 0)) * cells
@@ -339,7 +380,7 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
     std::vector<float> values(count);
     std::memcpy(values.data(), checkpoint.data.data(), checkpoint.data.size());
 
-    elements = std::move(restored_elements);
+    substances = std::move(restored_substances);
     liquid_mixture = std::move(liquid);
     gas_mixture = std::move(gas);
     origin = {restored_origin[0], restored_origin[1]};
@@ -796,7 +837,7 @@ void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid, bool liquid_frac
             if (index >= liquid_count + gas_count) break;
             const auto& component = index < liquid_count ? grid.liquid_mixture.components[index]
                 : grid.gas_mixture.components[index - liquid_count];
-            const auto& rgb = grid.elements[component.element].color;
+            const auto& rgb = grid.substances[component.substance].color;
             for (size_t c = 0; c < 3; ++c)
                 channels[c][group][lane] = float(rgb[c] / (component.density * grid.cell_size * grid.cell_size));
         }

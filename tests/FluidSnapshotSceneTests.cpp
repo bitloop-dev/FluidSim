@@ -1,5 +1,6 @@
 #include "scenarios/CrashingWave.h"
 #include "MouseAttraction.h"
+#include "FluidCheckpointTestHelpers.h"
 #ifndef __EMSCRIPTEN__
 #include "FluidAppearanceTests.h"
 #endif
@@ -114,7 +115,7 @@ void run(const fs::path& root)
     FluidGrid native_grid(saved.width, saved.height, saved.cell_size);
     native_grid.setDevice(FluidDevice::GPU);
     native_grid.setSurfaceTension(10000);
-    native_grid.configureMaterials(scene.fluid.getElements(), scene.fluid.getLiquidMixture(), scene.fluid.getGasMixture());
+    native_grid.configureMaterials(scene.fluid.getSubstances(), scene.fluid.getLiquidMixture(), scene.fluid.getGasMixture());
     native_grid.upload({});
     const std::array<float, 4> parameters[] = {{6.f, 4.f, 500.f, 20.f}};
     const auto context = native_grid.getWebGPUContext();
@@ -144,6 +145,21 @@ void run(const fs::path& root)
     require(scene.mouse_field && scene.fluid.saveCheckpoint(restored) && restored.data == saved.checkpoint.data,
         "Restored mouse producer did not rebuild equivalent values on its new context");
 
+    auto legacy = saved;
+    legacy.scene["version"] = 2;
+    legacy.scene["scenario_state"]["elements"] = legacy.scene["scenario_state"].at("substances");
+    legacy.scene["scenario_state"].erase("substances");
+    makeLegacyCheckpoint(legacy.checkpoint, 3);
+    writeImage(root / "legacy-materials.webp", legacy);
+    drop(project, root / "legacy-materials.webp");
+    require(scene.snapshot_error.empty() && scene.fluid.getSubstances().elementCount() == 0 &&
+        scene.fluid.getSubstances()[scene.water_substance].composition.empty() &&
+        scene.fluid.saveCheckpoint(restored) && restored.data == saved.checkpoint.data,
+        "Legacy scene/native snapshot changed physical state or invented chemistry");
+    drop(project, image);
+    require(scene.snapshot_error.empty() && scene.fluid.saveCheckpoint(restored) &&
+        restored.metadata == saved.checkpoint.metadata, "Chemical snapshot did not restore after a legacy image");
+
     const auto assertUnchanged = [&]
     {
         FluidCheckpoint after;
@@ -160,9 +176,9 @@ void run(const fs::path& root)
     drop(project, root / "truncated.webp");
     assertUnchanged();
     broken = saved;
-    broken.scene["scenario_state"]["elements"][0] = 999;
-    writeImage(root / "bad-element.webp", broken);
-    drop(project, root / "bad-element.webp");
+    broken.scene["scenario_state"]["substances"][0] = 999;
+    writeImage(root / "bad-substance.webp", broken);
+    drop(project, root / "bad-substance.webp");
     assertUnchanged();
     broken = saved;
     broken.scene["scenario"] = "another-scenario";

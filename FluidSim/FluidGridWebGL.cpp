@@ -631,7 +631,7 @@ void FluidGridWebGL::Impl::rebuildColor(const FluidGridWebGL& grid)
             if (index >= liquid_count + gas_count) break;
             const auto& component = index < liquid_count ? grid.liquid_mixture.components[index]
                 : grid.gas_mixture.components[index - liquid_count];
-            const auto& rgb = grid.elements[component.element].color;
+            const auto& rgb = grid.substances[component.substance].color;
             for (size_t c = 0; c < 3; ++c)
                 channels[c][group][lane] = float(rgb[c] / (component.density * grid.cell_size * grid.cell_size));
         }

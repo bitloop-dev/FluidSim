@@ -14,13 +14,13 @@ int FluidGridWebGPU::getHeight() const { return engine->height; }
 double FluidGridWebGPU::getCellSize() const { return engine->cell_size; }
 bl::DVec2 FluidGridWebGPU::getOrigin() const { return engine->origin; }
 void FluidGridWebGPU::setOrigin(bl::DVec2 origin) { engine->origin = origin; }
-void FluidGridWebGPU::configureMaterials(ElementCatalogue elements, FluidMixture liquid, FluidMixture gas)
+void FluidGridWebGPU::configureMaterials(SubstanceCatalogue substances, FluidMixture liquid, FluidMixture gas)
 {
-    engine->elements = std::move(elements);
+    engine->substances = std::move(substances);
     engine->liquid_mixture = std::move(liquid);
     engine->gas_mixture = std::move(gas);
 }
-const ElementCatalogue& FluidGridWebGPU::getElements() const { return engine->elements; }
+const SubstanceCatalogue& FluidGridWebGPU::getSubstances() const { return engine->substances; }
 const FluidMixture& FluidGridWebGPU::getLiquidMixture() const { return engine->liquid_mixture; }
 const FluidMixture& FluidGridWebGPU::getGasMixture() const { return engine->gas_mixture; }
 double FluidGridWebGPU::getGravityY() const { return engine->gravity_y; }

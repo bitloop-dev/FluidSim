@@ -35,15 +35,15 @@ void sameResult(const FluidProjectionResult& a, const FluidProjectionResult& b)
 
 FluidGridBase::State configure(FluidGridBase& grid)
 {
-    ElementCatalogue elements;
-    const auto water = elements.add({"Water", {.1f, .35f, 1.f}});
-    const auto red = elements.add({"Red", {.95f, .25f, .15f}});
-    const auto air = elements.add({"Air", {.015f, .025f, .06f}});
-    const auto cloud = elements.add({"Cloud", {0.f, 1.f, 1.f}});
+    SubstanceCatalogue substances;
+    const auto water = substances.add({"Water", {.1f, .35f, 1.f}});
+    const auto red = substances.add({"Red", {.95f, .25f, .15f}});
+    const auto air = substances.add({"Air", {.015f, .025f, .06f}});
+    const auto cloud = substances.add({"Cloud", {0.f, 1.f, 1.f}});
     FluidMixture liquid, gas;
     liquid.components = {{water, 100.}, {red, 300.}};
     gas.components = {{air, .1}, {cloud, .1}};
-    grid.configureMaterials(std::move(elements), liquid, gas);
+    grid.configureMaterials(std::move(substances), liquid, gas);
     grid.setOrigin({-7., 11.});
     grid.setGravityY(80.);
 
@@ -116,7 +116,7 @@ void configurationAndSelection()
             "Wrapper changed grid geometry");
     require(api.getOrigin().x == -7. && api.getOrigin().y == 11. && api.getGravityY() == 80.,
             "Common configuration did not reach the backend");
-    require(api.getElements().size() == 4 && api.getElements()[1].name == "Red" &&
+    require(api.getSubstances().size() == 4 && api.getSubstances()[1].name == "Red" &&
             api.getLiquidMixture().components.size() == 2 && api.getGasMixture().components.size() == 2,
             "Common materials did not reach the backend");
     require(!api.requiresRenderThread(), "CPU wrapper requested the render owner");
@@ -195,8 +195,8 @@ void editingAndColorsUseCommonAPI()
     require(pixels == expected_pixels && pixels.size() == 33 * 25 * 4, "Wrapper changed derived display pixels");
     for (int channel = 0; channel < 3; ++channel)
     {
-        require(pixels[(2 * 33 + 3) * 4 + channel] == api.getElements()[0].color[channel], "Liquid edit colour is incorrect");
-        require(pixels[(2 * 33 + 4) * 4 + channel] == api.getElements()[3].color[channel], "Last-write gas colour is incorrect");
+        require(pixels[(2 * 33 + 3) * 4 + channel] == api.getSubstances()[0].color[channel], "Liquid edit colour is incorrect");
+        require(pixels[(2 * 33 + 4) * 4 + channel] == api.getSubstances()[3].color[channel], "Last-write gas colour is incorrect");
     }
     bool rejected = false;
     moved.setCell(-1, 2, Phase::Liquid, 0);

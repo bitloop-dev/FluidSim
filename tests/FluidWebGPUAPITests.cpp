@@ -1,4 +1,5 @@
 #include "FluidGrid.h"
+#include "FluidCheckpointTestHelpers.h"
 #include "FluidGridWebGPU.h"
 #include "FluidGridDisplay.h"
 #include "UniformWebGPU/FluidGridGPU.h"
@@ -29,18 +30,20 @@ template<class A,class B> bool same(const A& a,const B& b)
 }
 struct Fixture
 {
-    ElementCatalogue elements;
+    SubstanceCatalogue substances;
     FluidMixture liquid,gas;
     Fixture()
     {
-        liquid.components={{elements.add({"Water",{.1f,.35f,1.f}}),100.},
-                           {elements.add({"Red",{.95f,.25f,.15f}}),300.}};
-        gas.components={{elements.add({"Air",{.015f,.025f,.06f}}),.1},
-                        {elements.add({"Cloud",{0.f,1.f,1.f}}),.1}};
+        const auto h = substances.addElement({"Hydrogen", "H", 1.008});
+        const auto o = substances.addElement({"Oxygen", "O", 15.999});
+        liquid.components={{substances.add({"Water",{.1f,.35f,1.f}, {{h,2},{o,1}}}),100.},
+                           {substances.add({"Red",{.95f,.25f,.15f}}),300.}};
+        gas.components={{substances.add({"Air",{.015f,.025f,.06f}}),.1},
+                        {substances.add({"Cloud",{0.f,1.f,1.f}}),.1}};
     }
     FluidGridBase::State configure(FluidGridBase& grid) const
     {
-        grid.configureMaterials(elements,liquid,gas);grid.setOrigin({-2.,7.});grid.setGravityY(100.);
+        grid.configureMaterials(substances,liquid,gas);grid.setOrigin({-2.,7.});grid.setGravityY(100.);
         const int w=grid.getWidth(),h=grid.getHeight();const double area=grid.getCellSize()*grid.getCellSize();
         FluidGridBase::State state;
         state.liquid_fraction.resize(w*h);state.liquid_mass.assign(2,std::vector<double>(w*h));state.gas_mass.assign(2,std::vector<double>(w*h));
@@ -56,14 +59,14 @@ struct Fixture
     }
     void configureNative(FluidGridGPU& grid,const FluidGridBase::State& initial) const
     {
-        grid.elements=elements;grid.liquid_mixture=liquid;grid.gas_mixture=gas;grid.gravity_y=100.;
+        grid.substances=substances;grid.liquid_mixture=liquid;grid.gas_mixture=gas;grid.gravity_y=100.;
         grid.upload(convertFluidState<float>(initial));
     }
 };
 void selection()
 {
     Fixture f;FluidGrid grid(32,32,2.);
-    grid.configureMaterials(f.elements,f.liquid,f.gas);grid.setOrigin({3.,4.});grid.setGravityY(12.);
+    grid.configureMaterials(f.substances,f.liquid,f.gas);grid.setOrigin({3.,4.});grid.setGravityY(12.);
     grid.setDevice(FluidDevice::GPU);
     require(grid.getDevice()==FluidDevice::GPU && grid.getAdaptiveMode()==AdaptiveMode::DISABLED && !grid.requiresRenderThread(),"GPU selection/thread requirement incorrect");
     require(grid.getOrigin().x==3. && grid.getGravityY()==12. && grid.getLiquidMixture().components.size()==2,"Device selection discarded common configuration");
@@ -165,14 +168,14 @@ void checkpointParity()
         auto initial = fixture.configure(original);
         if (extra_component)
         {
-            fixture.gas.components.push_back({fixture.elements.add({"Extra gas", {.7f, .2f, .4f}}), .1});
+            fixture.gas.components.push_back({fixture.substances.add({"Extra gas", {.7f, .2f, .4f}}), .1});
             initial.gas_mass.push_back(initial.gas_mass[1]);
             for (size_t i = 0; i < initial.gas_mass[1].size(); ++i)
             {
                 initial.gas_mass[1][i] *= .6;
                 initial.gas_mass[2][i] *= .4;
             }
-            original.configureMaterials(fixture.elements, fixture.liquid, fixture.gas);
+            original.configureMaterials(fixture.substances, fixture.liquid, fixture.gas);
             original.upload(initial);
         }
         original.setGravityY(73.);
@@ -182,8 +185,8 @@ void checkpointParity()
         if (extra_component)
         {
             auto edit = original.beginEdit();
-            edit.setCell(3, 2, Phase::Liquid, fixture.liquid.components[0].element);
-            edit.setCell(4, 2, Phase::Gas, fixture.gas.components[2].element);
+            edit.setCell(3, 2, Phase::Liquid, fixture.liquid.components[0].substance);
+            edit.setCell(4, 2, Phase::Gas, fixture.gas.components[2].substance);
             edit.commit(); // Capture with stale derived density/colour caches as well as warm pressure history.
         }
 
@@ -194,10 +197,24 @@ void checkpointParity()
         const size_t groups = extra_component ? 2 : 1;
         require(saved.data.size() == ((3 + 4 * groups) * 33 * 25 + 34 * 25 + 33 * 26) * sizeof(float), "Checkpoint contains the wrong native fields");
         saved.metadata = bl::JSON::json::parse(saved.metadata.dump()); // Exercise the on-disk numeric round trip.
+        require(saved.metadata.at("version") == 4 && saved.metadata.at("elements").size() == 2 &&
+            saved.metadata.at("substances")[0].at("composition").size() == 2,
+            "Checkpoint did not retain chemical definitions");
+
+        auto legacy = saved;
+        makeLegacyCheckpoint(legacy, 3);
+        FluidGrid historical(33, 25, 2.5);
+        historical.setDevice(FluidDevice::GPU);
+        historical.loadCheckpoint(legacy);
+        require(same(before, historical.download()) && historical.getSubstances().elementCount() == 0 &&
+            historical.getSubstances()[0].composition.empty() && historical.getSubstances()[0].name == "Water",
+            "Legacy checkpoint invented chemistry or changed material state");
 
         FluidGrid resumed(33, 25, 2.5);
         resumed.setDevice(FluidDevice::GPU);
         require(resumed.loadCheckpoint(saved), "Loading uniform WebGPU checkpoint failed");
+        require(std::abs(resumed.getSubstances().molarMass(0) - 18.015) < 1e-12,
+            "Checkpoint changed water elemental composition");
         require(same(before, resumed.download()), "Checkpoint restore changed physical fields");
         FluidCheckpoint observed;
         resumed.saveCheckpoint(observed);
@@ -223,7 +240,7 @@ void checkpointParity()
         resumed.writeColorPixels(b);
         require(a == b, "Resumed material colours differ");
 
-        for (int corruption = 0; corruption < 8; ++corruption)
+        for (int corruption = 0; corruption < 12; ++corruption)
         {
             auto invalid = saved;
             switch (corruption)
@@ -234,8 +251,12 @@ void checkpointParity()
             case 3: invalid.metadata["scalar"] = "float64"; break;
             case 4: invalid.metadata["byte_order"] = "unsupported"; break;
             case 5: invalid.data.pop_back(); break;
-            case 6: invalid.metadata["liquid_mixture"][0]["element"] = 999; break;
+            case 6: invalid.metadata["liquid_mixture"][0]["substance"] = 999; break;
             case 7: invalid.metadata.erase("cached_outflow"); break;
+            case 8: invalid.metadata["substances"][0]["composition"][0]["element"] = 999; break;
+            case 9: invalid.metadata["substances"][0]["composition"][0]["count"] = 0; break;
+            case 10: invalid.metadata["substances"][0]["composition"][0]["count"] = -1; break;
+            case 11: invalid.metadata["elements"][0]["atomic_mass"] = -1.; break;
             }
             rejected = false;
             try { resumed.loadCheckpoint(invalid); }
@@ -245,7 +266,7 @@ void checkpointParity()
                 "Rejected checkpoint mutated the live grid");
         }
         std::cout << "PASS checkpoint exact state/history/configuration/colour continuation for200 ticks, ingredients="
-                  << (extra_component ? 5 : 4) << ", eight incompatible/corrupt loads rejected without mutation\n";
+                  << (extra_component ? 5 : 4) << ", twelve incompatible/corrupt loads rejected without mutation\n";
     }
 
     Fixture fixture;

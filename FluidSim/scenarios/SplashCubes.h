@@ -21,10 +21,10 @@ struct SplashCubes : FluidScene<SplashCubes>
     explicit SplashCubes(const Config& config);
     std::string name() const override { return "Splash Cubes"; }
 
-    fluid::ElementId air_element{};
-    fluid::ElementId water_element{};
-    fluid::ElementId red_element{};
-    fluid::ElementId cloud_element{};
+    fluid::SubstanceId hydrogen_substance{};
+    fluid::SubstanceId water_substance{};
+    fluid::SubstanceId glycerol_substance{};
+    fluid::SubstanceId helium_substance{};
 
     FluidGrid::State initialFluidState() const override;
     JSON::json captureScenarioState() const override;

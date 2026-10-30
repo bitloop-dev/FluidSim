@@ -1,6 +1,6 @@
 #pragma once
 #include "FluidGridTypes.h"
-#include "ElementCatalogue.h"
+#include "SubstanceCatalogue.h"
 #include "FluidMixture.h"
 
 #include "AmrField2D.h"
@@ -55,8 +55,8 @@ public:
         AmrField2D<int> active;
     };
 
-    FluidGridAdaptive(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
-    FluidGridAdaptive(int width, int height, double cellSize, ElementCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
+    FluidGridAdaptive(int width, int height, double cellSize, SubstanceCatalogue catalogue, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
+    FluidGridAdaptive(int width, int height, double cellSize, SubstanceCatalogue catalogue, FluidMixture liquidMixture, FluidMixture gasMixture, GasLayout layout, int maxGridSize = 64);
     ~FluidGridAdaptive();
     FluidGridAdaptive(const FluidGridAdaptive&) = delete;
     FluidGridAdaptive& operator=(const FluidGridAdaptive&) = delete;
@@ -76,7 +76,7 @@ public:
     GasTotals totals() const;
 
     const std::vector<std::unique_ptr<Level>>& levels() const { return data; }
-    const ElementCatalogue& elements() const { return catalogue; }
+    const SubstanceCatalogue& substances() const { return catalogue; }
     const FluidMixture& gasMixture() const { return gasPhase; }
     const FluidMixture& materialMixture() const { return mixture; }
     int liquidIngredientCount() const { return liquidComponents; }
@@ -98,7 +98,7 @@ private:
     bool equalIngredientDensities;
     double lastPressureInterval = 0.;
     std::array<double,2> lastAcceleration{};
-    ElementCatalogue catalogue;
+    SubstanceCatalogue catalogue;
     FluidMixture mixture, liquidPhase, gasPhase;
     GasLayout gridLayout;
     long long activeCells = 0, allocatedCells = 0;

@@ -1750,7 +1750,7 @@ void FluidGridCPU::writeColorPixels(std::vector<float>& pixels, bool liquid_frac
                 for (size_t k = 0; k < mixture.components.size(); ++k)
                 {
                     const auto& component = mixture.components[k];
-                    const auto& color = elements[component.element].color;
+                    const auto& color = substances[component.substance].color;
 
                     // Convert ingredient mass into its fraction of the whole cell.
                     const double volume_fraction =

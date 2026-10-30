@@ -88,13 +88,13 @@ public:
         }
     };
     explicit FluidCellView(const FluidGridCPU& grid) : width(grid.width), height(grid.height), cellSize(grid.cell_size),
-        mixture(&grid.gas_mixture), catalogue(&grid.elements), uniform(&grid), acceleration{0.,grid.gravity_y}, identity(&grid) {
+        mixture(&grid.gas_mixture), catalogue(&grid.substances), uniform(&grid), acceleration{0.,grid.gravity_y}, identity(&grid) {
         patches.push_back({0,0,width,height,1});
         owners.assign(size_t((width+1)/2)*((height+1)/2),0);
     }
 #ifdef FLUIDSIM_HAS_AMR
     explicit FluidCellView(const FluidGridAdaptive& gas) : width(gas.finestWidth()), height(gas.finestHeight()), cellSize(gas.finestCellSize()),
-        mixture(&gas.materialMixture()), catalogue(&gas.elements()), acceleration(gas.acceleration()), identity(&gas),
+        mixture(&gas.materialMixture()), catalogue(&gas.substances()), acceleration(gas.acceleration()), identity(&gas),
         pressureInterval(gas.pressureInterval()), liquidComponents(gas.liquidIngredientCount()) {
         owners.assign(size_t((width+1)/2)*((height+1)/2),-1);
         for (const auto& level : gas.levels()) {
@@ -114,9 +114,9 @@ public:
 #ifdef FLUIDSIM_HAS_AMR
     // Non-owning view over an explicit native-state observation. The caller
     // keeps the patch arrays alive; no physical state is created or advanced.
-    FluidCellView(int w, int h, double dx, const FluidMixture& material, const ElementCatalogue& elements,
+    FluidCellView(int w, int h, double dx, const FluidMixture& material, const SubstanceCatalogue& substances,
                   std::vector<Patch> nativePatches, std::array<double,2> force, double interval, int liquids, const void* id)
-        : width(w), height(h), cellSize(dx), mixture(&material), catalogue(&elements), acceleration(force), identity(id),
+        : width(w), height(h), cellSize(dx), mixture(&material), catalogue(&substances), acceleration(force), identity(id),
           pressureInterval(interval), liquidComponents(liquids), patches(std::move(nativePatches))
     {
         owners.assign(size_t((width+1)/2)*((height+1)/2),-1);
@@ -187,7 +187,7 @@ public:
     int width, height;
     double cellSize;
     const FluidMixture* mixture;
-    const ElementCatalogue* catalogue;
+    const SubstanceCatalogue* catalogue;
     const FluidGridCPU* uniform=nullptr;
     std::array<double,2> acceleration{};
     const void* identity;

@@ -31,7 +31,7 @@ void compareUniformBackends(const std::string& prefix)
     {
         fluid::FluidGrid replacement(96, 72, 1.);
         replacement.setDevice(device);
-        replacement.configureMaterials(scene.fluid.getElements(), scene.fluid.getLiquidMixture(), scene.fluid.getGasMixture());
+        replacement.configureMaterials(scene.fluid.getSubstances(), scene.fluid.getLiquidMixture(), scene.fluid.getGasMixture());
         replacement.setGravityY(scene.gravity_y);
         // Keep this enabled even when the interactive scene currently defaults to zero.
         scene.surface_tension = 20000.;

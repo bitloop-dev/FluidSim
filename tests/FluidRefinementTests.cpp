@@ -49,7 +49,7 @@ double perlinNoise(double x, double y)
 }
 
 struct Fixture {
-    fluid::ElementCatalogue catalogue;
+    fluid::SubstanceCatalogue catalogue;
     fluid::FluidMixture mixture;
     Fixture(double contrast=1.) {
         mixture.components={{catalogue.add({"Air"}),.1},{catalogue.add({"Cloud"}),.1*contrast}};

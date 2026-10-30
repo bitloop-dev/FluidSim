@@ -18,9 +18,9 @@ FluidGridAdaptiveWebGPU::FluidGridAdaptiveWebGPU(int w, int h, double dx, int sc
         throw std::invalid_argument("Unsupported adaptive WebGPU cell scale");
 }
 FluidGridAdaptiveWebGPU::~FluidGridAdaptiveWebGPU() = default;
-void FluidGridAdaptiveWebGPU::configureMaterials(ElementCatalogue catalogue, FluidMixture liquid_mixture, FluidMixture gas_mixture)
+void FluidGridAdaptiveWebGPU::configureMaterials(SubstanceCatalogue catalogue, FluidMixture liquid_mixture, FluidMixture gas_mixture)
 {
-    destroy(); elements = std::move(catalogue); liquid = std::move(liquid_mixture); gas = std::move(gas_mixture);
+    destroy(); substances = std::move(catalogue); liquid = std::move(liquid_mixture); gas = std::move(gas_mixture);
 }
 const FluidGridAdaptiveGPU& FluidGridAdaptiveWebGPU::native() const
 {
@@ -34,7 +34,7 @@ void FluidGridAdaptiveWebGPU::setAdaptiveSettings(const FluidAdaptiveSettings& v
 }
 void FluidGridAdaptiveWebGPU::upload(const State& state)
 {
-    auto initialized = std::make_unique<FluidGridAdaptiveGPU>(width, height, cell_size, elements, liquid, gas, GasLayout{});
+    auto initialized = std::make_unique<FluidGridAdaptiveGPU>(width, height, cell_size, substances, liquid, gas, GasLayout{});
     initialized->upload(state); // Preserve the native 1e-4 initialization projection policy.
     selector.reset(); engine = std::move(initialized); selector = std::make_unique<FluidCoarseningGPU>();
     simulation_time = next_refinement_time = 0.; projection_tolerance = 1e-4; refinement_checks = 0;
@@ -140,7 +140,7 @@ FluidGridBase::State FluidGridAdaptiveWebGPU::download() const
             patches.push_back(p);
         }
     }
-    const FluidCellView view(width, height, cell_size, gpu.materialMixture(), gpu.elements(), std::move(patches),
+    const FluidCellView view(width, height, cell_size, gpu.materialMixture(), gpu.substances(), std::move(patches),
                              gpu.acceleration(), gpu.pressureInterval(), gpu.liquidIngredientCount(), &gpu);
     return adaptiveRaster(view);
 }

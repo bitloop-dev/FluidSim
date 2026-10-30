@@ -2,16 +2,34 @@
 
 Stage 1 geometric material transport and Stage 2 consistent mass/momentum transport are implemented. Liquid geometry, component masses and momentum share transfers through successive X/Y passes. Uniform CPU and legacy WebGL pressure default to multigrid-preconditioned CG; adaptive pressure uses the composite solver described below. Uniform CPU and WebGPU also support optional constant liquid-gas surface tension. `VISION.md` holds the longer-term ambitions and maths; this file is the short map of the working code and possible next steps.
 
-The engines use the component system: configure the element catalogue and liquid/gas mixtures, then upload component masses alongside `liquid_fraction`, the total liquid volume fraction. Density, momentum and displayed colours come from those masses. Engine geometry uses liquid/gas terminology; Water, Red, Air and Cloud are scene ingredients. Several miscible ingredients share each phase's geometry; adding an ingredient does not add another interface reconstruction or pressure solve.
+The engines use the component system: configure a `SubstanceCatalogue` and liquid/gas mixtures, then upload component masses alongside `liquid_fraction`, the total liquid volume fraction. A component is one substance's contribution to a phase, identified by `MixtureComponent::substance`. Density, momentum and displayed colours come from those masses. Several miscible substances share each phase's geometry; adding a substance does not add another interface reconstruction or pressure solve.
 
-The CrashingWave scenario initializes blue Water and Red liquid, plus Air and a cyan Cloud gas ingredient. Air and Cloud share density 0.1; three fixed Perlin scales divide the initial gas volume between them. Noise is evaluated only in `CrashingWave::initialFluidState()`, then ordinary component transport carries the clouds. This visualizes atmospheric flow without adding condensation or evaporation physics.
+Both scenarios use blue water (H2O), red glycerol (C3H8O3), dark hydrogen (H2) and bright helium (He). `scenarios/ChemicalMaterials.h` shares their definitions and reference densities. Three fixed Perlin scales divide the initial gas volume between hydrogen and helium; CrashingWave colours helium cyan and SplashCubes colours it white. This is a labelled gas mixture, not clouds or condensation. All four actual substances are colourless; the palette is diagnostic.
 
-SplashCubes uses the same Perlin gas distribution with black Air and white Cloud. Two initially stationary liquid squares sit side by side around the domain centre: red on the left, blue on the right, each side 30% of the shorter domain dimension with a 6% gap. Exact rectangle/cell overlap supplies partial edge cells. Water/Red retain the existing colours and densities 10/30, gas density remains 0.1, and the default 1024x720 grid, gravity 500, surface tension 20000 and timing policy match CrashingWave. The closed bottom wall supplies the ground; ordinary fluid transport/projection produces the fall, splash and miscible-liquid mixing.
+SplashCubes starts with two stationary liquid squares: glycerol on the left and water on the right, each side 30% of the shorter domain dimension with a 6% gap. The pair is horizontally centred; its top is at 80% of `(height - side)`, preserving the current lower placement. Exact rectangle/cell overlap supplies partial edge cells. Both scenarios retain the 1024x720 grid and gravity 500; SplashCubes uses surface tension 5000 and CrashingWave 20000. The closed bottom wall supplies the ground; ordinary fluid transport/projection produces the fall, splash and miscible-liquid mixing.
+
+## Chemical definitions and modelling assumptions
+
+`Element` now means a chemical building block: name, symbol and atomic mass. `Substance` means a transported ingredient: name, diagnostic colour and a list of `{ElementId, count}` entries giving its elemental composition. `SubstanceCatalogue` owns both tables, with `addElement`, `getElement`, `elementCount`, substance `add`/indexing and `molarMass(SubstanceId)` in g/mol. IDs are local to that catalogue. An empty composition explicitly means unspecified chemistry, retained for abstract test materials and historical snapshots. A formula describes elemental inventory, not bonds, reactivity or a unique isomer.
+
+The common grid API is `configureMaterials(SubstanceCatalogue, liquid, gas)` and `getSubstances()`; edit commands take `SubstanceId`. The former ingredient `Element`/`ElementCatalogue`/`getElements` names have been removed. Elements are catalogue metadata, with no new per-cell fields or shader work. The existing four packed component channels remain. Composition/molar mass does not determine liquid density; phase-specific densities still belong to `MixtureComponent`.
+
+Liquid reference densities are scaled by `.01` scene density units per kg/m3, keeping water near its previous value 10. Water is 9.9820675 ([NIST GLP 10, 20 C](https://www.nist.gov/system/files/documents/2019/05/14/glp-10-purity-water-20190507.pdf)); glycerol is 12.613 ([NIST STAR reference](https://physics.nist.gov/cgi-bin/Star/compos.pl?matno=174)). For the current user-run performance comparison, hydrogen and helium both use density .1, matching the old atmosphere. This deliberately removes their density difference without changing their chemical identities or elemental compositions; neither gas/gas nor gas/liquid density ratios are physical. Atomic masses still use the [CIAAW abridged atomic weights](https://ciaaw.org/abridged-atomic-weights.htm). These are fixed coefficients in an incompressible model, not live temperature/pressure or a gas EOS. Gravity, surface tension and scene length/time units remain experimental. Glycerol's real viscosity is not implemented; neither are chemical reactions, diffusion, phase exchange, immiscibility or elasticity.
+
+Before the heavier-atmosphere adjustment, the substance/element refactor passed all 22 native regression suites and full-resolution 400-frame / 8-second runs of both scenarios, with per-frame convergence, finite-state, fraction and conservation checks. The user reported a slight improvement with gas densities .1 / .198542 but a remaining slowdown. A native Release CrashingWave comparison now covers 16 simulated seconds: the current .1 / .1 atmosphere is faster on average than committed HEAD in this controlled setup; restoring the old liquid densities makes current and committed timings/counters/state hashes agree. The reported interactive slowdown remains unreproduced. [Performance evidence and scope](.codex/runs/run0137_20261030_172434/README.md). [Validation and limits](.codex/runs/run0136_20261030_153136/README.md).
+
+## Uniform WebGPU pressure-tolerance experiment
+
+The native CrashingWave sweep in [run0138](.codex/runs/run0138_20261030_213556/README.md) compares maximum divergence .1/.25/.5/1.0 with current materials, 1024x720, dt .02 and sigma 20000. Initial developed-wave frame times including synchronized shading are 95.34/97.17/92.00/91.63 ms. Raising .1 to 1.0 cuts pressure time about 17–18%, but changed transport work limits repeated short-window total savings to 4–6%. A separate unprofiled 32-second pair shows roughly 10–12% lower frame times in developed windows; desktop timing variance and evolving trajectories prevent a universal speedup claim.
+
+Both .1 and 1.0 complete 1,600 frames / 32 seconds with every projection converged and selected complete-state checks within existing budgets. Worst phase-volume disagreement is .08514%/.09076% of a cell against the .2% quality budget; component mass drift stays below .00457% against .01%. Normal/profile shared 400-frame work counts and sampled state hashes match. These are wave behavior measurements, not artificial-life endurance or unchanged static capillary accuracy. The existing `Pressure Quality` control is sufficient for this trial; the default remains .1. No solver changes or explicit 5–10-frame volume recovery were added. All six capillary-driven projections per output frame remain.
 
 ## Where things belong
 
 | File | Responsibility |
 | --- | --- |
+| `FluidSim/Element.h` | Chemical element definitions and elemental formula counts |
+| `FluidSim/SubstanceCatalogue.h` | Substance identities, compositions, diagnostic colours and shared element definitions |
 | `FluidSim/FluidGridBase.h` | Abstract common simulation contract and backend-independent edit sessions |
 | `FluidSim/FluidGrid.h/.cpp` | Concrete public API, selection and forwarding to one owned backend |
 | `FluidSim/FluidGridCPU.h/.cpp` | Original uniform CPU engine, native arrays/helpers, unchanged physics; derived catalogue colours |
@@ -38,6 +56,7 @@ SplashCubes uses the same Perlin gas distribution with black Air and white Cloud
 | `FluidSim/FluidSceneUI.inl` | Shared buffered sidebar controls, instantiated for each concrete scenario |
 | `FluidSim/scenarios/CrashingWave.h/.cpp` | Wave defaults, material catalogue, initial state and scenario snapshot data |
 | `FluidSim/scenarios/SplashCubes.h/.cpp` | Centred falling squares, black/white atmosphere and scenario snapshot data |
+| `FluidSim/scenarios/ChemicalMaterials.h` | Shared H2/He/water/glycerol definitions and fixed reference densities |
 | `FluidSim/scenarios/PerlinAtmosphere.h` | Shared initial three-scale gas pattern; no ongoing noise forcing |
 | `tests/FluidGridTests.cpp` | Existing direct FluidGridCPU numerical regressions |
 | `tests/FluidGridAPITests.cpp` | Common configuration, exact CPU/wrapper/base state and step parity, edits, colours and failure forwarding |
@@ -71,11 +90,11 @@ struct UI : Base::UI
 
 `drawScenario(viewport)` adds world-space drawing after the fluid surface. `viewportDraw()` and `renderFluidSurface()` can also be overridden; the latter is shared by viewport and native-image rendering. Native captures omit viewport annotations by default. Override `captureFluidImage()` for a custom capture image while keeping the shared checkpoint envelope. Capture scheduling remains project-owned.
 
-Scene snapshot payload version **2** records `scenario` and a separate `scenario_state`. Both scenarios store their ingredient IDs there. Override `captureScenarioState()`, `validateScenarioState()` and `restoreScenarioState()` for additional persistent state. Validation runs against the replacement grid before the live simulation changes; restore only commits already validated values. Wrong-scenario images and old version-1 scene payloads are rejected explicitly; the backend checkpoint format is unchanged.
+Scene snapshot payload version **3** records `scenario` and a separate `scenario_state` with `substances` IDs. Version 2 scene payloads with historical `elements` IDs remain readable; version 1 and wrong-scenario images are rejected. Override `captureScenarioState()`, `validateScenarioState()` and `restoreScenarioState()` for additional persistent state. Validation runs against the replacement grid before the live simulation changes; restore only commits already validated values.
 
 `FluidSceneTests` checks four independent wave instances against direct engine stepping, zero/two-view scheduling, isolated restart, concrete buffered UI construction/edits, shared-sidebar extension, owner-scheduled actions, and custom image/state capture. `FluidSnapshotSceneTests` covers invalid/wrong-scenario payload rejection and the existing native rendering checks. The extraction also retained exact native checkpoint bytes and raw images after a matched 200-frame/4-second production wave run.
 
-`FluidSplashCubesTests` checks exact initial liquid volumes, separated/centred squares, zero velocities, original liquid colours and matching Perlin gas proportions on rectangular, odd and portrait grids. Its optional `<output-directory> <frames>` arguments run the production WebGPU scene with per-frame finite-state, fraction, mass and phase-consistency checks and selected shaded images; the evolving check requires floor contact and mixed-liquid cells.
+`FluidSplashCubesTests` checks chemical identities/compositions/molar masses/reference densities, exact initial liquid volumes, separated square placement, zero velocities, diagnostic colours and matching Perlin gas proportions on rectangular, odd and portrait grids. Its optional `<output-directory> <frames>` arguments run production SplashCubes on WebGPU; append `wave` to run CrashingWave. Both runs check per-frame finite state, fractions, substance mass and phase-volume consistency with selected shaded images; the evolving check requires floor contact and mixed-liquid cells. Densities come from the configured material definitions.
 
 ## Liquid appearance
 
@@ -188,7 +207,7 @@ For a CPU producer, create the same layout without a context, fill `values()` or
 
 The primary parity target is GPU versus CPU within the same grid method: uniform CPU/WebGPU first, and adaptive CPU/WebGPU when those features are ported. Uniform versus adaptive agreement is a separate, harder numerical comparison. Match selected physics, initial data, timestep and solver quality; allow precision and convergence differences without silently substituting a different physical model. The CPU field follow-up uses the user's requested short40-step/0.4-second check, not a long-run equivalence claim: [evidence](.codex/runs/run0022_20261029_cpu_field/README.md).
 
-The unchanged native checkpoint format3 stores the active field's values, not executable shader source. Restore creates independent GPU storage, leaving previously bound external fields untouched. A restored mouse controller builds its producer on the replacement engine's context and regenerates from saved settings on the next frame. Formats1/2 still clear acceleration. Generation remains included in total scene fluid time; the detailed Forces row measures application inside the physics steps. Generation submits commands without a mandatory completion readback.
+Native checkpoint format 4 stores the active field's values, not executable shader source. Restore creates independent GPU storage, leaving previously bound external fields untouched. A restored mouse controller builds its producer on the replacement engine's context and regenerates from saved settings on the next frame. Formats1/2 still clear acceleration. Generation remains included in total scene fluid time; the detailed Forces row measures application inside the physics steps. Generation submits commands without a mandatory completion readback.
 
 `FluidAccelerationTests` checks independent CPU/GPU scalar/vector generation, transfer copies, shared storage/lifetime, later updates, geometry/device rejection, uniform-gravity equivalence, clearing, capillary steps, exact checkpoint continuation and legacy clearing. Scene snapshot tests cover controller settings, disabling a restored field, camera-transformed hover movement and retaining the target outside the viewport. `FluidSurfaceTensionWave` accepts optional `fixed` or `moving` attraction modes for evolving checks using the actual scene. [Refactor evidence](.codex/runs/run0021_20261029_fluid_field/README.md); [original force-model evidence](.codex/runs/run0017_20261028_acceleration_field/README.md).
 
@@ -196,7 +215,7 @@ The unchanged native checkpoint format3 stores the active field's values, not ex
 
 `FluidGridBase::saveCheckpoint(FluidCheckpoint&)` and `loadCheckpoint(const FluidCheckpoint&)` are optional owner-thread operations, forwarded by `FluidGrid`. A checkpoint contains backend-owned versioned JSON metadata and an opaque byte payload. Unsupported backends return false. Uniform WebGPU is implemented first; CPU uniform and both adaptive backends remain unsupported. Loading requires the selected backend and fixed geometry to match; it does not switch engines or convert their states. A successful load initializes the wrapper just like upload. Malformed metadata, incompatible format/geometry or the wrong payload size throws before applying state.
 
-Uniform WebGPU format3 stores native float32 fraction, U/V faces, current and previous pressure, then four-lane packed component-mass groups in mixture order. When `acceleration_field` is true, interleaved cell XY acceleration follows the component groups. Metadata includes catalogue/mixtures/densities, origin, gravity, damping, surface tension, preconditioner, previous iteration count, pressure tolerance and cached CFL/outflow validity. Formats1/2 are still accepted and clear acceleration; format1 also implies zero surface tension. Without a field the binary layout is unchanged. The scene stores clocks, failure state, pressure quality, profiling choice, mouse-controller settings and scene element IDs; frame/index and scheduling metadata belong to Bitloop. Derived density, momentum, colour, curvature, multigrid coefficients and solver workspaces are rebuilt. Ordinary download/upload is still initialization and does not preserve this history. Capture/restore occurs between completed frames, never inside a physics substep; no checkpoint readback occurs on unscheduled frames.
+Uniform WebGPU format 4 stores native float32 fraction, U/V faces, current and previous pressure, then four-lane packed component-mass groups in mixture order. When `acceleration_field` is true, interleaved cell XY acceleration follows the component groups. Metadata includes chemical elements, substances with elemental compositions, mixtures/densities, origin, gravity, damping, surface tension, preconditioner, previous iteration count, pressure tolerance and cached CFL/outflow validity. Formats 1–3 are still accepted with unspecified chemistry, preserving their original ingredient names, colours and densities. Formats 1/2 clear acceleration; format 1 also implies zero surface tension. The native binary layout is unchanged from format 3. The scene stores clocks, failure state, pressure quality, profiling choice, mouse-controller settings and scene substance IDs; frame/index and scheduling metadata belong to Bitloop. Derived density, momentum, colour, curvature, multigrid coefficients and solver workspaces are rebuilt. Ordinary download/upload is still initialization and does not preserve this history. Capture/restore occurs between completed frames, never inside a physics substep; no checkpoint readback occurs on unscheduled frames.
 
 Files use Bitloop's existing checkpoint chunks, available with `BITLOOP_DEV_MODE=ON`. Saving is uncompressed by default. For example, from this project directory in PowerShell:
 
@@ -248,7 +267,7 @@ On the current frame100 state, quality1 reduces25.32MiB to13.43MiB (47.0% smalle
 fluid::FluidGrid grid(width, height, cell_size);
 grid.setDevice(fluid::FluidDevice::CPU);
 grid.setAdaptiveMode(fluid::AdaptiveMode::DISABLED);
-grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.configureMaterials(substances, liquid_mixture, gas_mixture);
 grid.setGravityY(100.0);
 grid.upload(initial_state);
 auto result = grid.step(dt, 2000, 1e-3);
@@ -274,7 +293,7 @@ The legacy OpenGL GPU class still has float State and its original owning-contex
 fluid::FluidGrid grid(width, height, cell_size);
 grid.setDevice(fluid::FluidDevice::GPU);
 grid.setAdaptiveMode(fluid::AdaptiveMode::DISABLED);
-grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.configureMaterials(substances, liquid_mixture, gas_mixture);
 grid.upload(initial_state);
 auto result = grid.step(dt, 2000, 1e-3);
 ```
@@ -308,7 +327,7 @@ grid.setAdaptiveMode(fluid::AdaptiveMode::MAX_4);
 fluid::FluidAdaptiveSettings quality;
 quality.prediction_horizon = quality.check_interval + frame_time;
 grid.setAdaptiveSettings(quality);
-grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.configureMaterials(substances, liquid_mixture, gas_mixture);
 grid.upload(initial_state);
 auto result = grid.step(dt, 2000, 1e-3);
 ```
@@ -336,7 +355,7 @@ fluid::FluidAdaptiveSettings quality;
 quality.check_interval = 0.32;
 quality.prediction_horizon = quality.check_interval + frame_time;
 grid.setAdaptiveSettings(quality);
-grid.configureMaterials(elements, liquid_mixture, gas_mixture);
+grid.configureMaterials(substances, liquid_mixture, gas_mixture);
 grid.upload(initial_state);
 auto result = grid.step(dt, 2000, 1e-3);
 ```
@@ -370,14 +389,14 @@ for (int y = center_y - radius; y <= center_y + radius; ++y)
 for (int x = center_x - radius; x <= center_x + radius; ++x)
 {
     if ((x - center_x) * (x - center_x) + (y - center_y) * (y - center_y) <= radius * radius)
-        edit.setCell(x, y, fluid::Phase::Liquid, water_element);
+        edit.setCell(x, y, fluid::Phase::Liquid, water_substance);
 }
 withFluidContext([&] { edit.commit(); });
 ```
 
 The scene chooses positions, shapes and timing. Keep the chosen cells inside the grid. The grid must outlive its sessions, and `upload()` must have initialized the configured mixtures before a nonempty commit. Stage on one thread at a time and commit between physics/drawing operations; GPU commit needs the owning GL context. Staging, `reserve()`, `size()`, `empty()` and `clear()` need no GL context. Sessions provide staged writes, not reads of existing GPU cells.
 
-`setCell(x, y, Phase::Liquid/Gas, element)` appends a 16-byte command on the supported native build. With reserved capacity it only appends that record; component lookup and mass calculation happen at commit. Each selected cell becomes entirely the chosen ingredient: its liquid fraction becomes one or zero, its selected component mass becomes phase density times cell volume, and all other liquid/gas component masses become zero. The element must already belong to the selected mixture; if it appears more than once there, the first matching component is selected. Elements present in both phases use the density of the selected phase.
+`setCell(x, y, Phase::Liquid/Gas, substance)` appends a 16-byte command on the supported native build. With reserved capacity it only appends that record; component lookup and mass calculation happen at commit. Each selected cell becomes entirely the chosen ingredient: its liquid fraction becomes one or zero, its selected component mass becomes phase density times cell volume, and all other liquid/gas component masses become zero. The substance must already belong to the selected mixture; if it appears more than once there, the first matching component is selected. Substances present in both phases use the density of the selected phase.
 
 The last queued write to a cell wins. Commit validates the whole batch before material changes: out-of-grid coordinates throw `std::out_of_range`, and a missing phase ingredient throws `std::invalid_argument`. Rejected commands remain queued for inspection/counting or `clear()`. Successful commit clears the commands and retains staging capacity for reuse. Empty commits do nothing; destroying or clearing a session discards uncommitted writes. A session must not be used concurrently with a mutation of its grid or mixture configuration.
 
@@ -626,7 +645,7 @@ ctest --test-dir <build-directory> -R "^FluidGridTests$" --output-on-failure
 
 On Windows, configure/build from a Visual Studio developer shell. The test executable needs the same vcpkg runtime DLL directory on `PATH` as the application (`<build-directory>/vcpkg_installed/x64-windows/bin`).
 
-With the same test option enabled, build `FluidSimWebGLTests` and run both suites with `ctest --test-dir <build-directory> -R "^FluidGrid(GPU)?Tests$" --output-on-failure`. GPU cases cover hydrostatics, odd/thin projection, CPU comparisons, all four diagonal directions, nonuniform momentum transport, tiny interface remnants, sharp slabs, exact pure-material preservation, zero-time/failure handling and graphics-state restoration. GPU multigrid algebra tests cover odd/thin/high-contrast grids through 513x257, including the larger-grid polynomial smoother. Additional cases protect 512x512 default-budget convergence, the one-iteration cap and exact cached-versus-refreshed CFL parity. Common-API tests exercise upload/download, zero/reset behavior and actual display pixels for both types, including an empty catalogue. Component comparisons cover liquid-only, gas-only, 4, 7 and 18 ingredients, empty fields, differing densities, an element in both phases, and populated ingredients beyond the first sixteen. A 512x512 regression exercises the formerly failing vanishing-sliver case. Both engines' legacy fixtures explicitly populate component masses through `tests/FluidTestSetup.h`.
+With the same test option enabled, build `FluidSimWebGLTests` and run both suites with `ctest --test-dir <build-directory> -R "^FluidGrid(GPU)?Tests$" --output-on-failure`. GPU cases cover hydrostatics, odd/thin projection, CPU comparisons, all four diagonal directions, nonuniform momentum transport, tiny interface remnants, sharp slabs, exact pure-material preservation, zero-time/failure handling and graphics-state restoration. GPU multigrid algebra tests cover odd/thin/high-contrast grids through 513x257, including the larger-grid polynomial smoother. Additional cases protect 512x512 default-budget convergence, the one-iteration cap and exact cached-versus-refreshed CFL parity. Common-API tests exercise upload/download, zero/reset behavior and actual display pixels for both types, including an empty catalogue. Component comparisons cover liquid-only, gas-only, 4, 7 and 18 ingredients, empty fields, differing densities, a substance in both phases, and populated ingredients beyond the first sixteen. A 512x512 regression exercises the formerly failing vanishing-sliver case. Both engines' legacy fixtures explicitly populate component masses through `tests/FluidTestSetup.h`.
 
 Edit-session regressions cover staged/cancelled/moved/reused sessions, empty commits, initialization requirements, arbitrary sparse masks, duplicate-write ordering, row-boundary gaps, liquid/gas replacement through nineteen ingredients, invalid-batch atomicity, cache refresh against a fresh upload, edited display colours and GL state restoration. A 257x129 full-grid edit also covers threaded CPU commits and merged GPU uploads. A two-second, 240-step source/sink case on each backend commits twelve batches during pool motion; every step checks projection, source-adjusted component mass, fraction bounds and mass-derived phase volumes. Existing twenty-second CPU pool/component regressions continue to cover the unchanged transport/pressure algorithms.
 
@@ -645,7 +664,7 @@ Edit-session regressions cover staged/cancelled/moved/reused sessions, empty com
 | A translated shallow straight interface | CPU and GPU MYC preserve analytic cell fractions across X/Y motion, positive/negative slopes and reversed phases, within their precision tolerances |
 | Diagonal motion across a density contrast | Both velocity components remain uniform around a 1000:1 material patch, for all four diagonal directions and multiple transport substeps |
 | Sloshing closed pool for 20 simulated seconds | Repeated convergence, fraction bounds, conserved volume, finite velocities and closed walls at 1000:1 density ratio |
-| Miscible components for 20 simulated seconds | Three populated liquid ingredients, two gas ingredients, differing densities and one element present in both phases; conserved component masses, agreement of mass-derived volumes with phase geometry, and an absent component staying absent |
+| Miscible components for 20 simulated seconds | Three populated liquid ingredients, two gas ingredients, differing densities and one substance present in both phases; conserved component masses, agreement of mass-derived volumes with phase geometry, and an absent component staying absent |
 | Multigrid algebra and projection agreement | Linear, symmetric, positive, history-independent correction; constant nullspace; odd/thin and parallel grids; agreement with diagonal PCG at `1e-8` |
 | Zero timestep / failed projection | No zero-time advance; failed final projection is reported so the caller can stop |
 
@@ -658,7 +677,7 @@ Choose **one** with the user; the list is not a commitment to implement everythi
 | Possible milestone | Small demonstration / acceptance case |
 | --- | --- |
 | Another field experiment | Uniform WebGPU now supports stored 2D acceleration. For example, Mandelbrot depth could generate an in-plane field; it adds no water-depth variable |
-| Colour labels | Two colours travel with the same fluid properties. Colour alone does not require a new physical element or pressure solve |
+| Colour labels | Two colours travel with the same fluid properties. Colour alone does not require a new physical substance or pressure solve |
 | Material-dependent surface tension | A droplet tends towards a round interface when enabled; zero tension preserves the no-tension case |
 | Prescribed ambient exterior | Open liquid surface sees a chosen exterior pressure; resolved-gas mode remains a separate explicit choice |
 | Trapped gas pockets | A sealed bubble resists collapse through a pocket-pressure/volume model or resolved gas; connection to the exterior changes its treatment |

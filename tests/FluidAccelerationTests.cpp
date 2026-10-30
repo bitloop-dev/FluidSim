@@ -1,3 +1,4 @@
+#include "FluidCheckpointTestHelpers.h"
 #include "UniformWebGPU/FluidGridGPU.h"
 #include "FluidGrid.h"
 #include "FluidTestSetup.h"
@@ -157,8 +158,7 @@ void generationSubstepsAndResume()
 
     generated.clearAccelerationField();
     generated.saveCheckpoint(saved);
-    saved.metadata["version"] = 2;
-    saved.metadata.erase("acceleration_field");
+    makeLegacyCheckpoint(saved, 2);
     resumed.loadCheckpoint(saved);
     requireSame(generated, resumed);
     FluidCheckpoint legacy;
@@ -329,7 +329,7 @@ void cpuBindingAndClear()
     advance();
 
     FluidGrid api(32, 24, 1);
-    api.configureMaterials(gravity.elements, gravity.liquid_mixture, gravity.gas_mixture);
+    api.configureMaterials(gravity.substances, gravity.liquid_mixture, gravity.gas_mixture);
     api.upload(gravity.download());
     gravity.upload(gravity.download());
     gravity.gravity_y = 64;

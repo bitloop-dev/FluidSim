@@ -464,8 +464,8 @@ void commonStateAndColorReadback()
     checkColor(0.375f);
     require(fluid::test::sameEditState(before, grid.download()), "color readback mutated physics state");
     auto edit = grid.beginEdit();
-    edit.setCell(3, 2, fluid::Phase::Liquid, grid.liquid_mixture.components[0].element); edit.commit(); checkColor(1);
-    edit.setCell(3, 2, fluid::Phase::Gas, grid.gas_mixture.components[0].element); edit.commit(); checkColor(0);
+    edit.setCell(3, 2, fluid::Phase::Liquid, grid.liquid_mixture.components[0].substance); edit.commit(); checkColor(1);
+    edit.setCell(3, 2, fluid::Phase::Gas, grid.gas_mixture.components[0].substance); edit.commit(); checkColor(0);
     require(grid.step(1.0 / 120, 2000, 1e-3).converged, "WebGPU common physics call failed");
     grid.destroy(); grid.upload({}); checkColor(0);
     const auto reset = grid.download();
@@ -693,10 +693,10 @@ template<class Grid>
 typename Grid::State componentPool(Grid& grid, int liquid_count, int gas_count, bool varied_density = true)
 {
     using Scalar = typename Grid::Scalar;
-    const auto water = grid.elements.add({"Water", {0.1f, 0.75f, 0.95f}});
-    const auto red = grid.elements.add({"Red", {0.95f, 0.25f, 0.15f}});
-    const auto air = grid.elements.add({"Air", {0.015f, 0.025f, 0.06f}});
-    const auto cloud = grid.elements.add({"Cloud", {0, 1, 1}});
+    const auto water = grid.substances.add({"Water", {0.1f, 0.75f, 0.95f}});
+    const auto red = grid.substances.add({"Red", {0.95f, 0.25f, 0.15f}});
+    const auto air = grid.substances.add({"Air", {0.015f, 0.025f, 0.06f}});
+    const auto cloud = grid.substances.add({"Cloud", {0, 1, 1}});
     for (int k = 0; k < liquid_count; ++k)
         grid.liquid_mixture.components.push_back({k % 2 ? red : water, varied_density && k == 1 ? 200.0 : 100.0});
     for (int k = 0; k < gas_count; ++k)
@@ -811,7 +811,7 @@ void componentsMatchCPU()
                 for (size_t k=0; k<phase.first->components.size(); ++k)
                 {
                     const auto& component=phase.first->components[k];
-                    for (int c=0; c<3; ++c) expected[c]+=(*phase.second)[k][i]*gpu.elements[component.element].color[c]/(component.density*gpu.cell_size*gpu.cell_size);
+                    for (int c=0; c<3; ++c) expected[c]+=(*phase.second)[k][i]*gpu.substances[component.substance].color[c]/(component.density*gpu.cell_size*gpu.cell_size);
                 }
             for (int c=0; c<3; ++c) require(std::abs(pixels[4*i+c]-expected[c])<5e-6,"GPU catalogue colors differ from masses");
             require(pixels[4*i+3]==1,"GPU catalogue alpha differs");

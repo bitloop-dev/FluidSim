@@ -19,8 +19,8 @@ public:
     bl::DVec2 getOrigin() const override { return origin; }
     void setOrigin(bl::DVec2 value) override { origin = value; }
     bool requiresRenderThread() const override { return false; }
-    void configureMaterials(ElementCatalogue elements, FluidMixture liquid, FluidMixture gas) override;
-    const ElementCatalogue& getElements() const override { return elements; }
+    void configureMaterials(SubstanceCatalogue substances, FluidMixture liquid, FluidMixture gas) override;
+    const SubstanceCatalogue& getSubstances() const override { return substances; }
     const FluidMixture& getLiquidMixture() const override { return liquid; }
     const FluidMixture& getGasMixture() const override { return gas; }
     double getGravityY() const override { return gravity_y; }
@@ -43,7 +43,7 @@ private:
     int width, height, max_cell_scale;
     double cell_size, gravity_y = 100.;
     bl::DVec2 origin{};
-    ElementCatalogue elements;
+    SubstanceCatalogue substances;
     FluidMixture liquid, gas;
     FluidAdaptiveSettings settings;
     double simulation_time = 0., next_refinement_time = 0., projection_tolerance = 1e-4;

@@ -27,21 +27,47 @@ void checkInitialState()
         config.settings.fluid_device = fluid::FluidDevice::CPU;
         SplashCubes scene(config);
         const auto state = scene.initialFluidState();
-        const auto& elements = scene.fluid.getElements();
-        require(elements[scene.air_element].color == std::array<float, 3>{0, 0, 0} &&
-            elements[scene.cloud_element].color == std::array<float, 3>{1, 1, 1}, "Atmosphere is not black/white");
+        const auto& substances = scene.fluid.getSubstances();
+        require(substances.size() == 4 && substances.elementCount() == 4, "Unexpected chemical catalogue size");
+        const auto checkComposition = [&](fluid::SubstanceId id, const char* name, double molar_mass,
+            std::initializer_list<std::pair<const char*, unsigned>> expected)
+        {
+            const auto& substance = substances[id];
+            require(substance.name == name && substance.composition.size() == expected.size(), "Incorrect substance identity");
+            size_t i = 0;
+            for (const auto& [symbol, count] : expected)
+            {
+                const auto& part = substance.composition[i++];
+                require(substances.getElement(part.element).symbol == symbol && part.count == count,
+                    "Incorrect elemental composition");
+            }
+            require(std::abs(substances.molarMass(id) - molar_mass) < 1e-10, "Incorrect molar mass");
+        };
+        checkComposition(scene.hydrogen_substance, "Hydrogen", 2.016, {{"H", 2}});
+        checkComposition(scene.helium_substance, "Helium", 4.0026, {{"He", 1}});
+        checkComposition(scene.water_substance, "Water", 18.015, {{"H", 2}, {"O", 1}});
+        checkComposition(scene.glycerol_substance, "Glycerol", 92.094, {{"C", 3}, {"H", 8}, {"O", 3}});
+        require(substances[scene.hydrogen_substance].color == std::array<float, 3>{0, 0, 0} &&
+            substances[scene.helium_substance].color == std::array<float, 3>{1, 1, 1}, "Atmosphere is not black/white");
 
         FluidSim::CrashingWave::Config wave_config;
         wave_config.settings = config.settings;
         FluidSim::CrashingWave wave(wave_config);
         const auto wave_state = wave.initialFluidState();
-        require(elements[scene.water_element].color == wave.fluid.getElements()[wave.water_element].color &&
-            elements[scene.red_element].color == wave.fluid.getElements()[wave.red_element].color,
+        require(substances[scene.water_substance].color == wave.fluid.getSubstances()[wave.water_substance].color &&
+            substances[scene.glycerol_substance].color == wave.fluid.getSubstances()[wave.glycerol_substance].color,
             "Existing liquid colours changed");
         require(state.u.empty() && state.v.empty(), "Cubes should start at rest");
 
         const double side = .3 * std::min(size.x, size.y);
         const double expected_volume = side * side * .25;
+        const auto& liquid = scene.fluid.getLiquidMixture().components;
+        const auto& gas_components = scene.fluid.getGasMixture().components;
+        require(std::abs(liquid[0].density - 9.9820675) < 1e-12 &&
+            std::abs(liquid[1].density - 12.613) < 1e-12 &&
+            std::abs(gas_components[0].density - .1) < 1e-12 &&
+            std::abs(gas_components[1].density - .1) < 1e-12,
+            "Scenario liquid reference or scaled atmosphere densities are incorrect");
         for (size_t k = 0; k < 2; ++k)
         {
             const auto& component = scene.fluid.getLiquidMixture().components[k];
@@ -52,32 +78,36 @@ void checkInitialState()
         for (int x = 0; x < size.x; ++x)
         {
             const int i = y * size.x + x;
-            const double blue = state.liquid_mass[0][i] / (10. * .25);
-            const double red = state.liquid_mass[1][i] / (30. * .25);
+            const double blue = state.liquid_mass[0][i] / (liquid[0].density * .25);
+            const double red = state.liquid_mass[1][i] / (liquid[1].density * .25);
             require(std::abs(blue + red - state.liquid_fraction[i]) < 1e-12 && blue * red == 0.,
                 "Initial liquids overlap or disagree with coverage");
             if (red > 0.) require(x + 1 < size.x * .5, "Red square is not on the left");
             if (blue > 0.) require(x > size.x * .5, "Blue square is not on the right");
-            const int reflected = (size.y - 1 - y) * size.x + x;
-            require(std::abs(state.liquid_fraction[i] - state.liquid_fraction[reflected]) < 1e-12,
-                "Squares are not vertically centred");
-            const double gas = state.gas_mass[0][i] + state.gas_mass[1][i];
-            require(std::abs(gas / (.1 * .25) + blue + red - 1.) < 1e-12, "Gas does not fill remaining volume");
-            const double wave_gas = wave_state.gas_mass[0][i] + wave_state.gas_mass[1][i];
+            const double top = .8 * (size.y - side);
+            if (blue + red > 0.) require(y + 1 > top && y < top + side, "Squares changed their vertical placement");
+            const double gas = state.gas_mass[0][i] / gas_components[0].density +
+                state.gas_mass[1][i] / gas_components[1].density;
+            require(std::abs(gas / .25 + blue + red - 1.) < 1e-12, "Gas does not fill remaining volume");
+            const double wave_gas = wave_state.gas_mass[0][i] / wave.fluid.getGasMixture().components[0].density +
+                wave_state.gas_mass[1][i] / wave.fluid.getGasMixture().components[1].density;
             if (gas > 0. && wave_gas > 0.)
-                require(std::abs(state.gas_mass[1][i] / gas - wave_state.gas_mass[1][i] / wave_gas) < 1e-12,
+                require(std::abs(state.gas_mass[1][i] / gas_components[1].density / gas -
+                    wave_state.gas_mass[1][i] / wave.fluid.getGasMixture().components[1].density / wave_gas) < 1e-12,
                     "Perlin atmosphere differs from CrashingWave");
         }
     }
-    std::cout << "PASS square volumes, centred placement, rest velocities, colours and shared Perlin atmosphere\n";
+    std::cout << "PASS chemical identities/compositions/densities, square volumes/placement, rest velocities, colours and Perlin atmosphere\n";
 }
 
-struct CubeProject : BasicProject
+template<class Scenario>
+struct MaterialProject : BasicProject
 {
-    SceneHandle<SplashCubes> source;
-    void projectPrepare(Layout&) override { source = create<SplashCubes>(); }
+    SceneHandle<Scenario> source;
+    void projectPrepare(Layout&) override { source = create<Scenario>(); }
 };
 
+template<class Scenario>
 void evolve(const fs::path& output, int frames)
 {
     fs::create_directories(output);
@@ -92,7 +122,7 @@ void evolve(const fs::path& output, int frames)
 
     ImDebugLog log;
     CaptureContext capture;
-    CubeProject project;
+    MaterialProject<Scenario> project;
     project.configureHeadless(0, &log, {800, 600}, &capture);
     project.startHeadless();
     auto& scene = *project.source;
@@ -143,9 +173,11 @@ void evolve(const fs::path& output, int frames)
             const int i = y * scene.grid_w + x;
             const double f = state.liquid_fraction[i];
             require(std::isfinite(f) && f >= -1e-6 && f <= 1.000001, "Invalid liquid fraction");
-            const double blue = state.liquid_mass[0][i] / 10.;
-            const double red = state.liquid_mass[1][i] / 30.;
-            const double gas = (state.gas_mass[0][i] + state.gas_mass[1][i]) / .1;
+            const double area = scene.cell_size * scene.cell_size;
+            const double blue = state.liquid_mass[0][i] / (scene.fluid.getLiquidMixture().components[0].density * area);
+            const double red = state.liquid_mass[1][i] / (scene.fluid.getLiquidMixture().components[1].density * area);
+            const double gas = (state.gas_mass[0][i] / scene.fluid.getGasMixture().components[0].density +
+                state.gas_mass[1][i] / scene.fluid.getGasMixture().components[1].density) / area;
             phase_error = std::max({phase_error, std::abs(blue + red - f), std::abs(gas - (1. - f))});
             mixed += std::min(blue, red);
             volume += f;
@@ -170,7 +202,7 @@ void evolve(const fs::path& output, int frames)
     SDL_GL_DestroyContext(context);
     SDL_DestroyWindow(window);
     SDL_Quit();
-    std::cout << "PASS SplashCubes fall, impact, mixing and per-frame health over " << frames << " frames\n";
+    std::cout << "PASS " << Scenario::scenario_id << " impact, mixing and per-frame health over " << frames << " frames\n";
 }
 }
 
@@ -179,7 +211,9 @@ int main(int argc, char** argv)
     try
     {
         checkInitialState();
-        if (argc == 3) evolve(argv[1], std::stoi(argv[2]));
+        if (argc == 3) evolve<SplashCubes>(argv[1], std::stoi(argv[2]));
+        else if (argc == 4 && std::string(argv[3]) == "wave")
+            evolve<FluidSim::CrashingWave>(argv[1], std::stoi(argv[2]));
         return 0;
     }
     catch (const std::exception& error)

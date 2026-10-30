@@ -27,16 +27,16 @@ void materialEditingIsSparseAndReusable()
     for (const auto [liquids, gases] : {std::pair{1, 0}, std::pair{0, 1}, std::pair{2, 2}, std::pair{9, 10}})
     {
         Grid grid(13, 9, 2.5);
-        const auto shared = grid.elements.add({"Shared", {1, 0, 1}});
+        const auto shared = grid.substances.add({"Shared", {1, 0, 1}});
         for (int k = 0; k < liquids; ++k)
         {
-            const auto element = k == liquids - 1 ? shared : grid.elements.add({"Liquid", {0, 0, 1}});
-            grid.liquid_mixture.components.push_back({element, 100.0 + 20.0 * k});
+            const auto substance = k == liquids - 1 ? shared : grid.substances.add({"Liquid", {0, 0, 1}});
+            grid.liquid_mixture.components.push_back({substance, 100.0 + 20.0 * k});
         }
         for (int k = 0; k < gases; ++k)
         {
-            const auto element = k == gases - 1 ? shared : grid.elements.add({"Gas", {0, 1, 0}});
-            grid.gas_mixture.components.push_back({element, 0.125 + 0.125 * k});
+            const auto substance = k == gases - 1 ? shared : grid.substances.add({"Gas", {0, 1, 0}});
+            grid.gas_mixture.components.push_back({substance, 0.125 + 0.125 * k});
         }
 
         auto edit = grid.beginEdit();
@@ -71,18 +71,18 @@ void materialEditingIsSparseAndReusable()
         auto expected = before;
         const Phase a = liquids ? Phase::Liquid : Phase::Gas;
         const Phase b = gases ? Phase::Gas : Phase::Liquid;
-        const ElementId first = liquids ? grid.liquid_mixture.components.front().element : grid.gas_mixture.components.front().element;
+        const SubstanceId first = liquids ? grid.liquid_mixture.components.front().substance : grid.gas_mixture.components.front().substance;
         edit.reserve(64);
-        auto paint = [&](int x, int y, Phase phase, ElementId element)
+        auto paint = [&](int x, int y, Phase phase, SubstanceId substance)
         {
-            edit.setCell(x, y, phase, element);
+            edit.setCell(x, y, phase, substance);
             const size_t i = size_t(y) * 13 + x;
             expected.liquid_fraction[i] = phase == Phase::Liquid ? Scalar(1) : Scalar(0);
             for (auto& mass : expected.liquid_mass) mass[i] = 0;
             for (auto& mass : expected.gas_mass) mass[i] = 0;
             const auto& mixture = phase == Phase::Liquid ? grid.liquid_mixture : grid.gas_mixture;
             const auto found = std::find_if(mixture.components.begin(), mixture.components.end(),
-                [&](const MixtureComponent& component) { return component.element == element; });
+                [&](const MixtureComponent& component) { return component.substance == substance; });
             auto& masses = phase == Phase::Liquid ? expected.liquid_mass : expected.gas_mass;
             masses[size_t(found - mixture.components.begin())][i] = Scalar(found->density * 6.25);
         };
@@ -120,7 +120,7 @@ void materialEditingIsSparseAndReusable()
             if (invalid == 0) moved.setCell(-1, 0, a, shared);
             else if (invalid == 1) moved.setCell(13, 0, a, shared);
             else if (invalid == 2) moved.setCell(0, 9, b, shared);
-            else moved.setCell(0, 0, a, ElementId(1000000));
+            else moved.setCell(0, 0, a, SubstanceId(1000000));
             bool rejected = false;
             try { moved.commit(); }
             catch (const std::out_of_range&) { rejected = true; }
@@ -138,7 +138,7 @@ void materialEditingIsSparseAndReusable()
 
         // A fresh upload is an independent oracle for density and pressure cache invalidation.
         Grid fresh(13, 9, 2.5);
-        fresh.elements = grid.elements;
+        fresh.substances = grid.substances;
         fresh.liquid_mixture = grid.liquid_mixture;
         fresh.gas_mixture = grid.gas_mixture;
         fresh.upload(grid.download());
@@ -160,8 +160,8 @@ void bulkMaterialEditsPreserveEveryCell()
 {
     using Scalar = typename Grid::Scalar;
     Grid grid(257, 129, 1);
-    const auto water = grid.elements.add({"Water", {0, 0, 1}});
-    const auto air = grid.elements.add({"Air", {0, 0, 0}});
+    const auto water = grid.substances.add({"Water", {0, 0, 1}});
+    const auto air = grid.substances.add({"Air", {0, 0, 0}});
     grid.liquid_mixture.components = {{water, 100}};
     grid.gas_mixture.components = {{air, 0.125}};
     const size_t count = size_t(grid.width) * grid.height;
@@ -193,8 +193,8 @@ void repeatedMaterialEditsPreservePhaseVolumes()
 {
     using Scalar = typename Grid::Scalar;
     Grid grid(17, 13, 2.5);
-    const auto water = grid.elements.add({"Water", {0, 0, 1}});
-    const auto air = grid.elements.add({"Air", {0, 0, 0}});
+    const auto water = grid.substances.add({"Water", {0, 0, 1}});
+    const auto air = grid.substances.add({"Air", {0, 0, 0}});
     grid.liquid_mixture.components = {{water, 100}};
     grid.gas_mixture.components = {{air, 0.1}};
     typename Grid::State initial;

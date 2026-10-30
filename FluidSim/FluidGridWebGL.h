@@ -1,7 +1,7 @@
 #pragma once
 #include "FluidGridTypes.h"
 #include "FluidGridEdit.h"
-#include "ElementCatalogue.h"
+#include "SubstanceCatalogue.h"
 #include "FluidMixture.h"
 #include <bitloop/core/types.h>
 #include <cstdint>
@@ -23,7 +23,7 @@ public:
     int height;
     double cell_size;
     bl::DVec2 origin = {};
-    ElementCatalogue elements;
+    SubstanceCatalogue substances;
     FluidMixture liquid_mixture;
     FluidMixture gas_mixture;
     double gravity_y = 100.0;

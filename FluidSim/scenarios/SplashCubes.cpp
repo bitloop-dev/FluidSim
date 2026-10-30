@@ -1,20 +1,17 @@
 #include "SplashCubes.h"
 #include "PerlinAtmosphere.h"
+#include "ChemicalMaterials.h"
 
 SIM_BEG;
 
 SplashCubes::SplashCubes(const Config& config) : Base(config.settings, config)
 {
-    fluid::ElementCatalogue elements;
-    air_element = elements.add({"Air", {0.0f, 0.0f, 0.0f}});
-    water_element = elements.add({"Water", {0.1f, 0.35f, 1.0f}});
-    red_element = elements.add({"Red fluid", {0.95f, 0.25f, 0.15f}});
-    cloud_element = elements.add({"Cloud", {1.0f, 1.0f, 1.0f}});
-
-    fluid::FluidMixture liquid{{{water_element, 10.0}, {red_element, 10.0}}};
-    fluid::FluidMixture gas{{{air_element, 0.1}, {cloud_element, 0.1}}};
-
-    fluid.configureMaterials(std::move(elements), std::move(liquid), std::move(gas));
+    ChemicalMaterials materials({0.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
+    hydrogen_substance = materials.hydrogen;
+    water_substance = materials.water;
+    glycerol_substance = materials.glycerol;
+    helium_substance = materials.helium;
+    fluid.configureMaterials(std::move(materials.substances), std::move(materials.liquid), std::move(materials.gas));
 }
 
 FluidGrid::State SplashCubes::initialFluidState() const
@@ -56,8 +53,8 @@ FluidGrid::State SplashCubes::initialFluidState() const
         {
             const auto& component = fluid.getLiquidMixture().components[k];
             double coverage = 0.0;
-            if (component.element == red_element) coverage = red;
-            else if (component.element == water_element) coverage = blue;
+            if (component.substance == glycerol_substance) coverage = red;
+            else if (component.substance == water_substance) coverage = blue;
             initial.liquid_mass[k][i] = component.density * coverage * cell_volume;
         }
 
@@ -66,8 +63,8 @@ FluidGrid::State SplashCubes::initialFluidState() const
         {
             const auto& component = fluid.getGasMixture().components[k];
             double share = 0.0;
-            if (component.element == cloud_element) share = cloud;
-            else if (component.element == air_element) share = 1.0 - cloud;
+            if (component.substance == helium_substance) share = cloud;
+            else if (component.substance == hydrogen_substance) share = 1.0 - cloud;
             initial.gas_mass[k][i] = component.density * (1.0 - fraction) * cell_volume * share;
         }
     }
@@ -77,24 +74,24 @@ FluidGrid::State SplashCubes::initialFluidState() const
 
 JSON::json SplashCubes::captureScenarioState() const
 {
-    return {{"elements", {air_element, water_element, red_element, cloud_element}}};
+    return {{"substances", {hydrogen_substance, water_substance, glycerol_substance, helium_substance}}};
 }
 
 void SplashCubes::validateScenarioState(const JSON::json& state, const FluidGrid& restored) const
 {
-    const auto ids = state.at("elements").get<std::array<fluid::ElementId, 4>>();
+    const auto ids = state.at(state.contains("substances") ? "substances" : "elements").get<std::array<fluid::SubstanceId, 4>>();
     for (const auto id : ids)
-        if (id >= restored.getElements().size())
-            throw std::runtime_error("Invalid saved SplashCubes element");
+        if (id >= restored.getSubstances().size())
+            throw std::runtime_error("Invalid saved SplashCubes substance");
 }
 
 void SplashCubes::restoreScenarioState(const JSON::json& state)
 {
-    const auto ids = state.at("elements").get<std::array<fluid::ElementId, 4>>();
-    air_element = ids[0];
-    water_element = ids[1];
-    red_element = ids[2];
-    cloud_element = ids[3];
+    const auto ids = state.at(state.contains("substances") ? "substances" : "elements").get<std::array<fluid::SubstanceId, 4>>();
+    hydrogen_substance = ids[0];
+    water_substance = ids[1];
+    glycerol_substance = ids[2];
+    helium_substance = ids[3];
 }
 
 SIM_END;

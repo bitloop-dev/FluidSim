@@ -19,8 +19,8 @@ public:
     bl::DVec2 getOrigin() const override;
     void setOrigin(bl::DVec2 origin) override;
     bool requiresRenderThread() const override { return false; }
-    void configureMaterials(ElementCatalogue elements, FluidMixture liquid, FluidMixture gas) override;
-    const ElementCatalogue& getElements() const override;
+    void configureMaterials(SubstanceCatalogue substances, FluidMixture liquid, FluidMixture gas) override;
+    const SubstanceCatalogue& getSubstances() const override;
     const FluidMixture& getLiquidMixture() const override;
     const FluidMixture& getGasMixture() const override;
     double getGravityY() const override;
