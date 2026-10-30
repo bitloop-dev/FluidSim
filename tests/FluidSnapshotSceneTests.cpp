@@ -1,5 +1,8 @@
 #include "FluidSim.h"
 #include "MouseAttraction.h"
+#ifndef __EMSCRIPTEN__
+#include "FluidAppearanceTests.h"
+#endif
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -102,6 +105,9 @@ void run(const fs::path& root)
     saved.scene["simulation_time"] = 1.25;
     saved.scene["real_time"] = 4.5;
     saved.scene["projection_tolerance"] = .125;
+    saved.scene["frame_time"] = .035;
+    saved.scene["liquid_tint_depth"] = 2.5f;
+    saved.scene["liquid_deep_brightness"] = .72f;
     saved.scene["mouse_attraction"] = true;
     saved.scene["mouse_target"] = {6.0, 4.0};
     FluidGrid native_grid(saved.width, saved.height, saved.cell_size);
@@ -162,6 +168,11 @@ void run(const fs::path& root)
     writeImage(root / "bad-quality.webp", broken);
     drop(project, root / "bad-quality.webp");
     assertUnchanged();
+    broken = saved;
+    broken.scene["frame_time"] = 0.;
+    writeImage(root / "bad-frame-time.webp", broken);
+    drop(project, root / "bad-frame-time.webp");
+    assertUnchanged();
     drop(project, image);
     require(scene.snapshot_error.empty(), "Successful resume did not clear the error");
     scene.updateAccelerationField(); // The previous producer belonged to the replaced device.
@@ -192,6 +203,25 @@ void run(const fs::path& root)
     scene.mouse_attraction = false;
     scene.updateAccelerationField();
     require(!scene.mouse_field_active, "CPU mouse controller did not disable");
+    scene.grid_w = 48;
+    scene.grid_h = 32;
+    scene.gravity_y = -25.;
+    scene.adaptive_mode = AdaptiveMode::MAX_4;
+    scene.restartSimulation();
+    require(!scene.simulation_failed && scene.fluid.getWidth() == 48 && scene.fluid.getHeight() == 32 &&
+        scene.world_w == 24. && scene.world_h == 16. && scene.fluid.getAdaptiveMode() == AdaptiveMode::MAX_4 &&
+        scene.fluid.getGravityY() == -25. && !scene.mouse_field && !scene.mouse_field_generator,
+        "Resolution/adaptive restart lost geometry/settings or retained an old field");
+    scene.fluid_device = FluidDevice::GPU;
+    scene.restartSimulation();
+    require(!scene.simulation_failed && scene.fluid.getDevice() == FluidDevice::GPU &&
+        scene.fluid.getAdaptiveMode() == AdaptiveMode::MAX_4,
+        "Device restart did not select adaptive WebGPU");
+    scene.adaptive_mode = AdaptiveMode::DISABLED;
+    scene.restartSimulation();
+    require(!scene.simulation_failed && scene.fluid.getAdaptiveMode() == AdaptiveMode::DISABLED &&
+        scene.frame_time == .035 && scene.fluid.getLiquidMixture().components.size() == 2,
+        "Uniform restart lost frame time or material configuration");
     project.stopHeadless();
     std::cout << "PASS file-drop resume, saved geometry/backend/clocks/quality, atomic rejection and recovery\n";
 }
@@ -201,8 +231,12 @@ int main(int argc, char** argv)
 {
     try
     {
-        run(argc == 2 ? fs::path(argv[1]) : fs::path("snapshot-scene-tests"));
+        const auto output = argc >= 2 ? fs::path(argv[1]) : fs::path("snapshot-scene-tests");
+        run(output);
         checkMouseTarget();
+#ifndef __EMSCRIPTEN__
+        fluid::test::liquidAppearance(output / "appearance", argc >= 3 ? fs::path(argv[2]) : fs::path{});
+#endif
         return 0;
     }
     catch (const std::exception& error)

@@ -114,7 +114,7 @@ FluidGridBase::State FluidGridAdaptiveCPU::download() const
     return adaptiveRaster(FluidCellView(native()));
 }
 
-void FluidGridAdaptiveCPU::writeColorPixels(std::vector<float>& pixels) const
+void FluidGridAdaptiveCPU::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const
 {
     const FluidCellView view(native());
     pixels.resize(size_t(width) * height * 4);
@@ -133,13 +133,14 @@ void FluidGridAdaptiveCPU::writeColorPixels(std::vector<float>& pixels) const
                 if (p.scale > 1) view.reconstruct(plane, x, y, p.scale);
                 for (int dy = 0; dy < p.scale; ++dy) for (int dx = 0; dx < p.scale; ++dx)
                 {
-                    float color[4] = {0, 0, 0, 1};
+                    float color[4] = {0, 0, 0, liquid_fraction_alpha ? 0.f : 1.f};
                     for (int k = 0; k < view.components(); ++k)
                     {
                         const auto& component = view.mixture->components[k];
                         const auto& c = (*view.catalogue)[component.element].color;
                         const double q = p.scale == 1 ? p.q(x, y, k) : plane.value(k, (dx + .5) / p.scale - .5, (dy + .5) / p.scale - .5);
                         for (int channel = 0; channel < 3; ++channel) color[channel] += float(q / component.density * c[channel]);
+                        if (liquid_fraction_alpha && k < view.liquidComponents) color[3] += float(q / component.density);
                     }
                     std::copy_n(color, 4, pixels.data() + size_t((y + dy) * width + x + dx) * 4);
                 }

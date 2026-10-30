@@ -30,7 +30,7 @@ public:
     void destroy() override;
     ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr) override;
     double maxDivergence() const override;
-    void writeColorPixels(std::vector<float>& pixels) const override;
+    void writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha = false) const override;
     void setAdaptiveSettings(const FluidAdaptiveSettings& value);
     const FluidAdaptiveSettings& getAdaptiveSettings() const { return settings; }
     const FluidGridAdaptiveGPU& native() const;

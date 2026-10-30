@@ -75,9 +75,9 @@ FluidGridBase::ProjectionResult FluidGridWebGPU::step(double dt, int max_iterati
     return engine->step(dt, max_iterations, divergence_tolerance, timings);
 }
 double FluidGridWebGPU::maxDivergence() const { requireUploaded(); return engine->maxDivergence(); }
-void FluidGridWebGPU::writeColorPixels(std::vector<float>& pixels) const
+void FluidGridWebGPU::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const
 {
-    requireUploaded(); engine->writeColorPixels(pixels);
+    requireUploaded(); engine->writeColorPixels(pixels, liquid_fraction_alpha);
 }
 void FluidGridWebGPU::commitEdits(detail::CellEditBatch& batch) { engine->commitEdits(batch); }
 }

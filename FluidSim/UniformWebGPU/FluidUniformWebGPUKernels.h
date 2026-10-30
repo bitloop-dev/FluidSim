@@ -32,7 +32,7 @@ fn execute() {
     write0(p, vec4f(sum, 0, 0));
 }
 )wgsl");
-        compute.build(color_pass, "fluid catalogue colors", 1, {"masses0", "masses1", "masses2", "masses3", "previous"}, R"wgsl(
+        compute.build(color_pass, "fluid catalogue colors", 1, {"masses0", "masses1", "masses2", "masses3", "previous", "liquid"}, R"wgsl(
 fn color(mass: vec4f, group: u32) -> vec3f {
     return vec3f(dot(mass, params.vectors[group]), dot(mass, params.vectors[group + 4u]), dot(mass, params.vectors[group + 8u]));
 }
@@ -43,7 +43,7 @@ fn execute() {
     if (params.grid.w > 2) { sum += color(masses2(p), 2u); }
     if (params.grid.w > 3) { sum += color(masses3(p), 3u); }
     if (mode() != 0) { sum += previous(p).xyz; }
-    write0(p, vec4f(sum, 1));
+    write0(p, vec4f(sum, select(1.0, liquid(p).x, params.value.w != 0.0)));
 }
 )wgsl");
         compute.build(pressure_coefficient, "fluid pressure weights", 1, {"density"}, R"wgsl(

@@ -44,7 +44,7 @@ public:
     double maxDivergence();
     GasTotals totals() const;
     std::vector<float> colorPixels() const;
-    void writeColorPixels(std::vector<float>& pixels) const;
+    void writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha = false) const;
     // Common adapter supplies validated, unique edits at finest native cells.
     void replaceMaterials(std::span<const detail::ResolvedCellEdit> cells);
     void synchronize() const;

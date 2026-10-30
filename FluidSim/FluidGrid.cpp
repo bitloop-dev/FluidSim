@@ -145,7 +145,7 @@ FluidGrid::ProjectionResult FluidGrid::step(double dt, int max_iterations, doubl
 }
 
 double FluidGrid::maxDivergence() const { return backend->maxDivergence(); }
-void FluidGrid::writeColorPixels(std::vector<float>& pixels) const { backend->writeColorPixels(pixels); }
+void FluidGrid::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const { backend->writeColorPixels(pixels, liquid_fraction_alpha); }
 void FluidGrid::commitEdits(detail::CellEditBatch& batch) { backend->commitEdits(batch); }
 
 }

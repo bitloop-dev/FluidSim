@@ -37,7 +37,7 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     fluid::AdaptiveMode adaptive_mode = fluid::AdaptiveMode::DISABLED;
     fluid::FluidAdaptiveSettings adaptive_settings;
 
-    static constexpr double frame_time = 0.02;
+    double frame_time = 0.02;
     static constexpr int steps_per_frame = 60;
     static constexpr int projection_max_iterations = 2000;
     double projection_tolerance = 0.1; // Scene policy, independent of engine API defaults.
@@ -56,24 +56,34 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     ElementId red_element{};
     ElementId cloud_element{};
 
-    const char* fluid_shader_src = R"(
+    static constexpr const char* fluid_shader_src = R"(
         #version 300 es
         precision highp float;
 
         uniform sampler2D u_color;
+        uniform sampler2D u_proximity;
+        uniform float u_deep_brightness;
         
         in vec2 v_uv;
         out vec4 outColor;
 
         void main()
         {
-            outColor = texture(u_color, v_uv);
+            vec4 material = texture(u_color, v_uv); // Alpha carries liquid coverage.
+            float proximity = sqrt(clamp(2.0 * texture(u_proximity, v_uv).r, 0.0, 1.0));
+            vec3 transmission = pow(vec3(proximity), vec3(1.25, 0.9, 0.75));
+            vec3 shallow = mix(material.rgb, vec3(0.48, 0.85, 0.95), 0.3);
+            vec3 deep = material.rgb * u_deep_brightness;
+            vec3 water = max(deep, mix(deep, shallow, transmission));
+            outColor = vec4(mix(material.rgb, water, clamp(material.a, 0.0, 1.0)), 1.0);
         }
     )";
 
     ShaderSurface surface;
     FluidGridDisplay fluid_display;
     std::vector<float> display_pixels;
+    float liquid_tint_depth = 6.0f; // Gas proximity range in cells.
+    float liquid_deep_brightness = 0.6f; // Minimum liquid brightness.
     bool profile_stages = true;
     int checkpoint_brotli_quality = -1; // Storage policy: -1=uncompressed, 0..11=Brotli.
     std::string resume_image;
@@ -99,7 +109,8 @@ struct FluidSim_Scene : public Scene<FluidSim_Scene>
     JSON::json captureSceneState() const;
     void restoreSceneState(const JSON::json& state, const fluid::FluidCheckpoint& checkpoint,
         int width, int height, double spacing);
-    bool captureSnapshot(SnapshotFrame& output) const override;
+    void captureFluidImage(CaptureFrame& output) const;
+    bool captureFrame(const CapturePreset& request, CaptureFrame& output) const override;
     void resumeFromImage(const std::filesystem::path& image);
 
     // Route operations to the engine's required owner (WebGPU stays on the simulation worker).

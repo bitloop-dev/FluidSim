@@ -98,9 +98,9 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveWebGPU::step(double dt, int max
     return result;
 }
 double FluidGridAdaptiveWebGPU::maxDivergence() const { native(); return engine->maxDivergence(); }
-void FluidGridAdaptiveWebGPU::writeColorPixels(std::vector<float>& pixels) const
+void FluidGridAdaptiveWebGPU::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const
 {
-    native(); engine->writeColorPixels(pixels);
+    native(); engine->writeColorPixels(pixels, liquid_fraction_alpha);
 }
 
 FluidGridBase::State FluidGridAdaptiveWebGPU::download() const

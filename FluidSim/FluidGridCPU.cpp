@@ -1730,7 +1730,7 @@ int FluidGridCPU::solvePressure(int max_iterations, double residual_tolerance)
     return iterations;
 }
 
-void FluidGridCPU::writeColorPixels(std::vector<float>& pixels) const
+void FluidGridCPU::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const
 {
     const int cell_count = width * height;
     const double cell_volume = cell_size * cell_size;
@@ -1743,7 +1743,7 @@ void FluidGridCPU::writeColorPixels(std::vector<float>& pixels) const
         {
             float* pixel = pixels.data() + size_t(i) * 4;
             pixel[0] = pixel[1] = pixel[2] = 0.0f;
-            pixel[3] = 1.0f;
+            pixel[3] = liquid_fraction_alpha ? float(liquid_fraction[i]) : 1.0f;
 
             auto addMixture = [&](const FluidMixture& mixture, const auto& masses)
             {

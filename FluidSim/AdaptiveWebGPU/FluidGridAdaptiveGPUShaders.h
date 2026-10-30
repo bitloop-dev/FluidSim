@@ -67,10 +67,11 @@ inline constexpr std::string_view color=R"wgsl(
 fn execute(){let p=cell();if(!valid(p)||maskData[ci(p)]==0.0){return;}
     let ratio=i32(params.level.y);var lim=vec2f(0);if(ratio>1){lim=materialLimiter(stencil(p),nc());}
     for(var y=0;y<ratio;y++){for(var x=0;x<ratio;x++){
-        let delta=(vec2f(f32(x),f32(y))+0.5)/f32(ratio)-0.5;var rgb=vec3f(0);
+        let delta=(vec2f(f32(x),f32(y))+0.5)/f32(ratio)-0.5;var rgb=vec3f(0);var liquid=0.0;
         for(var n=0;n<nc();n++){var mass=q(p,n);if(ratio>1){mass+=dot(delta,0.5*vec2f(q(p+vec2i(1,0),n)-q(p-vec2i(1,0),n),q(p+vec2i(0,1),n)-q(p-vec2i(0,1),n))*lim);}
-            let k=n*4;rgb+=mass/paletteData[k+3]*vec3f(paletteData[k],paletteData[k+1],paletteData[k+2]);}
-        write0((p+vec2i(patchValue(0),patchValue(1)))*ratio+vec2i(x,y),vec4f(rgb,1));
+            let k=n*4;rgb+=mass/paletteData[k+3]*vec3f(paletteData[k],paletteData[k+1],paletteData[k+2]);
+            if(n<nl()){liquid+=mass/paletteData[k+3];}}
+        write0((p+vec2i(patchValue(0),patchValue(1)))*ratio+vec2i(x,y),vec4f(rgb,select(1.0,liquid,params.level.z!=0.0)));
     }}
 })wgsl";
 

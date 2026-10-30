@@ -117,7 +117,7 @@ struct FluidGridGPU::Impl : UniformKernels
     }
     void uploadComponents(const FluidGridGPU& grid, const State& state);
     void rebuildDensity();
-    void rebuildColor(const FluidGridGPU& grid);
+    void rebuildColor(const FluidGridGPU& grid, bool liquid_fraction_alpha);
     void sumGroups(Kernel& program, Field& result, Field& scratch, size_t first);
     void advectComponents(double dt, int direction);
     void rebuildPressureCoefficients();
@@ -536,9 +536,9 @@ std::vector<float> FluidGridGPU::colorPixels() const
     return pixels;
 }
 
-void FluidGridGPU::writeColorPixels(std::vector<float>& pixels) const
+void FluidGridGPU::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const
 {
-    gpu->configure(*this); gpu->rebuildColor(*this); gpu->runner.read(gpu->color, pixels);
+    gpu->configure(*this); gpu->rebuildColor(*this, liquid_fraction_alpha); gpu->runner.read(gpu->color, pixels);
 }
 
 void FluidGridGPU::synchronize() const { if (gpu) gpu->runner.read(gpu->liquid_fraction,0,sizeof(float)); }
@@ -782,9 +782,10 @@ void FluidGridGPU::Impl::rebuildDensity()
     density_valid = true;
 }
 
-void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid)
+void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid, bool liquid_fraction_alpha)
 {
-    if (components.empty()) run(fill, { &color }, {}, 0, 1);
+    color_pass.parameters.value[3] = float(liquid_fraction_alpha);
+    if (components.empty()) run(fill, { &color }, {}, 0, liquid_fraction_alpha ? 0 : 1);
     for (size_t first = 0; first < components.size(); first += 4)
     {
         std::array<std::array<float, 4>, 4> channels[3] = {};
@@ -812,7 +813,8 @@ void FluidGridGPU::Impl::sumGroups(Kernel& program, Field& result, Field& scratc
     for (size_t j = 0; j < 4; ++j) inputs[j] = &components[first + std::min(j, count - 1)].mass;
     program.parameters.grid[3] = int(count);
     run(program, { &scratch }, { {"masses0", inputs[0]}, {"masses1", inputs[1]},
-        {"masses2", inputs[2]}, {"masses3", inputs[3]}, {"previous", &result} }, 0, first != 0);
+        {"masses2", inputs[2]}, {"masses3", inputs[3]}, {"previous", &result},
+        {"liquid", &liquid_fraction} }, 0, first != 0);
     result.swap(scratch);
 }
 

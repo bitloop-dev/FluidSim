@@ -688,7 +688,7 @@ std::vector<float> FluidGridAdaptiveGPU::colorPixels() const {
     writeColorPixels(pixels);
     return pixels;
 }
-void FluidGridAdaptiveGPU::writeColorPixels(std::vector<float>& pixels) const {
+void FluidGridAdaptiveGPU::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const {
     auto& g = *impl;
     g.fillGhosts();
     if (!g.color.buffer)
@@ -696,6 +696,7 @@ void FluidGridAdaptiveGPU::writeColorPixels(std::vector<float>& pixels) const {
     for (const auto& l : g.data) {
         auto p = g.params(*l);
         p.level[1] = float(std::lround(l->geometry.cell_size / g.cellSize));
+        p.level[2] = float(liquid_fraction_alpha);
         g.runner.run(g.colorKernel, {&g.color}, {{"state", &l->conserved}, {"metadata", &l->storage->metadata}, {"mask", &l->active}, {"palette", &g.palette}},
                      p, g.extent(*l));
     }

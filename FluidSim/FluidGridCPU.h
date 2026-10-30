@@ -81,7 +81,7 @@ struct FluidGridCPU final : FluidGridBase
 
     void upload(const State& state) override;
     State download() const override;
-    void writeColorPixels(std::vector<float>& pixels) const override;
+    void writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha = false) const override;
 
     // Call after editing component masses or derived density/pressure coefficients directly.
     // upload() and engine transport invalidate these caches automatically; velocities are not cached.

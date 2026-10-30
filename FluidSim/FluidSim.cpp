@@ -53,8 +53,68 @@ void FluidSim_Scene::UI::sidebar()
     ImGui::TextDisabled("Drop a saved FluidSim WebP onto the viewport to resume.");
     bl_view(snapshot_error);
     if (!snapshot_error.empty()) ImGui::TextWrapped("%s", snapshot_error.c_str());
+    bl_pull(grid_w, grid_h);
     if (ImGui::Button("Restart Simulation"))
-        bl_schedule([](FluidSim_Scene& scene) { scene.restartSimulation(); });
+        bl_schedule([width = std::clamp(grid_w, 32, 4096), height = std::clamp(grid_h, 32, 4096)](FluidSim_Scene& scene)
+        {
+            scene.grid_w = width;
+            scene.grid_h = height;
+            scene.restartSimulation();
+        });
+
+    bl_scoped(liquid_tint_depth, liquid_deep_brightness);
+    ImGui::SliderFloat("Gas proximity range", &liquid_tint_depth, 0.5f, 32.f, "%.1f cells", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SliderFloat("Minimum brightness", &liquid_deep_brightness, 0.1f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+
+    int resolution[] = {grid_w, grid_h};
+    if (ImGui::InputInt2("Resolution", resolution))
+    {
+        grid_w = resolution[0];
+        grid_h = resolution[1];
+    }
+    bl_pull_temp(fluid_device, adaptive_mode);
+    int device = int(fluid_device);
+    if (ImGui::Combo("Device", &device, "CPU\0WebGPU\0"))
+        bl_schedule([device](FluidSim_Scene& scene)
+        {
+            scene.fluid_device = fluid::FluidDevice(device);
+            scene.restartSimulation();
+        });
+
+    bl_pull(surface_tension);
+    bl_scoped(mouse_attraction);
+    int mode = 0;
+    for (int scale = int(adaptive_mode); scale > 1; scale /= 2)
+        ++mode;
+    ImGui::BeginDisabled(surface_tension != 0. || mouse_attraction);
+    if (ImGui::Combo("Adaptive Mode", &mode, "Disabled\0Max 2x2\0Max 4x4\0Max 8x8\0Max 16x16\0Max 32x32\0"))
+        bl_schedule([mode](FluidSim_Scene& scene)
+        {
+            scene.adaptive_mode = fluid::AdaptiveMode(mode == 0 ? 0 : 1 << mode);
+            scene.restartSimulation();
+        });
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Restarts the simulation. Adaptive mode requires zero Surface Tension and Mouse attraction off.");
+    ImGui::EndDisabled();
+
+    bl_pull(frame_time);
+    ImGui::SliderDouble("Frame Time", &frame_time, 0.001, 0.2, "%.3f s", ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        bl_schedule([value = frame_time](FluidSim_Scene& scene)
+        {
+            scene.frame_time = value;
+            scene.adaptive_settings.prediction_horizon = scene.adaptive_settings.check_interval + value;
+            scene.fluid.setAdaptiveSettings(scene.adaptive_settings);
+        });
+
+    bl_pull(gravity_y);
+    ImGui::InputDouble("Gravity", &gravity_y, 0., 0., "%.6g");
+    if (ImGui::IsItemDeactivatedAfterEdit() && std::isfinite(gravity_y))
+        bl_schedule([value = gravity_y](FluidSim_Scene& scene)
+        {
+            scene.withFluidContext([&] { scene.fluid.setGravityY(value); });
+            scene.gravity_y = value;
+        });
 
     bl_pull(projection_tolerance);
     const double before_input = projection_tolerance;
@@ -74,8 +134,6 @@ void FluidSim_Scene::UI::sidebar()
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Positive maximum cell divergence (per second).\nLarger values trade accuracy for speed.\nPress Enter or leave the field to apply.");
 
-    bl_pull(surface_tension);
-    bl_view(adaptive_mode);
     ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED);
     const double old_tension = surface_tension;
     ImGui::InputDouble("Surface Tension", &surface_tension, 0., 0., "%.6g");
@@ -93,7 +151,6 @@ void FluidSim_Scene::UI::sidebar()
         ImGui::SetTooltip("Liquid-gas surface tension in scene units; zero disables it.\nUniform CPU and WebGPU. Stronger tension may require extra physics steps.\nPress Enter or leave the field to apply.");
     ImGui::EndDisabled();
 
-    bl_scoped(mouse_attraction);
     ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED);
     ImGui::Checkbox("Mouse attraction", &mouse_attraction);
     if (ImGui::IsItemHovered())
@@ -241,7 +298,7 @@ void FluidSim_Scene::initializePool(double amplitude)
         withFluidContext([&]()
         {
             fluid.upload(initial);
-            fluid.writeColorPixels(display_pixels);
+            fluid.writeColorPixels(display_pixels, true);
         });
     }
     catch (const std::runtime_error& error)
@@ -260,6 +317,28 @@ void FluidSim_Scene::sceneStart()
 
 void FluidSim_Scene::restartSimulation()
 {
+    if (grid_w != fluid.getWidth() || grid_h != fluid.getHeight() ||
+        fluid_device != fluid.getDevice() || adaptive_mode != fluid.getAdaptiveMode())
+    {
+        FluidGrid replacement(grid_w, grid_h, cell_size);
+        replacement.setAdaptiveSettings(adaptive_settings);
+        replacement.setDevice(fluid_device);
+        replacement.setAdaptiveMode(adaptive_mode);
+        replacement.configureMaterials(fluid.getElements(), fluid.getLiquidMixture(), fluid.getGasMixture());
+        replacement.setOrigin(fluid.getOrigin());
+        replacement.setGravityY(gravity_y);
+        replacement.setSurfaceTension(surface_tension);
+        withFluidContext([&]
+        {
+            mouse_field_generator.reset();
+            mouse_field.reset();
+            mouse_field_active = false;
+            fluid.destroy();
+            fluid = std::move(replacement);
+        });
+        world_w = grid_w * cell_size;
+        world_h = grid_h * cell_size;
+    }
     simulation_failed = false;
     simulation_time = real_time = 0.;
     frame_statistics = {};
@@ -424,7 +503,7 @@ void FluidSim_Scene::viewportProcess(
 
             // Observe on the simulation/device owner; render only the derived image.
             const auto colour_started = Clock::now();
-            fluid.writeColorPixels(display_pixels);
+            fluid.writeColorPixels(display_pixels, true);
             frame_statistics.colour_ms = std::chrono::duration<double, std::milli>(Clock::now() - colour_started).count();
         });
     }
@@ -443,6 +522,8 @@ void FluidSim_Scene::renderFluidSurface() const
     surface.render(fluid.getWidth(), fluid.getHeight(), [&](const ShaderSurface& shader)
     {
         shader.bindTexture2D("u_color", fluid_display.texture(fluid.getWidth(), fluid.getHeight(), display_pixels));
+        shader.bindTexture2D("u_proximity", fluid_display.proximityTexture(fluid.getWidth(), fluid.getHeight(), display_pixels, liquid_tint_depth));
+        shader.setUniform1f("u_deep_brightness", liquid_deep_brightness);
     });
 }
 
@@ -520,6 +601,7 @@ JSON::json FluidSim_Scene::captureSceneState() const
         {"version", 1}, {"simulation_time", simulation_time}, {"real_time", real_time},
         {"simulation_failed", simulation_failed}, {"projection_tolerance", projection_tolerance},
         {"profile_stages", profile_stages}, {"frame_time", frame_time},
+        {"liquid_tint_depth", liquid_tint_depth}, {"liquid_deep_brightness", liquid_deep_brightness},
         {"mouse_attraction", mouse_attraction},
         {"mouse_attraction_strength", mouse_attraction_strength},
         {"mouse_attraction_radius", mouse_attraction_radius},
@@ -530,8 +612,36 @@ JSON::json FluidSim_Scene::captureSceneState() const
     };
 }
 
-bool FluidSim_Scene::captureSnapshot(SnapshotFrame& output) const
+void FluidSim_Scene::captureFluidImage(CaptureFrame& output) const
 {
+    output.resolution = {fluid.getWidth(), fluid.getHeight()};
+    const_cast<FluidSim_Scene*>(this)->renderThreadQueue().invokeBlocking([&]
+    {
+        GLStateGuard guard;
+        const bool scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST); // A viewport's clip must not crop a native capture.
+        renderFluidSurface();
+        GLuint framebuffer;
+        glGenFramebuffers(1, &framebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surface.texture(), 0);
+        output.frame.data.resize(size_t(output.resolution.x) * output.resolution.y * 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, output.resolution.x, output.resolution.y, GL_RGBA, GL_UNSIGNED_BYTE, output.frame.data.data());
+        glDeleteFramebuffers(1, &framebuffer);
+        if (scissor) glEnable(GL_SCISSOR_TEST);
+    });
+}
+
+bool FluidSim_Scene::captureFrame(const CapturePreset& request, CaptureFrame& output) const
+{
+    output.frame.payload.clear();
+    if (request.isVideo())
+    {
+        captureFluidImage(output);
+        return true;
+    }
+
     fluid::FluidSnapshot snapshot;
     snapshot.width = fluid.getWidth();
     snapshot.height = fluid.getHeight();
@@ -540,8 +650,7 @@ bool FluidSim_Scene::captureSnapshot(SnapshotFrame& output) const
     bool saved = false;
     withFluidContext([&] { saved = fluid.saveCheckpoint(snapshot.checkpoint); });
     if (!saved) throw std::runtime_error("This fluid engine does not support resumable snapshots");
-    output.resolution = {snapshot.width, snapshot.height};
-    output.frame.data = fluid::fluidSnapshotPixels(display_pixels);
+    captureFluidImage(output);
     output.frame.payload = fluid::encodeFluidSnapshot(snapshot);
     return true;
 }
@@ -549,9 +658,12 @@ bool FluidSim_Scene::captureSnapshot(SnapshotFrame& output) const
 void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::FluidCheckpoint& checkpoint,
     int width, int height, double spacing)
 {
-    if (scene.at("version") != 1 || scene.at("frame_time") != frame_time ||
+    if (scene.at("version") != 1 ||
         scene.at("steps_per_frame") != steps_per_frame || scene.at("projection_max_iterations") != projection_max_iterations)
         throw std::runtime_error("Snapshot scene timestep/solver policy does not match this build");
+    const double saved_frame_time = scene.at("frame_time").get<double>();
+    if (!std::isfinite(saved_frame_time) || saved_frame_time <= 0.)
+        throw std::runtime_error("Invalid saved frame time");
     const int device = scene.at("device").get<int>();
     const int mode = scene.at("adaptive_mode").get<int>();
     if ((device != int(fluid::FluidDevice::CPU) && device != int(fluid::FluidDevice::GPU)) ||
@@ -564,6 +676,11 @@ void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::Flu
         throw std::runtime_error("Invalid saved pressure quality");
     const bool saved_failure = scene.at("simulation_failed").get<bool>();
     const bool saved_profiling = scene.at("profile_stages").get<bool>();
+    const float saved_tint_depth = scene.value("liquid_tint_depth", liquid_tint_depth);
+    const float saved_deep_brightness = scene.value("liquid_deep_brightness", liquid_deep_brightness);
+    if (!std::isfinite(saved_tint_depth) || saved_tint_depth <= 0.f ||
+        !std::isfinite(saved_deep_brightness) || saved_deep_brightness < 0.f || saved_deep_brightness > 1.f)
+        throw std::runtime_error("Invalid saved liquid appearance settings");
     const auto ids = scene.at("scene_elements").get<std::array<ElementId, 4>>();
     const bool saved_mouse_attraction = scene.value("mouse_attraction", false);
     const double saved_strength = scene.value("mouse_attraction_strength", mouse_attraction_strength);
@@ -582,7 +699,7 @@ void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::Flu
     for (const auto id : ids)
         if (id >= restored.getElements().size()) throw std::runtime_error("Invalid saved scene element");
     std::vector<float> pixels;
-    restored.writeColorPixels(pixels);
+    restored.writeColorPixels(pixels, true);
     withFluidContext([&]
     {
         mouse_field_generator.reset();
@@ -591,6 +708,9 @@ void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::Flu
         fluid = std::move(restored);
     });
     display_pixels = std::move(pixels);
+    frame_time = saved_frame_time;
+    adaptive_settings.prediction_horizon = adaptive_settings.check_interval + frame_time;
+    fluid.setAdaptiveSettings(adaptive_settings);
     grid_w = width;
     grid_h = height;
     cell_size = spacing;
@@ -610,6 +730,8 @@ void FluidSim_Scene::restoreSceneState(const JSON::json& scene, const fluid::Flu
     projection_tolerance = saved_tolerance;
     simulation_failed = saved_failure;
     profile_stages = saved_profiling;
+    liquid_tint_depth = saved_tint_depth;
+    liquid_deep_brightness = saved_deep_brightness;
     air_element = ids[0];
     water_element = ids[1];
     red_element = ids[2];
@@ -666,8 +788,8 @@ bool FluidSim_Scene::captureTraceSnapshot(std::string_view route, SimSnapshotIma
     if (route != "grid" || display_pixels.empty())
         return false;
 
-    SnapshotFrame snapshot;
-    captureSnapshot(snapshot);
+    CaptureFrame snapshot;
+    captureFrame(CapturePreset{}, snapshot);
     image.resolution = snapshot.resolution;
     image.pixels = std::move(snapshot.frame.data);
     image.payload = std::move(snapshot.frame.payload);

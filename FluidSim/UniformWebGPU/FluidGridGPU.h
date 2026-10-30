@@ -70,7 +70,7 @@ public:
     double maxDivergence() const;
 
     std::vector<float> colorPixels() const;
-    void writeColorPixels(std::vector<float>& pixels) const;
+    void writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha = false) const;
     void synchronize() const;
 
     constexpr int uIndex(int x, int y) const { return y * (width + 1) + x; }

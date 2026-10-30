@@ -85,8 +85,9 @@ public:
     virtual ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr) = 0;
     virtual double maxDivergence() const = 0;
 
-    // Derived RGBA display output; reuse caller storage without downloading the physical state.
-    virtual void writeColorPixels(std::vector<float>& pixels) const = 0;
+    // Derived RGB with opaque alpha by default; optionally put liquid coverage in alpha
+    // for shading. Reuse caller storage without downloading the physical state.
+    virtual void writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha = false) const = 0;
 
 protected:
     virtual void commitEdits(detail::CellEditBatch& batch) = 0;
