@@ -27,6 +27,9 @@ public:
     void setGravityY(double acceleration) override;
     double getSurfaceTension() const override;
     void setSurfaceTension(double coefficient) override;
+    double capillaryStepLimit() const override;
+    double getPressureRecoveryTime() const override;
+    void setPressureRecoveryTime(double seconds) override;
     void setAccelerationField(const FluidField& field) override;
     void clearAccelerationField() override;
     void setWebGPUContext(const FluidWebGPUContext& context) override;

@@ -71,6 +71,7 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
     selected->setOrigin(getOrigin()); 
     selected->setGravityY(getGravityY());
     selected->setSurfaceTension(getSurfaceTension());
+    selected->setPressureRecoveryTime(getPressureRecoveryTime());
 
     backend = std::move(selected); 
 
@@ -111,6 +112,9 @@ double FluidGrid::getGravityY() const { return backend->getGravityY(); }
 void FluidGrid::setGravityY(double acceleration) { backend->setGravityY(acceleration); }
 double FluidGrid::getSurfaceTension() const { return backend->getSurfaceTension(); }
 void FluidGrid::setSurfaceTension(double coefficient) { backend->setSurfaceTension(coefficient); }
+double FluidGrid::capillaryStepLimit() const { return backend->capillaryStepLimit(); }
+double FluidGrid::getPressureRecoveryTime() const { return backend->getPressureRecoveryTime(); }
+void FluidGrid::setPressureRecoveryTime(double seconds) { backend->setPressureRecoveryTime(seconds); }
 void FluidGrid::setAccelerationField(const FluidField& field)
 {
     backend->setAccelerationField(field);

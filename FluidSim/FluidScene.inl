@@ -12,7 +12,7 @@ FluidScene<Derived>::FluidScene(const FluidSceneSettings& settings, const Config
       fluid_device(settings.fluid_device), adaptive_mode(settings.adaptive_mode),
       frame_time(settings.frame_time), steps_per_second(settings.steps_per_second),
       projection_max_iterations(settings.projection_max_iterations),
-      projection_tolerance(settings.projection_tolerance), gravity_y(settings.gravity_y),
+      projection_tolerance(settings.projection_tolerance), pressure_recovery_frames(settings.pressure_recovery_frames), gravity_y(settings.gravity_y),
       surface_tension(settings.surface_tension),
       checkpoint_brotli_quality(config.checkpoint_brotli_quality), resume_image(config.resume_image)
 {
@@ -22,6 +22,7 @@ FluidScene<Derived>::FluidScene(const FluidSceneSettings& settings, const Config
     fluid.setAdaptiveMode(adaptive_mode);
     fluid.setGravityY(gravity_y);
     fluid.setSurfaceTension(surface_tension);
+    fluid.setPressureRecoveryTime(pressure_recovery_frames * frame_time);
 }
 
 template<class Derived>
@@ -38,6 +39,8 @@ void FluidScene<Derived>::restartSimulation()
     if (grid_w != fluid.getWidth() || grid_h != fluid.getHeight() ||
         fluid_device != fluid.getDevice() || adaptive_mode != fluid.getAdaptiveMode())
     {
+        const double proximity_scale = liquid_tint_depth /
+            std::hypot(double(fluid.getWidth()), double(fluid.getHeight()));
         FluidGrid replacement(grid_w, grid_h, cell_size);
         replacement.setAdaptiveSettings(adaptive_settings);
         replacement.setDevice(fluid_device);
@@ -46,6 +49,7 @@ void FluidScene<Derived>::restartSimulation()
         replacement.setOrigin(fluid.getOrigin());
         replacement.setGravityY(gravity_y);
         replacement.setSurfaceTension(surface_tension);
+        replacement.setPressureRecoveryTime(pressure_recovery_frames * frame_time);
         withFluidContext([&]
         {
             mouse_field_generator.reset();
@@ -54,12 +58,14 @@ void FluidScene<Derived>::restartSimulation()
             fluid.destroy();
             fluid = std::move(replacement);
         });
+        liquid_tint_depth = float(proximity_scale * std::hypot(double(grid_w), double(grid_h)));
         world_w = grid_w * cell_size;
         world_h = grid_h * cell_size;
     }
     simulation_failed = false;
     simulation_time = real_time = 0.;
     frame_statistics = {};
+    ++frame_statistics_generation;
     frame_statistics.projection_tolerance = projection_tolerance;
     try
     {
@@ -78,10 +84,91 @@ void FluidScene<Derived>::restartSimulation()
 }
 
 template<class Derived>
+void FluidScene<Derived>::applyPreset(const FluidSceneSettings& settings)
+{
+    // Prepare all backend settings together, including accurate/relaxed mode,
+    // before restarting. Applying them one UI control at a time can restart twice.
+    auto next_adaptive_settings = adaptive_settings;
+    next_adaptive_settings.prediction_horizon = next_adaptive_settings.check_interval + settings.frame_time;
+    FluidGrid replacement(settings.grid_w, settings.grid_h, settings.cell_size);
+    replacement.setAdaptiveSettings(next_adaptive_settings);
+    replacement.setDevice(settings.fluid_device);
+    replacement.setAdaptiveMode(settings.adaptive_mode);
+    replacement.configureMaterials(fluid.getSubstances(), fluid.getLiquidMixture(), fluid.getGasMixture());
+    replacement.setOrigin(fluid.getOrigin());
+    replacement.setGravityY(settings.gravity_y);
+    replacement.setSurfaceTension(settings.surface_tension);
+    replacement.setPressureRecoveryTime(settings.pressure_recovery_frames * settings.frame_time);
+
+    const bool resize = settings.grid_w != fluid.getWidth() || settings.grid_h != fluid.getHeight() ||
+        settings.cell_size != fluid.getCellSize();
+    const double proximity_scale = liquid_tint_depth /
+        std::hypot(double(fluid.getWidth()), double(fluid.getHeight()));
+    withFluidContext([&]
+    {
+        mouse_field_generator.reset();
+        mouse_field.reset();
+        mouse_field_active = false;
+        fluid.destroy();
+        fluid = std::move(replacement);
+    });
+
+    grid_w = settings.grid_w;
+    grid_h = settings.grid_h;
+    cell_size = settings.cell_size;
+    world_w = grid_w * cell_size;
+    world_h = grid_h * cell_size;
+    fluid_device = settings.fluid_device;
+    adaptive_mode = settings.adaptive_mode;
+    adaptive_settings = next_adaptive_settings;
+    frame_time = settings.frame_time;
+    steps_per_second = settings.steps_per_second;
+    projection_max_iterations = settings.projection_max_iterations;
+    projection_tolerance = settings.projection_tolerance;
+    pressure_recovery_frames = settings.pressure_recovery_frames;
+    gravity_y = settings.gravity_y;
+    surface_tension = settings.surface_tension;
+    liquid_tint_depth = float(proximity_scale * std::hypot(double(grid_w), double(grid_h)));
+
+    restartSimulation();
+    snapshot_error.clear();
+    if (resize)
+    {
+        const auto origin = fluid.getOrigin();
+        for (auto* viewport : this->mountedToViewports())
+            camera.focusWorldRect(*viewport, origin.x, origin.y, origin.x + world_w, origin.y + world_h);
+        camera.uiSetCurrentAsDefault();
+    }
+}
+
+template<class Derived>
 void FluidScene<Derived>::setSurfaceTension(double coefficient)
 {
     withFluidContext([&] { fluid.setSurfaceTension(coefficient); });
     surface_tension = coefficient;
+}
+
+template<class Derived>
+void FluidScene<Derived>::setPressureRecoveryFrames(int frames)
+{
+    if (frames < 0 || frames > 10)
+        throw std::invalid_argument("Pressure recovery must be between zero and ten frames");
+    if (frames > 0 && (fluid_device != fluid::FluidDevice::GPU || adaptive_mode != fluid::AdaptiveMode::DISABLED))
+        throw std::invalid_argument("Pressure recovery requires uniform WebGPU");
+    const bool restart = (frames == 0) != (pressure_recovery_frames == 0);
+    withFluidContext([&]
+    {
+        if (restart)
+        {
+            mouse_field_generator.reset();
+            mouse_field.reset();
+            mouse_field_active = false;
+            fluid.destroy();
+        }
+        fluid.setPressureRecoveryTime(frames * frame_time);
+    });
+    pressure_recovery_frames = frames;
+    if (restart) restartSimulation();
 }
 
 template<class Derived>
@@ -165,7 +252,15 @@ void FluidScene<Derived>::sceneProcess(double dt)
     frame_statistics.projection_tolerance = projection_tolerance;
 
     // Equal substeps avoid tiny leftover timesteps that spoil pressure reuse.
-    const int step_count = int(std::ceil(frame_time * double(steps_per_second)));
+    int step_count = int(std::ceil(frame_time * double(steps_per_second)));
+    if (fluid.getDevice() == fluid::FluidDevice::GPU &&
+        fluid.getAdaptiveMode() == fluid::AdaptiveMode::DISABLED &&
+        std::ceil(frame_time / fluid.capillaryStepLimit()) >= step_count)
+    {
+        // The engine's capillary steps already satisfy the scene's minimum rate.
+        // Subdivide the whole frame there once (e.g. five steps instead of 2 x 3).
+        step_count = 1;
+    }
     const double step = frame_time / step_count;
 
     simulation_time += frame_time;
@@ -194,8 +289,10 @@ void FluidScene<Derived>::sceneProcess(double dt)
                 frame_statistics.substeps += result.physical_steps;
                 frame_statistics.transport_steps += result.transport_steps;
                 frame_statistics.pressure_iterations += result.iterations;
+                frame_statistics.max_volume_error = std::max(frame_statistics.max_volume_error, result.max_volume_error);
+                frame_statistics.rms_volume_error = std::max(frame_statistics.rms_volume_error, result.rms_volume_error);
 
-                if (!result.converged)
+                if (!result.accepted())
                 {
                     blPrint() << "Projection failed; max divergence: "
                         << result.max_divergence;
@@ -257,6 +354,19 @@ void FluidScene<Derived>::viewportDraw(Viewport* ctx) const
     ctx->fillText<double>("Sim Time: " + std::to_string(simulation_time), {10.0, 10.0});
     ctx->fillText<double>("Real Time: " + std::to_string(real_time), {10.0, 30.0});
     last_render_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+
+    auto& history = frame_time_history;
+    if (history.generation != frame_statistics_generation)
+    {
+        history = {};
+        history.generation = frame_statistics_generation;
+    }
+    // Paused redraws and extra viewports must not count the same simulation frame twice.
+    if (frame_statistics.update_ms > 0. && history.last_simulation_time != simulation_time)
+    {
+        history.add(real_time, frame_statistics.update_ms + last_render_ms);
+        history.last_simulation_time = simulation_time;
+    }
 }
 
 template<class Derived>
@@ -307,8 +417,9 @@ template<class Derived>
 JSON::json FluidScene<Derived>::captureSceneState() const
 {
     return {
-        {"version", 3}, {"scenario", Derived::scenario_id}, {"simulation_time", simulation_time}, {"real_time", real_time},
+        {"version", pressure_recovery_frames > 0 ? 4 : 3}, {"scenario", Derived::scenario_id}, {"simulation_time", simulation_time}, {"real_time", real_time},
         {"simulation_failed", simulation_failed}, {"projection_tolerance", projection_tolerance},
+        {"pressure_recovery_frames", pressure_recovery_frames},
         {"profile_stages", profile_stages}, {"frame_time", frame_time},
         {"liquid_tint_depth", liquid_tint_depth}, {"liquid_deep_brightness", liquid_deep_brightness},
         {"mouse_attraction", mouse_attraction},
@@ -370,13 +481,16 @@ template<class Derived>
 void FluidScene<Derived>::restoreSceneState(const JSON::json& scene, const fluid::FluidCheckpoint& checkpoint,
     int width, int height, double spacing)
 {
-    if (scene.at("version") != 2 && scene.at("version") != 3)
+    if (scene.at("version") != 2 && scene.at("version") != 3 && scene.at("version") != 4)
         throw std::runtime_error("Unsupported fluid scene snapshot version");
     if (scene.at("scenario") != Derived::scenario_id)
         throw std::runtime_error("Snapshot belongs to a different fluid scenario");
     if (scene.at("steps_per_second") != steps_per_second || scene.at("projection_max_iterations") != projection_max_iterations)
         throw std::runtime_error("Snapshot timestep/solver policy does not match this scene");
     const double saved_frame_time = scene.at("frame_time").get<double>();
+    const int saved_recovery = scene.at("version") == 4 ? scene.at("pressure_recovery_frames").get<int>() : 0;
+    if (saved_recovery < 0 || saved_recovery > 10)
+        throw std::runtime_error("Invalid saved pressure recovery horizon");
     if (!std::isfinite(saved_frame_time) || saved_frame_time <= 0.)
         throw std::runtime_error("Invalid saved frame time");
     const int device = scene.at("device").get<int>();
@@ -410,6 +524,8 @@ void FluidScene<Derived>::restoreSceneState(const JSON::json& scene, const fluid
     restored.setAdaptiveMode(fluid::AdaptiveMode(mode));
     if (!restored.loadCheckpoint(checkpoint))
         throw std::runtime_error("The saved fluid backend does not support checkpoints");
+    if (restored.getPressureRecoveryTime() != saved_recovery * saved_frame_time)
+        throw std::runtime_error("Scene and engine pressure recovery settings disagree");
     validateScenarioState(scene.at("scenario_state"), restored);
     std::vector<float> pixels;
     restored.writeColorPixels(pixels, true);
@@ -441,12 +557,14 @@ void FluidScene<Derived>::restoreSceneState(const JSON::json& scene, const fluid
     simulation_time = saved_simulation_time;
     real_time = saved_real_time;
     projection_tolerance = saved_tolerance;
+    pressure_recovery_frames = saved_recovery;
     simulation_failed = saved_failure;
     profile_stages = saved_profiling;
     liquid_tint_depth = saved_tint_depth;
     liquid_deep_brightness = saved_deep_brightness;
     restoreScenarioState(scene.at("scenario_state"));
     frame_statistics = {};
+    ++frame_statistics_generation;
     frame_statistics.projection_tolerance = projection_tolerance;
     this->requestRedraw(true);
 }

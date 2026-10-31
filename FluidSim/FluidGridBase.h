@@ -8,6 +8,7 @@
 #include <bitloop/core/types.h>
 #include <stdexcept>
 #include <array>
+#include <limits>
 #include <span>
 #include <string_view>
 
@@ -47,6 +48,17 @@ public:
     virtual void setSurfaceTension(double coefficient)
     {
         if (coefficient != 0.) throw std::invalid_argument("Surface tension is only supported by uniform engines");
+    }
+    // Complete-step limit used internally by uniform capillarity. Exposing it
+    // lets scene scheduling avoid rounding two nested subdivision counts.
+    virtual double capillaryStepLimit() const { return std::numeric_limits<double>::infinity(); }
+
+    // Uniform WebGPU: target time for 90% recovery of small volume errors. Zero preserves the accurate model.
+    // Returning to zero requires destroying/reinitializing the compressed state.
+    virtual double getPressureRecoveryTime() const { return 0.; }
+    virtual void setPressureRecoveryTime(double seconds)
+    {
+        if (seconds != 0.) throw std::invalid_argument("Pressure recovery requires uniform WebGPU");
     }
 
     // Optional cell-centred XY acceleration, replacing uniform gravity until cleared.

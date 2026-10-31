@@ -4,10 +4,55 @@ SIM_BEG;
 template<class Derived>
 void FluidScene<Derived>::UI::sidebar()
 {
+    bl_pull(grid_w, grid_h, frame_time, gravity_y, pressure_recovery_frames, projection_tolerance, surface_tension);
+    bl_pull_temp(fluid_device, adaptive_mode);
+    bl_view(cell_size, steps_per_second, projection_max_iterations);
+    if constexpr (!Derived::presets.empty())
+    {
+        const FluidSceneSettings current_settings{
+            .grid_w = grid_w,
+            .grid_h = grid_h,
+            .cell_size = cell_size,
+            .fluid_device = fluid_device,
+            .adaptive_mode = adaptive_mode,
+            .frame_time = frame_time,
+            .steps_per_second = steps_per_second,
+            .projection_max_iterations = projection_max_iterations,
+            .projection_tolerance = projection_tolerance,
+            .pressure_recovery_frames = pressure_recovery_frames,
+            .gravity_y = gravity_y,
+            .surface_tension = surface_tension
+        };
+        const char* preset_name = "Custom";
+        for (const auto& preset : Derived::presets)
+            if (current_settings == preset.settings) preset_name = preset.name;
+
+        const FluidScenePreset* chosen_preset = nullptr;
+        if (ImGui::BeginCombo("Preset", preset_name))
+        {
+            for (const auto& preset : Derived::presets)
+            {
+                const bool selected = current_settings == preset.settings;
+                if (ImGui::Selectable(preset.name, selected)) chosen_preset = &preset;
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Load simulation settings and restart this scene.\n"
+                "Appearance, mouse attraction and profiling controls are preserved.\n"
+                "Manual changes show Custom; a different resolution refits the camera.");
+        if (chosen_preset)
+        {
+            bl_schedule([settings = chosen_preset->settings](Derived& scene) { scene.applyPreset(settings); });
+            // Do not commit a deactivated old control after the preset has been queued.
+            return;
+        }
+    }
+
     ImGui::TextDisabled("Drop a saved FluidSim WebP onto the viewport to resume.");
     bl_view(snapshot_error);
     if (!snapshot_error.empty()) ImGui::TextWrapped("%s", snapshot_error.c_str());
-    bl_pull(grid_w, grid_h);
     if (ImGui::Button("Restart Simulation"))
         bl_schedule([width = std::clamp(grid_w, 32, 4096), height = std::clamp(grid_h, 32, 4096)](Derived& scene)
         {
@@ -17,7 +62,15 @@ void FluidScene<Derived>::UI::sidebar()
         });
 
     bl_scoped(liquid_tint_depth, liquid_deep_brightness);
-    ImGui::SliderFloat("Gas proximity range", &liquid_tint_depth, 0.5f, 32.f, "%.1f cells", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+    bl_view(world_w, world_h);
+    // Use the active grid, since the resolution inputs below can contain unapplied edits.
+    const double grid_diagonal = std::hypot(world_w, world_h) / cell_size;
+    float proximity_percent = float(100.0 * liquid_tint_depth / grid_diagonal);
+    if (ImGui::InputFloat("Gas proximity scale", &proximity_percent, 0.1f, 1.0f, "%.2f%%") &&
+        std::isfinite(proximity_percent) && proximity_percent > 0.f)
+        liquid_tint_depth = float(proximity_percent * 0.01 * grid_diagonal);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Percentage of the simulation grid diagonal. Preserved when changing resolution.");
     ImGui::SliderFloat("Minimum brightness", &liquid_deep_brightness, 0.1f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 
     int resolution[] = {grid_w, grid_h};
@@ -26,8 +79,8 @@ void FluidScene<Derived>::UI::sidebar()
         grid_w = resolution[0];
         grid_h = resolution[1];
     }
-    bl_pull_temp(fluid_device, adaptive_mode);
     int device = int(fluid_device);
+    ImGui::BeginDisabled(pressure_recovery_frames != 0);
     if (ImGui::Combo("Device", &device, "CPU\0WebGPU\0"))
         bl_schedule([device](Derived& scene)
         {
@@ -35,12 +88,15 @@ void FluidScene<Derived>::UI::sidebar()
             scene.restartSimulation();
         });
 
-    bl_pull(surface_tension);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && pressure_recovery_frames != 0)
+        ImGui::SetTooltip("Set Pressure recovery frames to 0 before changing the device.");
+    ImGui::EndDisabled();
+
     bl_scoped(mouse_attraction);
     int mode = 0;
     for (int scale = int(adaptive_mode); scale > 1; scale /= 2)
         ++mode;
-    ImGui::BeginDisabled(surface_tension != 0. || mouse_attraction);
+    ImGui::BeginDisabled(surface_tension != 0. || mouse_attraction || pressure_recovery_frames != 0);
     if (ImGui::Combo("Adaptive Mode", &mode, "Disabled\0Max 2x2\0Max 4x4\0Max 8x8\0Max 16x16\0Max 32x32\0"))
         bl_schedule([mode](Derived& scene)
         {
@@ -48,10 +104,9 @@ void FluidScene<Derived>::UI::sidebar()
             scene.restartSimulation();
         });
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Restarts the simulation. Adaptive mode requires zero Surface Tension and Mouse attraction off.");
+        ImGui::SetTooltip("Restarts the simulation. Adaptive mode requires zero Surface Tension, zero Pressure recovery frames and Mouse attraction off.");
     ImGui::EndDisabled();
 
-    bl_pull(frame_time);
     ImGui::SliderDouble("Frame Time", &frame_time, 0.001, 0.2, "%.3f s", ImGuiSliderFlags_AlwaysClamp);
     if (ImGui::IsItemDeactivatedAfterEdit())
         bl_schedule([value = frame_time](Derived& scene)
@@ -59,9 +114,9 @@ void FluidScene<Derived>::UI::sidebar()
             scene.frame_time = value;
             scene.adaptive_settings.prediction_horizon = scene.adaptive_settings.check_interval + value;
             scene.fluid.setAdaptiveSettings(scene.adaptive_settings);
+            scene.fluid.setPressureRecoveryTime(scene.pressure_recovery_frames * value);
         });
 
-    bl_pull(gravity_y);
     ImGui::InputDouble("Gravity", &gravity_y, 0., 0., "%.6g");
     if (ImGui::IsItemDeactivatedAfterEdit() && std::isfinite(gravity_y))
         bl_schedule([value = gravity_y](Derived& scene)
@@ -70,7 +125,20 @@ void FluidScene<Derived>::UI::sidebar()
             scene.gravity_y = value;
         });
 
-    bl_pull(projection_tolerance);
+    ImGui::BeginDisabled(fluid_device != fluid::FluidDevice::GPU || adaptive_mode != fluid::AdaptiveMode::DISABLED);
+    ImGui::SliderInt("Pressure recovery frames", &pressure_recovery_frames, 0, 10, "%d", ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        bl_schedule([frames = pressure_recovery_frames](Derived& scene) { scene.setPressureRecoveryFrames(frames); });
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("0: original accurate solver.\n"
+            "1-10: allow temporary compression and recover over roughly this many simulated frames.\n"
+            "Higher values recover more slowly and do slightly less pressure work. Uniform WebGPU only.\n"
+            "Crossing between 0 and a positive value restarts the simulation; other changes apply on release.");
+    ImGui::EndDisabled();
+    ImGui::TextDisabled(pressure_recovery_frames == 0 ? "Accurate pressure" : "Relaxed pressure (experimental)");
+    ImGui::TextDisabled("Switching to/from 0 restarts the scene.");
+
+    ImGui::BeginDisabled(pressure_recovery_frames != 0);
     const double before_input = projection_tolerance;
     ImGui::InputDouble("Pressure Quality", &projection_tolerance, 0., 0., "%.6g");
     if (ImGui::IsItemActivated())
@@ -87,6 +155,7 @@ void FluidScene<Derived>::UI::sidebar()
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Positive maximum cell divergence (per second).\nLarger values trade accuracy for speed.\nPress Enter or leave the field to apply.");
+    ImGui::EndDisabled();
 
     ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED);
     const double old_tension = surface_tension;
@@ -116,6 +185,8 @@ void FluidScene<Derived>::UI::sidebar()
         bl_scoped(profile_stages);
         bl_view(frame_statistics);
         const auto& stats = frame_statistics;
+        if (pressure_recovery_frames != 0)
+            ImGui::Text("Volume error: max %.2f%%, RMS up to %.2f%%", 100.*stats.max_volume_error, 100.*stats.rms_volume_error);
         const double render_ms = __target.last_render_ms;
 
         ImGui::Checkbox("Detailed stage timings", &profile_stages);

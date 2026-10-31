@@ -8,14 +8,18 @@ struct SplashCubes : FluidScene<SplashCubes>
     using Base = FluidScene<SplashCubes>;
     static constexpr const char* scenario_id = "splash-cubes";
 
-    struct Config : Base::Config
-    {
-        FluidSceneSettings settings{
+    inline static constexpr std::array presets{
+        FluidScenePreset{"Default (1024 x 720)", {
             .grid_w = 1024,
             .grid_h = 720,
             .gravity_y = 500.0,
             .surface_tension = 5000.0
-        };
+        }}
+    };
+
+    struct Config : Base::Config
+    {
+        FluidSceneSettings settings = presets.front().settings;
     };
 
     explicit SplashCubes(const Config& config);

@@ -36,6 +36,8 @@ public:
     double gas_damping_rate = 0.0;
     double getSurfaceTension() const { return surface_tension; }
     void setSurfaceTension(double coefficient);
+    double getPressureRecoveryTime() const { return pressure_recovery_time; }
+    void setPressureRecoveryTime(double seconds);
     double capillaryStepLimit() const;
     void setAccelerationField(const FluidField& field);
     void clearAccelerationField();
@@ -85,6 +87,7 @@ private:
     std::optional<FluidWebGPUContext> context;
     std::unique_ptr<Impl> gpu;
     double surface_tension = 0.;
+    double pressure_recovery_time = 0.;
 };
 
 }

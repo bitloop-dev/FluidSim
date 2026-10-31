@@ -6,7 +6,7 @@ SIM_BEG;
 
 CrashingWave::CrashingWave(const Config& config) : Base(config.settings, config)
 {
-    ChemicalMaterials materials({.015f, .025f, .06f}, {0.f, 1.f, 1.f});
+    ChemicalMaterials materials({ 0.f, 0.f, 0.f }, { 1.f, 0.6f, 1.f });
     hydrogen_substance = materials.hydrogen;
     water_substance = materials.water;
     glycerol_substance = materials.glycerol;

@@ -20,6 +20,7 @@ struct FluidSim_Project : bl::Project<FluidSim_Project>
     int scenario = 0; // SplashCubes; CrashingWave remains selectable.
 
     void projectPrepare(bl::Layout& layout) override;
+    void restartAllSimulations();
 };
 
 SIM_END;

@@ -6,7 +6,7 @@ SIM_BEG;
 
 SplashCubes::SplashCubes(const Config& config) : Base(config.settings, config)
 {
-    ChemicalMaterials materials({0.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
+    ChemicalMaterials materials({0.f, 0.f, 0.f}, {1.f, 0.6f, 1.f});
     hydrogen_substance = materials.hydrogen;
     water_substance = materials.water;
     glycerol_substance = materials.glycerol;
@@ -25,7 +25,7 @@ FluidGrid::State SplashCubes::initialFluidState() const
     // Cell-coordinate geometry keeps the proportions when resolution changes.
     const double side = 0.30 * std::min(width, height);
     const double gap = 0.06 * std::min(width, height);
-    const double top = 0.8 * (height - side);
+    const double top = 0.9 * (height - side);
     const double red_left = 0.5 * width - 0.5 * gap - side;
     const double blue_left = 0.5 * width + 0.5 * gap;
     const auto overlap = [](double cell, double start, double length)

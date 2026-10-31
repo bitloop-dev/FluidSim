@@ -3,6 +3,9 @@
 #include "FluidGrid.h"
 #include "FluidGridDisplay.h"
 #include "FluidSnapshot.h"
+#include <array>
+#include <cmath>
+#include <cstdint>
 #include <utility>
 #include <optional>
 
@@ -12,7 +15,7 @@ using namespace bl;
 using fluid::FluidGrid;
 using fluid::FluidGridDisplay;
 
-// Initial values supplied by each scenario; live controls edit the scene instance.
+// Simulation settings supplied by a scenario's launch config or named preset.
 struct FluidSceneSettings
 {
     int grid_w;
@@ -24,8 +27,16 @@ struct FluidSceneSettings
     int steps_per_second = 60;
     int projection_max_iterations = 2000;
     double projection_tolerance = 0.1;
+    int pressure_recovery_frames = 0;
     double gravity_y = 0.0;
     double surface_tension = 0.0;
+    bool operator==(const FluidSceneSettings&) const = default;
+};
+
+struct FluidScenePreset
+{
+    const char* name;
+    FluidSceneSettings settings;
 };
 
 // Keep the concrete type visible to Bitloop's buffered UI.
@@ -33,6 +44,8 @@ template<class Derived>
 struct FluidScene : bl::Scene<Derived>
 {
     using BufferedInterfaceModel = typename bl::Scene<Derived>::BufferedInterfaceModel;
+    // Scenarios can supply their own named settings without requiring presets for every scene.
+    inline static constexpr std::array<FluidScenePreset, 0> presets{};
 
     CameraInfo camera;
     CameraNavigator navigator;
@@ -52,6 +65,7 @@ struct FluidScene : bl::Scene<Derived>
     int steps_per_second;
     int projection_max_iterations;
     double projection_tolerance;
+    int pressure_recovery_frames;
     double gravity_y; // Positive Y points down.
     double surface_tension;
 
@@ -93,7 +107,8 @@ struct FluidScene : bl::Scene<Derived>
     ShaderSurface surface;
     FluidGridDisplay fluid_display;
     std::vector<float> display_pixels;
-    float liquid_tint_depth = 6.0f; // Gas proximity range in cells.
+    // Keep the existing 6-cell appearance at 1024x720, scaled with the grid diagonal.
+    float liquid_tint_depth = float(6.0 * std::hypot(double(grid_w), double(grid_h)) / std::hypot(1024.0, 720.0));
     float liquid_deep_brightness = 0.6f; // Minimum liquid brightness.
     bool profile_stages = true;
     int checkpoint_brotli_quality = -1; // Storage policy: -1=uncompressed, 0..11=Brotli.
@@ -108,14 +123,43 @@ struct FluidScene : bl::Scene<Derived>
         int transport_steps = 0, pressure_iterations = 0;
         bool detailed = false, adaptive = false;
         double projection_tolerance = 1e-2;
+        double max_volume_error = 0., rms_volume_error = 0.;
         bool operator==(const FrameStatistics&) const = default;
     };
     FrameStatistics frame_statistics;
+    std::uint64_t frame_statistics_generation = 0;
     // Render and sidebar both run on the GUI owner; do not shadow-buffer this value.
     mutable double last_render_ms = 0;
 
+    struct FrameTimeHistory
+    {
+        static constexpr int capacity = 600;
+        static constexpr int average_window = 10;
+        std::array<double, capacity> times{}, averages{};
+        std::array<double, average_window> window{};
+        int count = 0, next = 0, window_next = 0;
+        double window_sum = 0.;
+        double last_simulation_time = -1.;
+        std::uint64_t generation = 0;
+
+        void add(double time, double milliseconds)
+        {
+            window_sum += milliseconds - window[window_next];
+            window[window_next] = milliseconds;
+            window_next = (window_next + 1) % average_window;
+            count = std::min(count + 1, capacity);
+            times[next] = time;
+            averages[next] = window_sum / std::min(count, average_window);
+            next = (next + 1) % capacity;
+        }
+    };
+    // GUI-owned telemetry: capture during rendering even when the sidebar is collapsed.
+    mutable FrameTimeHistory frame_time_history;
+
     void restartSimulation();
+    void applyPreset(const FluidSceneSettings& settings);
     void setSurfaceTension(double coefficient);
+    void setPressureRecoveryFrames(int frames);
     void updateAccelerationField();
     virtual void renderFluidSurface() const;
     JSON::json captureSceneState() const;

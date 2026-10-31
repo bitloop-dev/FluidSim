@@ -92,6 +92,48 @@ void checkIndependentWaves()
         project.waves[1]->simulation_time == untouched_time, "Restart changed another scene");
     project.processHeadlessFrame(0.);
     require(sameState(project.waves[1]->fluid.download(), untouched), "Zero dt advanced a scene");
+
+    auto& recovery = *project.waves[0];
+    bool unsupported = false;
+    try { recovery.setPressureRecoveryFrames(5); }
+    catch (const std::invalid_argument&) { unsupported = true; }
+    require(unsupported && recovery.pressure_recovery_frames == 0,
+        "CPU silently accepted pressure recovery");
+    recovery.fluid_device = fluid::FluidDevice::GPU;
+    recovery.restartSimulation();
+    const auto initial = recovery.fluid.download();
+    project.processHeadlessFrame(.02);
+    recovery.setPressureRecoveryFrames(5);
+    const auto relaxed_initial = recovery.fluid.download();
+    auto expected_initial = initial;
+    // Relaxed geometry is derived from packed float masses, with one additional rounding step.
+    for (size_t i = 0; i < initial.liquid_fraction.size(); ++i)
+        require(std::abs(relaxed_initial.liquid_fraction[i] - initial.liquid_fraction[i]) < 2e-7,
+            "Recovery restart changed initial geometry");
+    expected_initial.liquid_fraction = relaxed_initial.liquid_fraction;
+    require(recovery.simulation_time == 0. && !recovery.simulation_failed &&
+        recovery.fluid.getPressureRecoveryTime() == 5 * recovery.frame_time &&
+        sameState(expected_initial, relaxed_initial), "Entering recovery did not restart cleanly");
+    for (int i = 0; i < 6; ++i) project.processHeadlessFrame(.02);
+    require(!recovery.simulation_failed, "Recovery scene failed");
+    const auto live = recovery.fluid.download();
+    const double elapsed = recovery.simulation_time;
+    recovery.setPressureRecoveryFrames(10);
+    require(recovery.simulation_time == elapsed && sameState(live, recovery.fluid.download()) &&
+        recovery.fluid.getPressureRecoveryTime() == 10 * recovery.frame_time,
+        "Changing a positive recovery horizon reset the scene");
+    const auto scene_state = recovery.captureSceneState();
+    fluid::FluidCheckpoint saved;
+    require(recovery.fluid.saveCheckpoint(saved), "Recovery scene checkpoint unsupported");
+    recovery.setPressureRecoveryFrames(0);
+    require(recovery.simulation_time == 0. && sameState(initial, recovery.fluid.download()) &&
+        recovery.fluid.getPressureRecoveryTime() == 0., "Returning to accurate mode retained compressed state");
+    recovery.restoreSceneState(scene_state, saved, recovery.grid_w, recovery.grid_h, recovery.cell_size);
+    require(recovery.pressure_recovery_frames == 10 && recovery.simulation_time == elapsed &&
+        sameState(live, recovery.fluid.download()), "Scene restore lost recovery mode or state");
+    project.processHeadlessFrame(.02);
+    require(!recovery.simulation_failed, "Restored recovery scene failed");
+    std::cout << "PASS recovery mode transitions, time conversion, unsupported backend and scene restoration\n";
     project.stopHeadless();
     std::cout << "PASS four independent waves, zero/two viewport scheduling, restart isolation and direct-step parity" << std::endl;
 }

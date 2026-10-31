@@ -27,6 +27,9 @@ double FluidGridWebGPU::getGravityY() const { return engine->gravity_y; }
 void FluidGridWebGPU::setGravityY(double acceleration) { engine->gravity_y = acceleration; }
 double FluidGridWebGPU::getSurfaceTension() const { return engine->getSurfaceTension(); }
 void FluidGridWebGPU::setSurfaceTension(double coefficient) { engine->setSurfaceTension(coefficient); }
+double FluidGridWebGPU::capillaryStepLimit() const { return engine->capillaryStepLimit(); }
+double FluidGridWebGPU::getPressureRecoveryTime() const { return engine->getPressureRecoveryTime(); }
+void FluidGridWebGPU::setPressureRecoveryTime(double seconds) { engine->setPressureRecoveryTime(seconds); }
 void FluidGridWebGPU::setAccelerationField(const FluidField& field)
 {
     requireUploaded();

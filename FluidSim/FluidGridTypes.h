@@ -49,6 +49,10 @@ struct FluidProjectionResult
     // Actual complete physics steps and transport subdivisions, where available.
     int physical_steps = 1;
     int transport_steps = 0;
+    // An intentionally approximate, numerically valid step is distinct from convergence.
+    bool relaxed = false;
+    double max_volume_error = 0., rms_volume_error = 0.;
+    bool accepted() const { return converged || relaxed; }
 };
 
 }

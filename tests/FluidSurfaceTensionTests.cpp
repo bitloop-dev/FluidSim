@@ -85,11 +85,12 @@ void flat()
     std::cout<<"PASS pure phases and grid-aligned flat interfaces\n";
 }
 template<class Grid>
-void circle(double sigma,double tolerance,double radius,int steps,bool bubble=false,bool wall=false)
+void circle(double sigma,double tolerance,double radius,int steps,bool bubble=false,bool wall=false,double recovery_time=0.)
 {
     const int size=64;
     const double cx=wall?0.:size*.5+.13, cy=size*.5-.29;
     Grid grid(size,size,1); grid.gravity_y=0; grid.setSurfaceTension(sigma);
+    if (recovery_time > 0.) grid.setPressureRecoveryTime(recovery_time);
     upload(grid,disk(size,size,radius,bubble,cx,cy));
     const auto initial=grid.download();
     const double mass=std::accumulate(initial.liquid_mass[0].begin(),initial.liquid_mass[0].end(),0.);
@@ -97,7 +98,7 @@ void circle(double sigma,double tolerance,double radius,int steps,bool bubble=fa
     for(int i=0;i<steps;++i)
     {
         const auto r=grid.step(.005,2000,tolerance);
-        require(r.converged,"Circular capillary projection failed");
+        require(r.accepted(),"Circular capillary projection failed");
         if(i%20==0 || i+1==steps) { const auto s=grid.download(); health(s,mass); peak=std::max(peak,maximumSpeed(s)); }
     }
     const auto state=grid.download();
@@ -110,7 +111,7 @@ void circle(double sigma,double tolerance,double radius,int steps,bool bubble=fa
     }
     const double jump=pin/ni-pout/no,expected=sigma/radius;
     std::cout<<"circle sigma="<<sigma<<" tolerance="<<tolerance<<" radius="<<radius<<" bubble="<<bubble<<" wall="<<wall
-        <<" jump="<<jump<<" expected="<<expected<<" peak_speed="<<peak<<std::endl;
+        <<" recovery_time="<<recovery_time<<" jump="<<jump<<" expected="<<expected<<" peak_speed="<<peak<<std::endl;
     require(std::abs(jump-expected)<.08*expected,"2D Laplace pressure jump is inaccurate");
     if(tolerance<=.001) require(peak<.15*std::sqrt(sigma/(100.*radius)),"Large parasitic capillary currents");
 }
@@ -312,6 +313,8 @@ int main(int argc,char** argv)
         circle<FluidGridGPU>(10000,.001,8,200);
         circle<FluidGridGPU>(10000,.001,8,200,true);
         circle<FluidGridGPU>(10000,.001,8,200,false,true);
+        circle<FluidGridGPU>(10000,.001,8,400,false,false,.1);
+        circle<FluidGridGPU>(10000,.001,8,400,true,false,.2);
         subdivisionAndResume();
         deformationAndMotion<FluidGridGPU>();
         std::cout << "CPU uniform capillarity\n";

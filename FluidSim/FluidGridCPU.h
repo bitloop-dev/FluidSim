@@ -75,7 +75,7 @@ struct FluidGridCPU final : FluidGridBase
     void setGravityY(double acceleration) override { gravity_y = acceleration; }
     double getSurfaceTension() const override { return surface_tension; }
     void setSurfaceTension(double coefficient) override;
-    double capillaryStepLimit() const;
+    double capillaryStepLimit() const override;
     void setAccelerationField(const FluidField& field) override;
     void clearAccelerationField() override { acceleration.reset(); }
 

@@ -3,6 +3,7 @@
 #include "FluidUniformWebGPUKernels.h"
 #include "FluidSurfaceTensionKernels.h"
 #include "FluidAccelerationKernels.h"
+#include "FluidPressureRecoveryKernels.h"
 #include "FluidFieldInternal.h"
 #include "PressureMultigridGPU.h"
 #include <algorithm>
@@ -34,6 +35,7 @@ struct FluidGridGPU::Impl : UniformKernels
     {
         Field mass, next_mass, correction;
         std::array<float, 4> liquid_mask = {}, gas_mask = {};
+        std::array<float, 4> liquid_volume_mask = {}, gas_volume_mask = {};
         ComponentGroup(Compute& runner, int w, int h) : mass(runner.field(w,h,4)), next_mass(runner.field(w,h,4)), correction(runner.field(w,h,4)) {}
     };
     std::vector<ComponentGroup> components;
@@ -66,6 +68,19 @@ struct FluidGridGPU::Impl : UniformKernels
     float surface_tension = 0;
     std::optional<FluidField> acceleration;
     std::unique_ptr<AccelerationKernels> acceleration_kernels;
+    struct Recovery
+    {
+        PressureRecoveryKernels kernels;
+        Field occupied, next_occupied, stats;
+        bool occupancy_valid = false;
+        bool seeded = false;
+        double until_global = 0.;
+        Recovery(Compute& compute, int w, int h)
+            : occupied(compute.field(w,h,2)), next_occupied(compute.field(w,h,2)), stats(compute.field(1,1,4))
+        { kernels.build(compute); }
+    };
+    std::unique_ptr<Recovery> recovery;
+    double recovery_time = 0.;
 
     Impl(int w, int h, const FluidWebGPUContext& context);
     void configure(const FluidGridGPU& grid)
@@ -76,6 +91,11 @@ struct FluidGridGPU::Impl : UniformKernels
         gas_damping_rate = float(grid.gas_damping_rate);
         surface_tension = float(grid.getSurfaceTension());
         use_multigrid = grid.pressure_preconditioner == FluidGridGPU::PressurePreconditioner::Multigrid;
+        recovery_time = grid.getPressureRecoveryTime();
+        if (recovery_time > 0. && !use_multigrid)
+            throw std::invalid_argument("Pressure recovery requires the multigrid preconditioner");
+        if (recovery_time > 0. && !recovery)
+            recovery = std::make_unique<Recovery>(runner, width, height);
     }
     using Input = std::pair<const char*, const Field*>;
     void run(Kernel& program, std::initializer_list<const Field*> outputs,
@@ -117,6 +137,7 @@ struct FluidGridGPU::Impl : UniformKernels
     }
     void uploadComponents(const FluidGridGPU& grid, const State& state);
     void rebuildDensity();
+    void rebuildOccupancy();
     void rebuildColor(const FluidGridGPU& grid, bool liquid_fraction_alpha);
     void sumGroups(Kernel& program, Field& result, Field& scratch, size_t first);
     void advectComponents(double dt, int direction);
@@ -126,6 +147,8 @@ struct FluidGridGPU::Impl : UniformKernels
     void applyPreconditioner(bool restart);
     int solvePressure(int max_iterations, float residual_tolerance, bool refinement);
     FluidGridGPU::ProjectionResult project(double dt, int max_iterations, double divergence_tolerance, bool with_capillarity = false);
+    FluidGridGPU::ProjectionResult projectRecovery(double dt, int max_iterations, double divergence_tolerance, bool with_capillarity);
+    bool recoveryHealth(FluidGridGPU::ProjectionResult& result, bool check_solver = false);
     void rebuildCurvature();
     double maxDivergence();
     void dampGasVelocity(double dt);
@@ -183,6 +206,13 @@ void FluidGridGPU::upload(const State& state)
     gpu->previous_solve_iterations=7;
     gpu->cached_outflow=0;
     gpu->velocity_stats_valid=state.u.empty()&&state.v.empty();
+    if (gpu->recovery)
+    {
+        gpu->recovery->occupancy_valid = false;
+        gpu->recovery->seeded = false;
+        gpu->recovery->until_global = 0.;
+    }
+    if (pressure_recovery_time > 0. && (!state.liquid_mass.empty() || !state.gas_mass.empty())) gpu->rebuildOccupancy();
     gpu->runner.flush();
 }
 
@@ -212,6 +242,11 @@ void FluidGridGPU::commitEdits(detail::CellEditBatch& batch)
         first=last;
     }
     gpu->density_valid=false;
+    if (gpu->recovery)
+    {
+        gpu->recovery->occupancy_valid = false;
+        gpu->recovery->until_global = 0.;
+    }
 }
 
 FluidGridGPU::State FluidGridGPU::download() const
@@ -262,7 +297,7 @@ bool FluidGridGPU::saveCheckpoint(FluidCheckpoint& checkpoint) const
     };
 
     checkpoint.metadata = {
-        {"backend", "webgpu-uniform"}, {"version", 4}, {"scalar", "float32"},
+        {"backend", "webgpu-uniform"}, {"version", pressure_recovery_time > 0. ? 5 : 4}, {"scalar", "float32"},
         {"byte_order", std::endian::native == std::endian::little ? "little" : "big"},
         {"width", width}, {"height", height}, {"cell_size", cell_size},
         {"origin", {origin.x, origin.y}}, {"gravity_y", gravity_y}, {"gas_damping_rate", gas_damping_rate},
@@ -274,6 +309,13 @@ bool FluidGridGPU::saveCheckpoint(FluidCheckpoint& checkpoint) const
         {"previous_solve_iterations", gpu->previous_solve_iterations}, {"solver_tolerance", gpu->tolerance},
         {"cached_outflow", gpu->cached_outflow}, {"velocity_stats_valid", gpu->velocity_stats_valid}
     };
+
+    if (pressure_recovery_time > 0.)
+    {
+        checkpoint.metadata["pressure_recovery_time"] = pressure_recovery_time;
+        checkpoint.metadata["recovery_seeded"] = gpu->recovery->seeded;
+        checkpoint.metadata["recovery_until_global"] = gpu->recovery->until_global;
+    }
 
     // Fixed order: fraction, face velocities, two pressure histories, packed component groups.
     // Density, momentum, colour and pressure workspaces are derived at the next operation.
@@ -306,7 +348,7 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
     const char* byte_order = std::endian::native == std::endian::little ? "little" : "big";
     const int version = meta.at("version").get<int>();
     if (meta.at("backend") != "webgpu-uniform" ||
-        (version < 1 || version > 4) ||
+        (version < 1 || version > 5) ||
         meta.at("scalar") != "float32" || meta.at("byte_order") != byte_order)
         throw std::runtime_error("Incompatible uniform WebGPU checkpoint format");
     if (meta.at("width") != width || meta.at("height") != height || meta.at("cell_size") != cell_size)
@@ -370,6 +412,13 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
     const float tolerance = meta.at("solver_tolerance").get<float>();
     const float outflow = meta.at("cached_outflow").get<float>();
     const bool stats_valid = meta.at("velocity_stats_valid").get<bool>();
+    const double restored_recovery = version >= 5 ? meta.at("pressure_recovery_time").get<double>() : 0.;
+    const double until_global = version >= 5 ? meta.at("recovery_until_global").get<double>() : 0.;
+    const bool recovery_seeded = version >= 5 && meta.at("recovery_seeded").get<bool>();
+    if (!std::isfinite(restored_recovery) || restored_recovery < 0. || !std::isfinite(until_global) || until_global < 0.)
+        throw std::runtime_error("Invalid saved pressure recovery state");
+    if (restored_recovery > 0. && preconditioner != int(PressurePreconditioner::Multigrid))
+        throw std::runtime_error("Saved pressure recovery requires the multigrid preconditioner");
     const bool has_acceleration = version >= 3 && meta.at("acceleration_field").get<bool>();
     const size_t groups = (liquid.components.size() + gas.components.size() + 3) / 4;
     const size_t cells = size_t(width) * height;
@@ -388,6 +437,7 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
     gas_damping_rate = restored_damping;
     surface_tension = restored_tension;
     pressure_preconditioner = PressurePreconditioner(preconditioner);
+    pressure_recovery_time = restored_recovery;
     upload({}); // Allocate/reuse fields and rebuild component masks for the saved mixtures.
 
     size_t offset = 0;
@@ -415,6 +465,12 @@ bool FluidGridGPU::loadCheckpoint(const FluidCheckpoint& checkpoint)
     gpu->cached_outflow = outflow;
     gpu->velocity_stats_valid = stats_valid;
     gpu->density_valid = false;
+    if (gpu->recovery)
+    {
+        gpu->recovery->occupancy_valid = false;
+        gpu->recovery->seeded = recovery_seeded;
+        gpu->recovery->until_global = until_global;
+    }
     gpu->runner.flush();
     return true;
 }
@@ -467,6 +523,17 @@ void FluidGridGPU::setSurfaceTension(double coefficient)
     if (!std::isfinite(float(coefficient)) || coefficient < 0.)
         throw std::invalid_argument("Surface tension must be finite, nonnegative and representable on the GPU");
     surface_tension = coefficient;
+}
+
+void FluidGridGPU::setPressureRecoveryTime(double seconds)
+{
+    if (!std::isfinite(seconds) || seconds < 0.)
+        throw std::invalid_argument("Pressure recovery time must be finite and nonnegative");
+    if (gpu && pressure_recovery_time > 0. && seconds == 0.)
+        throw std::logic_error("Restart the fluid before returning to incompressible transport");
+    if (gpu && gpu->recovery && pressure_recovery_time > 0. && seconds > 0.)
+        gpu->recovery->until_global *= seconds / pressure_recovery_time;
+    pressure_recovery_time = seconds;
 }
 
 double FluidGridGPU::capillaryStepLimit() const
@@ -531,14 +598,19 @@ FluidGridGPU::ProjectionResult FluidGridGPU::step(double dt, int max_iterations,
         if (tension) gpu->rebuildCurvature();
         if (timings) timings->forces_ms += elapsed();
 
-        const auto projection=gpu->project(step,max_iterations,divergence_tolerance,tension);
+        const auto projection = pressure_recovery_time > 0.
+            ? gpu->projectRecovery(step,max_iterations,divergence_tolerance,tension)
+            : gpu->project(step,max_iterations,divergence_tolerance,tension);
         gpu->runner.flush();
         if (timings) timings->pressure_ms += elapsed();
         result.iterations += projection.iterations;
         result.max_divergence = projection.max_divergence;
         result.converged = projection.converged;
+        result.relaxed = projection.relaxed;
+        result.max_volume_error = std::max(result.max_volume_error, projection.max_volume_error);
+        result.rms_volume_error = std::max(result.rms_volume_error, projection.rms_volume_error);
         ++result.physical_steps;
-        if (!result.converged) break;
+        if (!result.accepted()) break;
     }
     return result;
 }
@@ -563,7 +635,10 @@ void FluidGridGPU::applyGravity(double dt)
 FluidGridGPU::ProjectionResult FluidGridGPU::project(double dt, int max_iterations, double divergence_tolerance)
 {
     if (dt<=0.0) return {};
-    gpu->configure(*this); const auto result=gpu->project(dt,max_iterations,divergence_tolerance);
+    gpu->configure(*this);
+    const auto result = pressure_recovery_time > 0.
+        ? gpu->projectRecovery(dt, max_iterations, divergence_tolerance, false)
+        : gpu->project(dt, max_iterations, divergence_tolerance);
     gpu->runner.flush();
     return result;
 }
@@ -732,6 +807,139 @@ double FluidGridGPU::Impl::maxDivergence()
     return velocity_stats_valid ? result[1] : std::numeric_limits<double>::infinity();
 }
 
+bool FluidGridGPU::Impl::recoveryHealth(FluidGridGPU::ProjectionResult& result, bool check_solver)
+{
+    if (reduction_levels.empty())
+        run(recovery->kernels.health, {&recovery->stats},
+            {{"occupied", &recovery->occupied}, {"solver_state", &solver_state}, {"denominator", &denominator}}, 0,
+            int(check_solver));
+    else
+    {
+        run(recovery->kernels.health, {&reduction_levels.front()},
+            {{"occupied", &recovery->occupied}, {"solver_state", &solver_state}, {"denominator", &denominator}}, 0,
+            int(check_solver));
+        reduce(reduction_levels.front(), recovery->stats, 4, nullptr, 1);
+    }
+    const auto stats = readScalar(recovery->stats);
+    result.max_volume_error = stats[1];
+    result.rms_volume_error = std::sqrt(double(stats[0]) / (double(width) * height));
+    return stats[3] == 0. && std::isfinite(result.max_divergence);
+}
+
+FluidGridGPU::ProjectionResult FluidGridGPU::Impl::projectRecovery(double dt, int max_iterations,
+                                                                   double divergence_tolerance, bool with_capillarity)
+{
+    auto &r = *recovery;
+    rebuildOccupancy();
+    if (!r.seeded)
+    {
+        // Establish gravity/capillary support once; subsequent corrections are deliberately incomplete.
+        auto result = project(dt, max_iterations, divergence_tolerance, with_capillarity);
+        r.seeded = result.converged;
+        if (!recoveryHealth(result)) result.converged = false;
+        return result;
+    }
+
+    velocity_stats_valid = false;
+    rebuildDensity();
+    run(pressure_coefficient, {&pressure_coefficients}, {{"density", &density}});
+    pressure_base.swap(pressure);
+    if (with_capillarity)
+    {
+        auto &kernel = capillary->kernels.predict;
+        kernel.parameters.value[3] = surface_tension;
+        run(kernel, {&next_u},
+            {{"velocity", &u},
+             {"pressure", &pressure_base},
+             {"weights", &pressure_coefficients},
+             {"liquid", &liquid_fraction},
+             {"curvature_field", &capillary->curvature}},
+            float(dt));
+        run(kernel, {&next_v},
+            {{"velocity", &v},
+             {"pressure", &pressure_base},
+             {"weights", &pressure_coefficients},
+             {"liquid", &liquid_fraction},
+             {"curvature_field", &capillary->curvature}},
+            float(dt), 1);
+    }
+    else
+    {
+        run(correct_velocity, {&next_u},
+            {{"velocity", &u}, {"pressure", &pressure_base}, {"weights", &pressure_coefficients}}, float(dt));
+        run(correct_velocity, {&next_v},
+            {{"velocity", &v}, {"pressure", &pressure_base}, {"weights", &pressure_coefficients}}, float(dt), 1);
+    }
+    u.swap(next_u);
+    v.swap(next_v);
+
+    r.kernels.rhs.parameters.value[3] = float(-std::expm1(-std::log(10.) * dt / recovery_time) / dt);
+    run(r.kernels.rhs, {&pressure_rhs}, {{"u", &u}, {"v", &v}, {"occupied", &r.occupied}}, float(dt));
+    removeMean(pressure_rhs, pressure_product);
+    run(fill, {&pressure});
+    for (int sweep = 0; sweep < 2; ++sweep)
+    {
+        run(r.kernels.smooth, {&next_pressure},
+            {{"source", &pressure}, {"rhs", &pressure_rhs}, {"weights", &pressure_coefficients}});
+        pressure.swap(next_pressure);
+    }
+
+    ProjectionResult result;
+    r.until_global -= dt;
+    const bool extra_correction = r.until_global <= 0.;
+    {
+        multigrid.rebuild(pressure_coefficients);
+        rebuildResidual();
+        run(r.kernels.copy, {&previous_pressure}, {{"source", &pressure}});
+        run(fill, {&solver_state});
+        run(fill, {&pressure_direction});
+        run(fill, {&denominator});
+        tolerance = 1e-5f;
+        // Moving density jumps need global support every step; local-only intervals were unstable.
+        const int recovery_iterations = std::min(max_iterations, 3 + int(extra_correction));
+        if (recovery_iterations > 0) applyPreconditioner(true);
+        for (int iteration = 0; iteration < recovery_iterations; ++iteration)
+        {
+            applyPressureOperator(pressure_direction);
+            reduce(pressure_direction, denominator, 1, &pressure_product);
+            run(update_pressure, {&next_pressure, &next_residual},
+                {{"pressure", &pressure},
+                 {"residual", &pressure_residual},
+                 {"direction", &pressure_direction},
+                 {"product", &pressure_product},
+                 {"state", &solver_state},
+                 {"denominator", &denominator}});
+            pressure.swap(next_pressure);
+            pressure_residual.swap(next_residual);
+            reduce(pressure_residual, residual_stats);
+            if (iteration + 1 < recovery_iterations) applyPreconditioner(false);
+        }
+        if (extra_correction) r.until_global = std::max(0., r.until_global + recovery_time * .25);
+        result.iterations = recovery_iterations;
+    }
+    run(correct_velocity, {&next_u}, {{"velocity", &u}, {"pressure", &pressure}, {"weights", &pressure_coefficients}},
+        float(dt));
+    run(correct_velocity, {&next_v}, {{"velocity", &v}, {"pressure", &pressure}, {"weights", &pressure_coefficients}},
+        float(dt), 1);
+    u.swap(next_u);
+    v.swap(next_v);
+    if (result.iterations != 0)
+    {
+        // Dampen pressure memory so incomplete corrections do not ring across successive steps.
+        r.kernels.retain_pressure.parameters.value[3] = .5f;
+        run(r.kernels.retain_pressure, {&next_pressure},
+            {{"base", &pressure_base}, {"local", &previous_pressure}, {"correction", &pressure}});
+    }
+    else
+        run(add_pressure, {&next_pressure}, {{"base", &pressure_base}, {"correction", &pressure}});
+    pressure.swap(next_pressure);
+    if (result.iterations != 0) removeMean(pressure, next_pressure);
+    result.max_divergence = maxDivergence();
+    result.relaxed = recoveryHealth(result, result.iterations != 0);
+    result.converged = result.relaxed && result.max_divergence <= divergence_tolerance;
+    return result;
+}
+
 void FluidGridGPU::Impl::dampGasVelocity(double dt)
 {
     if (gas_damping_rate == 0 || dt <= 0) return;
@@ -788,6 +996,7 @@ void FluidGridGPU::Impl::uploadComponents(const FluidGridGPU& grid, const State&
     {
         auto& component = components[group];
         component.liquid_mask = component.gas_mask = {};
+        component.liquid_volume_mask = component.gas_volume_mask = {};
         std::fill(packed.begin(), packed.end(), 0.0f);
         for (size_t lane = 0; lane < 4; ++lane)
         {
@@ -797,6 +1006,8 @@ void FluidGridGPU::Impl::uploadComponents(const FluidGridGPU& grid, const State&
             (liquid ? component.liquid_mask : component.gas_mask)[lane] = 1;
             const auto& fields = liquid ? state.liquid_mass : state.gas_mass;
             const size_t k = liquid ? index : index - liquid_count;
+            const auto& mixture = liquid ? grid.liquid_mixture : grid.gas_mixture;
+            (liquid ? component.liquid_volume_mask : component.gas_volume_mask)[lane] = float(1. / mixture.components[k].density);
             if (fields.empty() || fields[k].empty()) continue;
             for (size_t i = 0; i < cell_count; ++i) packed[4 * i + lane] = fields[k][i];
         }
@@ -825,6 +1036,7 @@ void FluidGridGPU::Impl::rebuildDensity()
 
 void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid, bool liquid_fraction_alpha)
 {
+    if (recovery_time > 0.) rebuildOccupancy();
     color_pass.parameters.value[3] = float(liquid_fraction_alpha);
     if (components.empty()) run(fill, { &color }, {}, 0, liquid_fraction_alpha ? 0 : 1);
     for (size_t first = 0; first < components.size(); first += 4)
@@ -844,6 +1056,30 @@ void FluidGridGPU::Impl::rebuildColor(const FluidGridGPU& grid, bool liquid_frac
         for (size_t c=0; c<3; ++c) for (size_t j=0; j<4; ++j) color_pass.parameters.vectors[c*4+j]=channels[c][j];
         sumGroups(color_pass, color, next_color, first);
     }
+    if (recovery_time > 0.)
+    {
+        run(recovery->kernels.color, {&next_color}, {{"source", &color}, {"occupied", &recovery->occupied}});
+        color.swap(next_color);
+    }
+}
+
+void FluidGridGPU::Impl::rebuildOccupancy()
+{
+    auto& r = *recovery;
+    if (r.occupancy_valid) return;
+    if (components.empty()) throw std::logic_error("Pressure recovery requires material masses");
+    for (size_t first = 0; first < components.size(); first += 4)
+    {
+        for (size_t j = 0; j < 4; ++j)
+        {
+            density_pass.parameters.vectors[j] = first+j < components.size() ? components[first+j].liquid_volume_mask : std::array<float,4>{};
+            density_pass.parameters.vectors[j+4] = first+j < components.size() ? components[first+j].gas_volume_mask : std::array<float,4>{};
+        }
+        sumGroups(density_pass, r.occupied, r.next_occupied, first);
+    }
+    run(r.kernels.geometry, {&next_liquid_fraction}, {{"occupied", &r.occupied}});
+    liquid_fraction.swap(next_liquid_fraction);
+    r.occupancy_valid = true;
 }
 
 void FluidGridGPU::Impl::sumGroups(Kernel& program, Field& result, Field& scratch, size_t first)
@@ -881,6 +1117,22 @@ void FluidGridGPU::Impl::rebuildTransfersY(double dt)
 
 void FluidGridGPU::Impl::advectComponents(double dt, int direction)
 {
+    if (recovery_time > 0.)
+    {
+        auto& program = recovery->kernels.transport;
+        for (auto& component : components)
+        {
+            program.parameters.vectors[0] = component.liquid_mask;
+            program.parameters.vectors[1] = component.gas_mask;
+            run(program, {&component.next_mass}, {{"liquid", &liquid_fraction}, {"masses", &component.mass},
+                {"transfers", direction == 0 ? &transfers_u : &transfers_v}, {"flow", direction == 0 ? &u : &v}}, float(dt), direction);
+            component.mass.swap(component.next_mass);
+        }
+        density_valid = false;
+        recovery->occupancy_valid = false;
+        rebuildOccupancy();
+        return;
+    }
     for (size_t index = 0; index < components.size(); ++index)
     {
         auto& component = components[index];
@@ -970,6 +1222,7 @@ double FluidGridGPU::Impl::transportStepLimit(double dt)
 
 void FluidGridGPU::Impl::freezeComponentCorrections()
 {
+    if (recovery_time > 0.) return;
     run(freeze_weights, {&split_weights}, {{"liquid", &liquid_fraction}, {"density", &density}});
 }
 
@@ -986,8 +1239,17 @@ void FluidGridGPU::Impl::advectDirection(double step, bool horizontal)
 void FluidGridGPU::Impl::advect(double dt)
 {
     transport_steps = 0;
+    if (recovery_time > 0.)
+    {
+        rebuildOccupancy();
+        // Conservative transport has no incompressibility split source, including momentum.
+        run(fill, {&split_weights});
+    }
     rebuildMomentum();
     const double max_step = transportStepLimit(dt);
+    // An unstable relaxed pressure predictor can explode velocity before it becomes non-finite.
+    if (recovery_time > 0. && dt > 256. * max_step)
+        throw std::runtime_error("Pressure recovery became unstable: excessive transport subdivisions");
     double remaining = dt;
     while (remaining > 0)
     {
