@@ -5,10 +5,7 @@ SIM_BEG;
 
 struct FluidSim_Project : bl::Project<FluidSim_Project>
 {
-    static bl::ProjectInfo info()
-    {
-        return bl::ProjectInfo({ "New Projects", "FluidSim" });
-    }
+    static bl::ProjectInfo info() { return bl::ProjectInfo({"New Projects", "FluidSim"}); }
 
     struct UI : BufferedInterfaceModel
     {
@@ -17,7 +14,7 @@ struct FluidSim_Project : bl::Project<FluidSim_Project>
     };
 
     int viewport_count = 1;
-    int scenario = 0; // SplashCubes; CrashingWave remains selectable.
+    int scenario = 0; // SplashCubes by default.
 
     void projectPrepare(bl::Layout& layout) override;
     void restartAllSimulations();

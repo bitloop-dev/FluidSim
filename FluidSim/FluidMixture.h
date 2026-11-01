@@ -4,16 +4,37 @@
 
 namespace fluid
 {
-    struct MixtureComponent
-    {
-        SubstanceId substance;
 
-        // Density of this ingredient under this mixture's model.
-        double density;
-    };
+enum class Phase
+{
+    Liquid,
+    Gas
+};
 
-    struct FluidMixture
+struct MixtureComponent
+{
+    SubstanceId substance;
+
+    // Density of this ingredient under this mixture's model.
+    double density;
+
+    // Dynamic viscosity in scene units, specific to this ingredient's phase.
+    double dynamic_viscosity = 0.0;
+};
+
+struct FluidMixture
+{
+    std::vector<MixtureComponent> components;
+
+    bool hasViscosity() const
     {
-        std::vector<MixtureComponent> components;
-    };
+        for (const auto& component : components)
+        {
+            if (component.dynamic_viscosity != 0.0)
+                return true;
+        }
+
+        return false;
+    }
+};
 }

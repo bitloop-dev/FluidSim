@@ -1,12 +1,11 @@
 #pragma once
-#include "FluidGridCPU.h"
+#include "UniformCPU/FluidGridCPU.h"
 
 namespace fluid::test
 {
 
 // Legacy two-phase fixtures explicitly provide ingredients, just like a scene does.
-template<class Grid>
-void uploadTestMaterials(Grid& grid, typename Grid::State state)
+template <class Grid> void uploadTestMaterials(Grid& grid, typename Grid::State state)
 {
     using Scalar = typename Grid::Scalar;
     if (grid.substances.size() == 0)
@@ -22,12 +21,14 @@ void uploadTestMaterials(Grid& grid, typename Grid::State state)
         const double volume = grid.cell_size * grid.cell_size;
         state.liquid_mass.assign(1, std::vector<Scalar>(count));
         state.gas_mass.assign(1, std::vector<Scalar>(count));
+
         for (size_t i = 0; i < count; ++i)
         {
             state.liquid_mass[0][i] = Scalar(100.0 * state.liquid_fraction[i] * volume);
             state.gas_mass[0][i] = Scalar(0.1 * (1.0 - state.liquid_fraction[i]) * volume);
         }
     }
+
     grid.upload(state);
 }
 
@@ -43,16 +44,21 @@ inline FluidGridCPU::State initializeTestMaterials(
     auto state = grid.download();
     const size_t count = state.liquid_fraction.size();
     const double cell_volume = grid.cell_size * grid.cell_size;
+
     state.liquid_mass.assign(1, std::vector<double>(count));
     state.gas_mass.assign(1, std::vector<double>(count));
+
     for (size_t i = 0; i < count; ++i)
     {
         const double fraction = state.liquid_fraction[i];
+
         // Mass equals density times the volume occupied by that phase.
         state.liquid_mass[0][i] = liquid_density * fraction * cell_volume;
         state.gas_mass[0][i] = gas_density * (1.0 - fraction) * cell_volume;
     }
+
     grid.upload(state);
+
     return state;
 }
 

@@ -7,8 +7,7 @@ namespace fluid
 {
 
 // host-side state uses each engine's native precision; empty fields initialize to zero
-template<typename Scalar>
-struct FluidGridState
+template <typename Scalar> struct FluidGridState
 {
     // Total liquid volume fraction, including every liquid ingredient.
     std::vector<Scalar> liquid_fraction;
@@ -20,25 +19,40 @@ struct FluidGridState
     std::vector<std::vector<Scalar>> gas_mass;
 };
 
-template<typename To, typename From>
-FluidGridState<To> convertFluidState(const FluidGridState<From>& source)
+template <typename To, typename From> FluidGridState<To> convertFluidState(const FluidGridState<From>& source)
 {
     FluidGridState<To> result;
-    auto copy=[](auto& target,const auto& values) {
+
+    auto copy = [](auto& target, const auto& values)
+    {
         target.resize(values.size());
-        for (std::size_t i=0;i<values.size();++i) target[i]=static_cast<To>(values[i]);
+        for (std::size_t i = 0; i < values.size(); ++i)
+            target[i] = static_cast<To>(values[i]);
     };
-    copy(result.liquid_fraction,source.liquid_fraction); copy(result.u,source.u); copy(result.v,source.v); copy(result.pressure,source.pressure);
-    result.liquid_mass.resize(source.liquid_mass.size()); result.gas_mass.resize(source.gas_mass.size());
-    for (std::size_t k=0;k<source.liquid_mass.size();++k) copy(result.liquid_mass[k],source.liquid_mass[k]);
-    for (std::size_t k=0;k<source.gas_mass.size();++k) copy(result.gas_mass[k],source.gas_mass[k]);
+
+    copy(result.liquid_fraction, source.liquid_fraction);
+    copy(result.u, source.u);
+    copy(result.v, source.v);
+    copy(result.pressure, source.pressure);
+    result.liquid_mass.resize(source.liquid_mass.size());
+    result.gas_mass.resize(source.gas_mass.size());
+
+    for (std::size_t k = 0; k < source.liquid_mass.size(); ++k)
+        copy(result.liquid_mass[k], source.liquid_mass[k]);
+    for (std::size_t k = 0; k < source.gas_mass.size(); ++k)
+        copy(result.gas_mass[k], source.gas_mass[k]);
+
     return result;
 }
 
 struct FluidStepTimings
 {
-    double transport_ms = 0, forces_ms = 0, pressure_ms = 0;
-    double selection_ms = 0, regrid_ms = 0;
+    double transport_ms = 0;
+    double viscosity_ms = 0;
+    double forces_ms = 0;
+    double pressure_ms = 0;
+    double selection_ms = 0;
+    double regrid_ms = 0;
 };
 
 struct FluidProjectionResult
@@ -46,12 +60,17 @@ struct FluidProjectionResult
     int iterations = 0;
     double max_divergence = std::numeric_limits<double>::infinity();
     bool converged = false;
+
     // Actual complete physics steps and transport subdivisions, where available.
     int physical_steps = 1;
     int transport_steps = 0;
+
     // An intentionally approximate, numerically valid step is distinct from convergence.
     bool relaxed = false;
-    double max_volume_error = 0., rms_volume_error = 0.;
+    double max_volume_error = 0.0;
+    double rms_volume_error = 0.0;
+    int viscosity_iterations = 0; // Dispatched slots; convergence is observed in batches of four.
+
     bool accepted() const { return converged || relaxed; }
 };
 

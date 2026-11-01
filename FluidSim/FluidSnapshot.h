@@ -10,8 +10,10 @@ namespace fluid
 
 struct FluidSnapshot
 {
-    int width = 0, height = 0;
+    int width = 0;
+    int height = 0;
     double cell_size = 1;
+
     bl::JSON::json scene;
     FluidCheckpoint checkpoint;
 };
@@ -20,6 +22,7 @@ struct FluidSnapshot
 std::string encodeFluidSnapshot(const FluidSnapshot& snapshot);
 FluidSnapshot decodeFluidSnapshot(std::string_view payload);
 FluidSnapshot readFluidSnapshot(const std::filesystem::path& image);
+
 bl::bytebuf fluidSnapshotPixels(std::span<const float> colors);
 
 }

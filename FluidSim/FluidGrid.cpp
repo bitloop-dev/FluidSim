@@ -1,9 +1,9 @@
 #include "FluidGrid.h"
 
-#include "FluidGridCPU.h"
-#include "FluidGridAdaptiveCPU.h"
-#include "FluidGridWebGPU.h"
-#include "FluidGridAdaptiveWebGPU.h"
+#include "UniformCPU/FluidGridCPU.h"
+#include "AdaptiveCPU/FluidGridAdaptiveCPU.h"
+#include "UniformWebGPU/FluidGridWebGPU.h"
+#include "AdaptiveWebGPU/FluidGridAdaptiveWebGPU.h"
 
 #include <stdexcept>
 #include <utility>
@@ -12,7 +12,9 @@ namespace fluid
 {
 
 FluidGrid::FluidGrid(int width, int height, double cell_size)
-    : backend(std::make_unique<FluidGridCPU>(width, height, cell_size)) {}
+    : backend(std::make_unique<FluidGridCPU>(width, height, cell_size))
+{
+}
 
 FluidGrid::~FluidGrid() = default;
 
@@ -26,7 +28,7 @@ void FluidGrid::setDevice(FluidDevice value)
 
 void FluidGrid::setAdaptiveMode(AdaptiveMode mode)
 {
-    if (mode == adaptive_mode) 
+    if (mode == adaptive_mode)
         return;
 
     selectBackend(device, mode);
@@ -36,6 +38,9 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
 {
     if (initialized)
         throw std::logic_error("Destroy the initialized grid before changing its device or adaptive mode");
+
+    if (hasViscosity() && (value != FluidDevice::GPU || mode != AdaptiveMode::DISABLED))
+        throw std::invalid_argument("Set material viscosities to zero before leaving uniform WebGPU");
 
     std::unique_ptr<FluidGridBase> selected;
     FluidGridAdaptiveCPU* adaptive = nullptr;
@@ -47,7 +52,8 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
             selected = std::make_unique<FluidGridWebGPU>(getWidth(), getHeight(), getCellSize());
         else
         {
-            auto engine = std::make_unique<FluidGridAdaptiveWebGPU>(getWidth(), getHeight(), getCellSize(), int(mode), adaptive_settings);
+            auto engine = std::make_unique<FluidGridAdaptiveWebGPU>(
+                getWidth(), getHeight(), getCellSize(), int(mode), adaptive_settings);
             adaptive_webgpu = engine.get();
             selected = std::move(engine);
         }
@@ -62,20 +68,22 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
     }
     else
     {
-        auto engine = std::make_unique<FluidGridAdaptiveCPU>(getWidth(), getHeight(), getCellSize(), int(mode), adaptive_settings);
-        adaptive = engine.get(); 
+        auto engine = std::make_unique<FluidGridAdaptiveCPU>(
+            getWidth(), getHeight(), getCellSize(), int(mode), adaptive_settings);
+        adaptive = engine.get();
         selected = std::move(engine);
     }
 
     selected->configureMaterials(getSubstances(), getLiquidMixture(), getGasMixture());
-    selected->setOrigin(getOrigin()); 
+    selected->setOrigin(getOrigin());
     selected->setGravityY(getGravityY());
     selected->setSurfaceTension(getSurfaceTension());
     selected->setPressureRecoveryTime(getPressureRecoveryTime());
+    selected->setBoundaryFlows(getBoundaryFlows());
 
-    backend = std::move(selected); 
+    backend = std::move(selected);
 
-    adaptive_backend = adaptive; 
+    adaptive_backend = adaptive;
     adaptive_webgpu_backend = adaptive_webgpu;
     device = value;
     adaptive_mode = mode;
@@ -85,36 +93,118 @@ void FluidGrid::setAdaptiveSettings(const FluidAdaptiveSettings& settings)
 {
     adaptive_settings = settings;
 
-    if (adaptive_backend) 
+    if (adaptive_backend)
         adaptive_backend->setAdaptiveSettings(settings);
     if (adaptive_webgpu_backend)
         adaptive_webgpu_backend->setAdaptiveSettings(settings);
 }
 
-int FluidGrid::getWidth() const { return backend->getWidth(); }
-int FluidGrid::getHeight() const { return backend->getHeight(); }
+int FluidGrid::getWidth() const
+{
+    return backend->getWidth();
+}
 
-double FluidGrid::getCellSize() const { return backend->getCellSize(); }
-bl::DVec2 FluidGrid::getOrigin() const { return backend->getOrigin(); }
-void FluidGrid::setOrigin(bl::DVec2 origin) { backend->setOrigin(origin); }
+int FluidGrid::getHeight() const
+{
+    return backend->getHeight();
+}
 
-bool FluidGrid::requiresRenderThread() const { return backend->requiresRenderThread(); }
+double FluidGrid::getCellSize() const
+{
+    return backend->getCellSize();
+}
+
+bl::DVec2 FluidGrid::getOrigin() const
+{
+    return backend->getOrigin();
+}
+
+void FluidGrid::setOrigin(bl::DVec2 origin)
+{
+    backend->setOrigin(origin);
+}
+
+bool FluidGrid::requiresRenderThread() const
+{
+    return backend->requiresRenderThread();
+}
 
 void FluidGrid::configureMaterials(SubstanceCatalogue substances, FluidMixture liquid, FluidMixture gas)
 {
+    if ((liquid.hasViscosity() || gas.hasViscosity()) &&
+        (device != FluidDevice::GPU || adaptive_mode != AdaptiveMode::DISABLED))
+    {
+        throw std::invalid_argument("Viscosity requires uniform WebGPU");
+    }
+
     backend->configureMaterials(std::move(substances), std::move(liquid), std::move(gas));
 }
 
-const SubstanceCatalogue& FluidGrid::getSubstances() const { return backend->getSubstances(); }
-const FluidMixture& FluidGrid::getLiquidMixture() const { return backend->getLiquidMixture(); }
-const FluidMixture& FluidGrid::getGasMixture() const { return backend->getGasMixture(); }
-double FluidGrid::getGravityY() const { return backend->getGravityY(); }
-void FluidGrid::setGravityY(double acceleration) { backend->setGravityY(acceleration); }
-double FluidGrid::getSurfaceTension() const { return backend->getSurfaceTension(); }
-void FluidGrid::setSurfaceTension(double coefficient) { backend->setSurfaceTension(coefficient); }
-double FluidGrid::capillaryStepLimit() const { return backend->capillaryStepLimit(); }
-double FluidGrid::getPressureRecoveryTime() const { return backend->getPressureRecoveryTime(); }
-void FluidGrid::setPressureRecoveryTime(double seconds) { backend->setPressureRecoveryTime(seconds); }
+const SubstanceCatalogue& FluidGrid::getSubstances() const
+{
+    return backend->getSubstances();
+}
+
+const FluidMixture& FluidGrid::getLiquidMixture() const
+{
+    return backend->getLiquidMixture();
+}
+
+const FluidMixture& FluidGrid::getGasMixture() const
+{
+    return backend->getGasMixture();
+}
+
+void FluidGrid::setComponentViscosity(Phase phase, size_t component, double coefficient)
+{
+    backend->setComponentViscosity(phase, component, coefficient);
+}
+
+double FluidGrid::getGravityY() const
+{
+    return backend->getGravityY();
+}
+
+void FluidGrid::setBoundaryFlows(const BoundaryFlows& flows)
+{
+    backend->setBoundaryFlows(flows);
+}
+
+const BoundaryFlows& FluidGrid::getBoundaryFlows() const
+{
+    return backend->getBoundaryFlows();
+}
+
+void FluidGrid::setGravityY(double acceleration)
+{
+    backend->setGravityY(acceleration);
+}
+
+double FluidGrid::getSurfaceTension() const
+{
+    return backend->getSurfaceTension();
+}
+
+void FluidGrid::setSurfaceTension(double coefficient)
+{
+    backend->setSurfaceTension(coefficient);
+}
+
+double FluidGrid::capillaryStepLimit() const
+{
+    return backend->capillaryStepLimit();
+}
+
+double FluidGrid::getPressureRecoveryTime() const
+{
+    return backend->getPressureRecoveryTime();
+}
+
+void FluidGrid::setPressureRecoveryTime(double seconds)
+{
+    backend->setPressureRecoveryTime(seconds);
+}
+
 void FluidGrid::setAccelerationField(const FluidField& field)
 {
     backend->setAccelerationField(field);
@@ -125,31 +215,66 @@ void FluidGrid::setWebGPUContext(const FluidWebGPUContext& context)
     backend->setWebGPUContext(context);
 }
 
-FluidWebGPUContext FluidGrid::getWebGPUContext() { return backend->getWebGPUContext(); }
+FluidWebGPUContext FluidGrid::getWebGPUContext()
+{
+    return backend->getWebGPUContext();
+}
 
 void FluidGrid::clearAccelerationField()
 {
     backend->clearAccelerationField();
 }
 
-void FluidGrid::upload(const State& state) { backend->upload(state); initialized = true; }
-FluidGrid::State FluidGrid::download() const { return backend->download(); }
-bool FluidGrid::saveCheckpoint(FluidCheckpoint& checkpoint) const { return backend->saveCheckpoint(checkpoint); }
+void FluidGrid::upload(const State& state)
+{
+    backend->upload(state);
+    initialized = true;
+}
+
+FluidGrid::State FluidGrid::download() const
+{
+    return backend->download();
+}
+
+bool FluidGrid::saveCheckpoint(FluidCheckpoint& checkpoint) const
+{
+    return backend->saveCheckpoint(checkpoint);
+}
+
 bool FluidGrid::loadCheckpoint(const FluidCheckpoint& checkpoint)
 {
-    if (!backend->loadCheckpoint(checkpoint)) return false;
+    if (!backend->loadCheckpoint(checkpoint))
+        return false;
+
     initialized = true;
     return true;
 }
-void FluidGrid::destroy() { backend->destroy(); initialized = false; }
 
-FluidGrid::ProjectionResult FluidGrid::step(double dt, int max_iterations, double divergence_tolerance, StepTimings* timings)
+void FluidGrid::destroy()
+{
+    backend->destroy();
+    initialized = false;
+}
+
+FluidGrid::ProjectionResult FluidGrid::step(
+    double dt, int max_iterations, double divergence_tolerance, StepTimings* timings)
 {
     return backend->step(dt, max_iterations, divergence_tolerance, timings);
 }
 
-double FluidGrid::maxDivergence() const { return backend->maxDivergence(); }
-void FluidGrid::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const { backend->writeColorPixels(pixels, liquid_fraction_alpha); }
-void FluidGrid::commitEdits(detail::CellEditBatch& batch) { backend->commitEdits(batch); }
+double FluidGrid::maxDivergence() const
+{
+    return backend->maxDivergence();
+}
+
+void FluidGrid::writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha) const
+{
+    backend->writeColorPixels(pixels, liquid_fraction_alpha);
+}
+
+void FluidGrid::commitEdits(detail::CellEditBatch& batch)
+{
+    backend->commitEdits(batch);
+}
 
 }

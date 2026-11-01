@@ -7,7 +7,9 @@ inline void makeLegacyCheckpoint(fluid::FluidCheckpoint& checkpoint, int version
     auto& meta = checkpoint.metadata;
     meta["elements"] = meta.at("substances");
     meta.erase("substances");
-    for (auto& entry : meta["elements"]) entry.erase("composition");
+
+    for (auto& entry : meta["elements"])
+        entry.erase("composition");
     for (const char* phase : {"liquid_mixture", "gas_mixture"})
     {
         for (auto& component : meta[phase])
@@ -16,13 +18,18 @@ inline void makeLegacyCheckpoint(fluid::FluidCheckpoint& checkpoint, int version
             component.erase("substance");
         }
     }
+
     if (version < 3)
     {
         if (meta.at("acceleration_field").get<bool>())
-            checkpoint.data.resize(checkpoint.data.size() -
-                2 * meta.at("width").get<size_t>() * meta.at("height").get<size_t>() * sizeof(float));
+        {
+            checkpoint.data.resize(checkpoint.data.size() - 2 * meta.at("width").get<size_t>() *
+                                                                meta.at("height").get<size_t>() * sizeof(float));
+        }
+
         meta.erase("acceleration_field");
     }
-    if (version < 2) meta.erase("surface_tension");
+    if (version < 2)
+        meta.erase("surface_tension");
     meta["version"] = version;
 }

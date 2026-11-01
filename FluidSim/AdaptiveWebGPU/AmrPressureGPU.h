@@ -1,6 +1,6 @@
 #pragma once
-#include "../Adaptive/AmrPressureTopology2D.h"
-#include "../UniformWebGPU/FluidWebGPUCompute.h"
+#include "Shared/Adaptive/AmrPressureTopology2D.h"
+#include "Shared/WebGPU/FluidWebGPUCompute.h"
 #include <memory>
 
 namespace fluid
@@ -15,17 +15,25 @@ public:
     using Patch = AmrPressureTopology2D::Patch;
     using Field = std::vector<webgpu::Field>;
     using Faces = std::array<Field, 2>;
-    struct Result { int iterations; double residual; bool converged; };
+
+    struct Result
+    {
+        int iterations;
+        double residual;
+        bool converged;
+    };
 
     AmrPressureGPU(webgpu::Compute& compute, const std::vector<Level>& levels);
     ~AmrPressureGPU();
     AmrPressureGPU(const AmrPressureGPU&) = delete;
     AmrPressureGPU& operator=(const AmrPressureGPU&) = delete;
+
     // Compensated pressure keeps the original high plane and a low plane at
     // width*height. Coefficients, RHS and Krylov/preconditioner fields stay float.
     Field makeField(bool compensated = false) const;
     const std::vector<Patch>& patches(int level) const;
     const AmrPressureTopology2D& topology() const;
+
     void setCoefficients(const Faces& coefficients);
     void apply(Field& output, Field& pressure);
     void fluxes(Faces& output, Field& pressure);

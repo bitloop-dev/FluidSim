@@ -5,6 +5,7 @@
 #include "FluidMixture.h"
 #include "FluidCheckpoint.h"
 #include "FluidField.h"
+#include "FluidBoundaryFlows.h"
 #include <bitloop/core/types.h>
 #include <cstdint>
 #include <memory>
@@ -28,23 +29,41 @@ public:
     int width;
     int height;
     double cell_size;
+
     bl::DVec2 origin = {};
     SubstanceCatalogue substances;
     FluidMixture liquid_mixture;
     FluidMixture gas_mixture;
     double gravity_y = 100.0;
     double gas_damping_rate = 0.0;
+
     double getSurfaceTension() const { return surface_tension; }
+
     void setSurfaceTension(double coefficient);
+
     double getPressureRecoveryTime() const { return pressure_recovery_time; }
+
     void setPressureRecoveryTime(double seconds);
     double capillaryStepLimit() const;
+
+    bool hasViscosity() const { return liquid_mixture.hasViscosity() || gas_mixture.hasViscosity(); }
+
+    void setComponentViscosity(Phase phase, size_t component, double coefficient);
+
+    void setBoundaryFlows(const BoundaryFlows& flows);
+
+    const BoundaryFlows& getBoundaryFlows() const { return boundary_flows; }
+
     void setAccelerationField(const FluidField& field);
     void clearAccelerationField();
     void setWebGPUContext(const FluidWebGPUContext& context);
     FluidWebGPUContext getWebGPUContext();
 
-    enum class PressurePreconditioner { Diagonal, Multigrid };
+    enum class PressurePreconditioner
+    {
+        Diagonal,
+        Multigrid
+    };
     PressurePreconditioner pressure_preconditioner = PressurePreconditioner::Multigrid;
 
     FluidGridGPU(int width, int height, double cell_size);
@@ -59,23 +78,33 @@ public:
     State download() const;
     bool saveCheckpoint(FluidCheckpoint& checkpoint) const;
     bool loadCheckpoint(const FluidCheckpoint& checkpoint);
+
     // Staging needs no device; commit requires the owning thread after upload().
     Edit beginEdit() { return Edit(*this); }
+
     void destroy();
 
     // Optional completed-work stage timings add GPU synchronization.
-    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-3, FluidStepTimings* timings = nullptr);
+    // Negative pressure budget runs to convergence; nonnegative budgets retain bounded-call semantics.
+    ProjectionResult step(
+        double dt, int max_iterations = 200, double divergence_tolerance = 1e-3, FluidStepTimings* timings = nullptr);
+
     void advect(double dt);
     void dampGasVelocity(double dt);
     void applyGravity(double dt);
+
+    // Implicit symmetric viscous stress, with no advection/forces/projection.
+    int applyViscosity(double dt);
     ProjectionResult project(double dt, int max_iterations = 200, double divergence_tolerance = 1e-3);
     double maxDivergence() const;
 
     std::vector<float> colorPixels() const;
+
     void writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha = false) const;
     void synchronize() const;
 
     constexpr int uIndex(int x, int y) const { return y * (width + 1) + x; }
+
     constexpr int vIndex(int x, int y) const { return y * width + x; }
 
 private:
@@ -86,8 +115,9 @@ private:
     struct Impl;
     std::optional<FluidWebGPUContext> context;
     std::unique_ptr<Impl> gpu;
-    double surface_tension = 0.;
-    double pressure_recovery_time = 0.;
+    double surface_tension = 0.0;
+    double pressure_recovery_time = 0.0;
+    BoundaryFlows boundary_flows;
 };
 
 }

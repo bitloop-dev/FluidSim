@@ -4,10 +4,12 @@
 #include "FluidGridDisplay.h"
 #include "FluidSnapshot.h"
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <utility>
 #include <optional>
+#include <tuple>
 
 SIM_BEG;
 
@@ -15,22 +17,58 @@ using namespace bl;
 using fluid::FluidGrid;
 using fluid::FluidGridDisplay;
 
-// Simulation settings supplied by a scenario's launch config or named preset.
+// Scene settings supplied by a scenario's launch config or named preset.
 struct FluidSceneSettings
 {
     int grid_w;
     int grid_h;
     double cell_size = 1.0;
+
     fluid::FluidDevice fluid_device = fluid::FluidDevice::GPU;
     fluid::AdaptiveMode adaptive_mode = fluid::AdaptiveMode::DISABLED;
     double frame_time = 0.02;
     int steps_per_second = 60;
-    int projection_max_iterations = 2000;
+    int projection_max_iterations = 2000; // Legacy/adaptive budget; uniform WebGPU scenes run to tolerance.
     double projection_tolerance = 0.1;
     int pressure_recovery_frames = 0;
     double gravity_y = 0.0;
     double surface_tension = 0.0;
-    bool operator==(const FluidSceneSettings&) const = default;
+
+    // Mixture component order; omitted entries have zero viscosity.
+    std::vector<double> liquid_viscosities;
+    std::vector<double> gas_viscosities;
+
+    // Percentage of the grid diagonal; the default matches 6 cells at 1024 x 720.
+    float gas_proximity_scale = 0.4793139600f;
+
+    bool operator==(const FluidSceneSettings& other) const
+    {
+        auto values = [](const FluidSceneSettings& s)
+        {
+            return std::tie(s.grid_w, s.grid_h, s.cell_size, s.fluid_device, s.adaptive_mode, s.frame_time,
+                s.steps_per_second, s.projection_max_iterations, s.projection_tolerance, s.pressure_recovery_frames,
+                s.gravity_y, s.surface_tension);
+        };
+
+        auto same = [](const std::vector<double>& a, const std::vector<double>& b)
+        {
+            // Expanded UI zeros describe the same material as an omitted preset value.
+            for (size_t i = 0; i < std::max(a.size(), b.size()); ++i)
+            {
+                if ((i < a.size() ? a[i] : 0.0) != (i < b.size() ? b[i] : 0.0))
+                    return false;
+            }
+
+            return true;
+        };
+
+        return values(*this) == values(other) && same(liquid_viscosities, other.liquid_viscosities) &&
+               same(gas_viscosities, other.gas_viscosities) &&
+
+               // Rendering/snapshots store float cell ranges, so percentage round trips can round.
+               std::abs(gas_proximity_scale - other.gas_proximity_scale) <=
+                   1e-6f * std::max(std::abs(gas_proximity_scale), std::abs(other.gas_proximity_scale));
+    }
 };
 
 struct FluidScenePreset
@@ -40,10 +78,10 @@ struct FluidScenePreset
 };
 
 // Keep the concrete type visible to Bitloop's buffered UI.
-template<class Derived>
-struct FluidScene : bl::Scene<Derived>
+template <class Derived> struct FluidScene : bl::Scene<Derived>
 {
     using BufferedInterfaceModel = typename bl::Scene<Derived>::BufferedInterfaceModel;
+
     // Scenarios can supply their own named settings without requiring presets for every scene.
     inline static constexpr std::array<FluidScenePreset, 0> presets{};
 
@@ -57,6 +95,7 @@ struct FluidScene : bl::Scene<Derived>
     double world_h = double(grid_h) * cell_size;
 
     FluidGrid fluid;
+
     fluid::FluidDevice fluid_device;
     fluid::AdaptiveMode adaptive_mode;
     fluid::FluidAdaptiveSettings adaptive_settings;
@@ -68,6 +107,10 @@ struct FluidScene : bl::Scene<Derived>
     int pressure_recovery_frames;
     double gravity_y; // Positive Y points down.
     double surface_tension;
+    std::vector<double> liquid_viscosities;
+    std::vector<double> gas_viscosities;
+    std::vector<std::string> liquid_viscosity_names;
+    std::vector<std::string> gas_viscosity_names;
 
     bool simulation_failed = false;
     double simulation_time = 0.0;
@@ -82,31 +125,32 @@ struct FluidScene : bl::Scene<Derived>
     std::unique_ptr<fluid::FluidFieldWebGPUGenerator> mouse_field_generator;
 
     static constexpr const char* fluid_shader_src = R"(
-        #version 300 es
-        precision highp float;
+#version 300 es
+precision highp float;
 
-        uniform sampler2D u_color;
-        uniform sampler2D u_proximity;
-        uniform float u_deep_brightness;
+uniform sampler2D u_color;
+uniform sampler2D u_proximity;
+uniform float u_deep_brightness;
 
-        in vec2 v_uv;
-        out vec4 outColor;
+in vec2 v_uv;
+out vec4 outColor;
 
-        void main()
-        {
-            vec4 material = texture(u_color, v_uv); // Alpha carries liquid coverage.
-            float proximity = sqrt(clamp(2.0 * texture(u_proximity, v_uv).r, 0.0, 1.0));
-            vec3 transmission = pow(vec3(proximity), vec3(1.25, 0.9, 0.75));
-            vec3 shallow = mix(material.rgb, vec3(0.48, 0.85, 0.95), 0.3);
-            vec3 deep = material.rgb * u_deep_brightness;
-            vec3 water = max(deep, mix(deep, shallow, transmission));
-            outColor = vec4(mix(material.rgb, water, clamp(material.a, 0.0, 1.0)), 1.0);
-        }
-    )";
+void main()
+{
+    vec4 material = texture(u_color, v_uv); // Alpha carries liquid coverage.
+    float proximity = sqrt(clamp(2.0 * texture(u_proximity, v_uv).r, 0.0, 1.0));
+    vec3 transmission = pow(vec3(proximity), vec3(1.25, 0.9, 0.75));
+    vec3 shallow = mix(material.rgb, vec3(0.48, 0.85, 0.95), 0.3);
+    vec3 deep = material.rgb * u_deep_brightness;
+    vec3 water = max(deep, mix(deep, shallow, transmission));
+    outColor = vec4(mix(material.rgb, water, clamp(material.a, 0.0, 1.0)), 1.0);
+}
+)";
 
     ShaderSurface surface;
     FluidGridDisplay fluid_display;
     std::vector<float> display_pixels;
+
     // Keep the existing 6-cell appearance at 1024x720, scaled with the grid diagonal.
     float liquid_tint_depth = float(6.0 * std::hypot(double(grid_w), double(grid_h)) / std::hypot(1024.0, 720.0));
     float liquid_deep_brightness = 0.6f; // Minimum liquid brightness.
@@ -117,17 +161,26 @@ struct FluidScene : bl::Scene<Derived>
 
     struct FrameStatistics
     {
-        double update_ms = 0, fluid_ms = 0, colour_ms = 0;
+        double update_ms = 0;
+        double fluid_ms = 0;
+        double colour_ms = 0;
+
         fluid::FluidStepTimings stages;
         int substeps = 0;
-        int transport_steps = 0, pressure_iterations = 0;
-        bool detailed = false, adaptive = false;
+        int transport_steps = 0;
+        int pressure_iterations = 0;
+        int viscosity_iterations = 0;
+        bool detailed = false;
+        bool adaptive = false;
         double projection_tolerance = 1e-2;
-        double max_volume_error = 0., rms_volume_error = 0.;
+        double max_volume_error = 0.0;
+        double rms_volume_error = 0.0;
         bool operator==(const FrameStatistics&) const = default;
     };
+
     FrameStatistics frame_statistics;
     std::uint64_t frame_statistics_generation = 0;
+
     // Render and sidebar both run on the GUI owner; do not shadow-buffer this value.
     mutable double last_render_ms = 0;
 
@@ -135,11 +188,14 @@ struct FluidScene : bl::Scene<Derived>
     {
         static constexpr int capacity = 600;
         static constexpr int average_window = 10;
-        std::array<double, capacity> times{}, averages{};
+        std::array<double, capacity> times{};
+        std::array<double, capacity> averages{};
         std::array<double, average_window> window{};
-        int count = 0, next = 0, window_next = 0;
-        double window_sum = 0.;
-        double last_simulation_time = -1.;
+        int count = 0;
+        int next = 0;
+        int window_next = 0;
+        double window_sum = 0.0;
+        double last_simulation_time = -1.0;
         std::uint64_t generation = 0;
 
         void add(double time, double milliseconds)
@@ -153,6 +209,7 @@ struct FluidScene : bl::Scene<Derived>
             next = (next + 1) % capacity;
         }
     };
+
     // GUI-owned telemetry: capture during rendering even when the sidebar is collapsed.
     mutable FrameTimeHistory frame_time_history;
 
@@ -160,18 +217,19 @@ struct FluidScene : bl::Scene<Derived>
     void applyPreset(const FluidSceneSettings& settings);
     void setSurfaceTension(double coefficient);
     void setPressureRecoveryFrames(int frames);
+    void setComponentViscosity(fluid::Phase phase, size_t component, double coefficient);
+    void refreshViscosityControls();
     void updateAccelerationField();
     virtual void renderFluidSurface() const;
     JSON::json captureSceneState() const;
-    void restoreSceneState(const JSON::json& state, const fluid::FluidCheckpoint& checkpoint,
-        int width, int height, double spacing);
+    void restoreSceneState(
+        const JSON::json& state, const fluid::FluidCheckpoint& checkpoint, int width, int height, double spacing);
     virtual void captureFluidImage(CaptureFrame& output) const;
     bool captureFrame(const CapturePreset& request, CaptureFrame& output) const override;
     void resumeFromImage(const std::filesystem::path& image);
 
     // Route operations to the engine's required owner (WebGPU stays on the simulation worker).
-    template<typename Operation>
-    void withFluidContext(Operation&& operation) const
+    template <typename Operation> void withFluidContext(Operation&& operation) const
     {
         if (fluid.requiresRenderThread())
         {
@@ -193,13 +251,17 @@ struct FluidScene : bl::Scene<Derived>
 
     // The base owns startup/restart and uploads the scenario's initial state.
     virtual FluidGrid::State initialFluidState() const = 0;
+
     virtual void beforeFluidFrame(double /*dt*/) {}
+
     virtual void drawScenario(Viewport* /*viewport*/) const {}
 
     // Validate external state before replacing the live grid. Restore only commits
     // the already validated values; it must not perform fallible resource work.
     virtual JSON::json captureScenarioState() const { return JSON::json::object(); }
+
     virtual void validateScenarioState(const JSON::json&, const FluidGrid&) const {}
+
     virtual void restoreScenarioState(const JSON::json&) {}
 
     struct UI : BufferedInterfaceModel
@@ -215,7 +277,8 @@ struct FluidScene : bl::Scene<Derived>
         using BufferedInterfaceModel::_schedule;
 
         double pressure_tolerance_before_edit = 1e-2;
-        double surface_tension_before_edit = 0.;
+        double surface_tension_before_edit = 0.0;
+        double viscosity_before_edit = 0.0;
     };
 
     // Common lifecycle and rendering; scenarios customize the hooks above.
@@ -228,12 +291,12 @@ struct FluidScene : bl::Scene<Derived>
 
     void onEvent(Event e) override;
 
-    #ifdef BITLOOP_DEV_MODE
+#ifdef BITLOOP_DEV_MODE
     void traceFrame(SimTraceFrame& frame) const override;
     bool captureTraceSnapshot(std::string_view route, SimSnapshotImage& image) const override;
     bool saveCheckpoint(SimCheckpointWriter& writer) const override;
     bool loadCheckpoint(const SimCheckpointReader& reader) override;
-    #endif
+#endif
 };
 
 SIM_END;

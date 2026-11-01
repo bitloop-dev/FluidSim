@@ -6,8 +6,20 @@
 namespace fluid
 {
 
-enum class FluidDevice { CPU, GPU };
-enum class AdaptiveMode { DISABLED = 0, MAX_2 = 2, MAX_4 = 4, MAX_8 = 8, MAX_16 = 16, MAX_32 = 32 };
+enum class FluidDevice
+{
+    CPU,
+    GPU
+};
+enum class AdaptiveMode
+{
+    DISABLED = 0,
+    MAX_2 = 2,
+    MAX_4 = 4,
+    MAX_8 = 8,
+    MAX_16 = 16,
+    MAX_32 = 32
+};
 
 class FluidGridAdaptiveCPU;
 class FluidGridAdaptiveWebGPU;
@@ -24,15 +36,21 @@ public:
     FluidGrid& operator=(FluidGrid&&) noexcept = default;
 
     void setDevice(FluidDevice device);
+
     FluidDevice getDevice() const { return device; }
+
     void setAdaptiveMode(AdaptiveMode mode);
+
     AdaptiveMode getAdaptiveMode() const { return adaptive_mode; }
+
     void setAdaptiveSettings(const FluidAdaptiveSettings& settings);
+
     const FluidAdaptiveSettings& getAdaptiveSettings() const { return adaptive_settings; }
 
     int getWidth() const override;
     int getHeight() const override;
     double getCellSize() const override;
+
     bl::DVec2 getOrigin() const override;
     void setOrigin(bl::DVec2 origin) override;
     bool requiresRenderThread() const override;
@@ -40,6 +58,10 @@ public:
     const SubstanceCatalogue& getSubstances() const override;
     const FluidMixture& getLiquidMixture() const override;
     const FluidMixture& getGasMixture() const override;
+
+    void setComponentViscosity(Phase phase, size_t component, double coefficient) override;
+    void setBoundaryFlows(const BoundaryFlows& flows) override;
+    const BoundaryFlows& getBoundaryFlows() const override;
     double getGravityY() const override;
     void setGravityY(double acceleration) override;
     double getSurfaceTension() const override;
@@ -56,8 +78,10 @@ public:
     State download() const override;
     bool saveCheckpoint(FluidCheckpoint& checkpoint) const override;
     bool loadCheckpoint(const FluidCheckpoint& checkpoint) override;
+
     void destroy() override;
-    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6, StepTimings* timings = nullptr) override;
+    ProjectionResult step(double dt, int max_iterations = 200, double divergence_tolerance = 1e-6,
+        StepTimings* timings = nullptr) override;
     double maxDivergence() const override;
     void writeColorPixels(std::vector<float>& pixels, bool liquid_fraction_alpha = false) const override;
 

@@ -1,5 +1,5 @@
 #pragma once
-#include "Adaptive/FluidCoarseningPreview.h"
+#include "Shared/Adaptive/FluidCoarseningPreview.h"
 
 namespace fluid
 {
@@ -10,6 +10,7 @@ struct FluidAdaptiveSettings
     FluidCoarseningPreview::Tolerances tolerances;
     FluidCoarseningPreview::Stability stability;
     double check_interval = 0.32;
+
     // Include the scene's observation/frame interval as well as the check interval.
     double prediction_horizon = 0.34;
     bool operator==(const FluidAdaptiveSettings&) const = default;

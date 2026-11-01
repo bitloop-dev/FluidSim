@@ -1,0 +1,28 @@
+BasedOnStyle: Microsoft
+IndentWidth: 4
+ColumnLimit: 120
+BreakBeforeBraces: Allman
+NamespaceIndentation: None
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortBlocksOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+# Conditional braces depend on rendered header/body length; see AGENTS.md.
+# Keep simple unwrapped controls unbraced rather than enabling InsertBraces globally.
+InsertBraces: false
+BreakStringLiterals: false
+AlignAfterOpenBracket: DontAlign
+LambdaBodyIndentation: OuterScope
+SortIncludes: Never
+SortUsingDeclarations: Never
+IncludeBlocks: Preserve
+PointerAlignment: Left
+ReferenceAlignment: Left
+BreakConstructorInitializers: BeforeColon
+PackConstructorInitializers: NextLine
+Cpp11BracedListStyle: true
+FixNamespaceComments: false
+ReflowComments: Never
+SeparateDefinitionBlocks: Always

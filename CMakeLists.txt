@@ -21,20 +21,11 @@ file(GLOB_RECURSE SIM_SOURCES CONFIGURE_DEPENDS
     "${SRC_DIR}/*.hpp"
     "${SRC_DIR}/*.inl"
 )
-list(REMOVE_ITEM SIM_SOURCES 
+# Engine sources belong exclusively to their libraries; the project owns scenes/rendering.
+list(REMOVE_ITEM SIM_SOURCES
     "${SRC_DIR}/FluidField.cpp"
-    "${SRC_DIR}/FluidGrid.cpp" 
-    "${SRC_DIR}/FluidGridCPU.cpp"
-    "${SRC_DIR}/FluidGridAdaptiveCPU.cpp"
-    "${SRC_DIR}/FluidGridWebGPU.cpp"
-    "${SRC_DIR}/FluidGridAdaptiveWebGPU.cpp"
-    "${SRC_DIR}/PressureMultigrid.cpp"
-    "${SRC_DIR}/FluidGridWebGL.cpp"
-    "${SRC_DIR}/PressureMultigridGPU.cpp")
-
-list(FILTER SIM_SOURCES EXCLUDE REGEX "/Adaptive/.*\\.cpp$")
-list(FILTER SIM_SOURCES EXCLUDE REGEX "/UniformWebGPU/.*\\.cpp$")
-list(FILTER SIM_SOURCES EXCLUDE REGEX "/AdaptiveWebGPU/.*\\.cpp$")
+    "${SRC_DIR}/FluidGrid.cpp")
+list(FILTER SIM_SOURCES EXCLUDE REGEX "/(UniformCPU|UniformWebGPU|AdaptiveCPU|AdaptiveWebGPU|Shared|LegacyWebGL)/.*\\.cpp$")
 
 bitloop_new_project(FluidSim ${SIM_SOURCES})
 
@@ -42,67 +33,83 @@ bitloop_finalize()
 
 if(NOT BITLOOP_DISCOVERY)
     find_package(unofficial-brotli CONFIG REQUIRED)
-    add_library(FluidAdaptiveCore STATIC
-        "${SRC_DIR}/Adaptive/AmrField2D.cpp" "${SRC_DIR}/Adaptive/AmrTransfer2D.cpp"
-        "${SRC_DIR}/Adaptive/AmrPressure2D.cpp" "${SRC_DIR}/Adaptive/AmrPressureTopology2D.cpp"
-        "${SRC_DIR}/Adaptive/FluidGridAdaptive.cpp" "${SRC_DIR}/Adaptive/AmrGasRuntime.cpp")
-    target_include_directories(FluidAdaptiveCore PUBLIC "${SRC_DIR}/Adaptive" "${SRC_DIR}")
-    target_compile_features(FluidAdaptiveCore PUBLIC cxx_std_23)
-    target_compile_definitions(FluidAdaptiveCore PUBLIC FLUIDSIM_HAS_AMR=1)
-    if(EMSCRIPTEN)
-        target_compile_options(FluidAdaptiveCore PUBLIC -pthread -fexceptions)
-        target_link_options(FluidAdaptiveCore PUBLIC -fexceptions)
-    else()
+    # Shared host geometry and GPU execution infrastructure do not own an engine.
+    add_library(FluidAdaptiveShared STATIC
+        "${SRC_DIR}/Shared/Adaptive/AmrField2D.cpp"
+        "${SRC_DIR}/Shared/Adaptive/AmrTransfer2D.cpp"
+        "${SRC_DIR}/Shared/Adaptive/AmrPressureTopology2D.cpp"
+        "${SRC_DIR}/Shared/Adaptive/FluidCoarseningLayout.cpp"
+        "${SRC_DIR}/Shared/Adaptive/FluidCoarseningPreview.cpp")
+    target_link_libraries(FluidAdaptiveShared PUBLIC bitloop::bitloop)
+    if(NOT EMSCRIPTEN)
         if(MSVC)
             set(OpenMP_RUNTIME_MSVC llvm)
             set(OpenMP_CXX_FLAGS "/openmp:llvm" CACHE STRING "" FORCE)
         endif()
         find_package(OpenMP REQUIRED)
-        target_link_libraries(FluidAdaptiveCore PUBLIC OpenMP::OpenMP_CXX)
+        target_link_libraries(FluidAdaptiveShared PUBLIC OpenMP::OpenMP_CXX)
     endif()
+
     add_library(FluidFieldCore STATIC "${SRC_DIR}/FluidField.cpp")
-    target_include_directories(FluidFieldCore PUBLIC "${SRC_DIR}")
-    target_compile_features(FluidFieldCore PUBLIC cxx_std_23)
     target_link_libraries(FluidFieldCore PUBLIC bitloop::bitloop bitloop::webgpu)
-    if(EMSCRIPTEN)
-        target_compile_options(FluidFieldCore PUBLIC -pthread -fexceptions)
-        target_link_options(FluidFieldCore PUBLIC -fexceptions)
-    endif()
+
+    # Four independent implementations of the common grid contract.
+    add_library(FluidUniformCPUCore STATIC
+        "${SRC_DIR}/UniformCPU/FluidGridCPU.cpp"
+        "${SRC_DIR}/UniformCPU/PressureMultigrid.cpp")
+    target_link_libraries(FluidUniformCPUCore PUBLIC FluidFieldCore)
+
     add_library(FluidUniformWebGPUCore STATIC
-        "${SRC_DIR}/UniformWebGPU/FluidGridGPU.cpp" "${SRC_DIR}/UniformWebGPU/PressureMultigridGPU.cpp")
-    target_include_directories(FluidUniformWebGPUCore PUBLIC "${SRC_DIR}")
-    target_compile_features(FluidUniformWebGPUCore PUBLIC cxx_std_23)
+        "${SRC_DIR}/UniformWebGPU/FluidGridWebGPU.cpp"
+        "${SRC_DIR}/UniformWebGPU/FluidGridGPU.cpp"
+        "${SRC_DIR}/UniformWebGPU/PressureMultigridGPU.cpp"
+        "${SRC_DIR}/UniformWebGPU/ViscositySolverGPU.cpp")
     target_link_libraries(FluidUniformWebGPUCore PUBLIC FluidFieldCore)
-    if(EMSCRIPTEN)
-        target_compile_options(FluidUniformWebGPUCore PUBLIC -pthread -fexceptions)
-        target_link_options(FluidUniformWebGPUCore PUBLIC -fexceptions)
-    endif()
+
+    add_library(FluidAdaptiveCPUCore STATIC
+        "${SRC_DIR}/AdaptiveCPU/FluidGridAdaptiveCPU.cpp"
+        "${SRC_DIR}/AdaptiveCPU/FluidGridAdaptive.cpp"
+        "${SRC_DIR}/AdaptiveCPU/AmrPressure2D.cpp")
+    target_link_libraries(FluidAdaptiveCPUCore PUBLIC FluidAdaptiveShared FluidFieldCore)
+
     add_library(FluidAdaptiveWebGPUCore STATIC
-        "${SRC_DIR}/AdaptiveWebGPU/FluidGridAdaptiveGPU.cpp" "${SRC_DIR}/AdaptiveWebGPU/AmrPressureGPU.cpp")
-    target_include_directories(FluidAdaptiveWebGPUCore PUBLIC "${SRC_DIR}")
-    target_compile_features(FluidAdaptiveWebGPUCore PUBLIC cxx_std_23)
-    target_link_libraries(FluidAdaptiveWebGPUCore PUBLIC FluidAdaptiveCore FluidUniformWebGPUCore)
-    add_library(FluidSimEngine STATIC "${SRC_DIR}/FluidGrid.cpp" "${SRC_DIR}/FluidGridCPU.cpp" "${SRC_DIR}/PressureMultigrid.cpp" "${SRC_DIR}/FluidGridAdaptiveCPU.cpp" "${SRC_DIR}/Adaptive/FluidCoarseningPreview.cpp" "${SRC_DIR}/FluidGridWebGPU.cpp" "${SRC_DIR}/FluidGridAdaptiveWebGPU.cpp" "${SRC_DIR}/AdaptiveWebGPU/FluidCoarseningGPU.cpp")
-    target_include_directories(FluidSimEngine PUBLIC "${SRC_DIR}")
-    target_compile_features(FluidSimEngine PUBLIC cxx_std_23)
-    target_link_libraries(FluidSimEngine PUBLIC bitloop::bitloop FluidAdaptiveCore FluidUniformWebGPUCore FluidAdaptiveWebGPUCore)
+        "${SRC_DIR}/AdaptiveWebGPU/FluidGridAdaptiveWebGPU.cpp"
+        "${SRC_DIR}/AdaptiveWebGPU/FluidGridAdaptiveGPU.cpp"
+        "${SRC_DIR}/AdaptiveWebGPU/AmrPressureGPU.cpp"
+        "${SRC_DIR}/AdaptiveWebGPU/FluidCoarseningGPU.cpp")
+    target_link_libraries(FluidAdaptiveWebGPUCore PUBLIC FluidAdaptiveShared FluidFieldCore)
+
+    # The facade is the only place that selects a concrete engine.
+    add_library(FluidSimEngine STATIC "${SRC_DIR}/FluidGrid.cpp")
+    target_link_libraries(FluidSimEngine PUBLIC
+        FluidUniformCPUCore FluidUniformWebGPUCore
+        FluidAdaptiveCPUCore FluidAdaptiveWebGPUCore)
     target_link_libraries(FluidSim PRIVATE FluidSimEngine)
     target_link_libraries(FluidSim PRIVATE unofficial::brotli::brotlienc unofficial::brotli::brotlidec)
     bitloop_deploy_webgpu_runtime(FluidSim)
 
-    add_library(FluidSimEngineWebGL STATIC "${SRC_DIR}/FluidGridWebGL.cpp" "${SRC_DIR}/PressureMultigridGPU.cpp")
-    target_include_directories(FluidSimEngineWebGL PUBLIC "${SRC_DIR}")
-    target_compile_features(FluidSimEngineWebGL PUBLIC cxx_std_23)
-    target_link_libraries(FluidSimEngineWebGL PUBLIC bitloop::bitloop)
-    target_link_libraries(FluidSim PRIVATE FluidSimEngineWebGL)
+    # Retained reference implementation, linked only by its regression tests.
+    add_library(FluidSimEngineWebGL STATIC
+        "${SRC_DIR}/LegacyWebGL/FluidGridWebGL.cpp"
+        "${SRC_DIR}/LegacyWebGL/FluidGridDisplayWebGL.cpp"
+        "${SRC_DIR}/LegacyWebGL/PressureMultigridGPU.cpp")
+    target_link_libraries(FluidSimEngineWebGL PUBLIC FluidUniformCPUCore)
 
-    target_link_libraries(FluidSimEngineWebGL PRIVATE FluidSimEngine)
+    foreach(engine FluidAdaptiveShared FluidFieldCore FluidUniformCPUCore FluidUniformWebGPUCore
+                   FluidAdaptiveCPUCore FluidAdaptiveWebGPUCore FluidSimEngine FluidSimEngineWebGL)
+        target_include_directories(${engine} PUBLIC "${SRC_DIR}")
+        target_compile_features(${engine} PUBLIC cxx_std_23)
+        if(EMSCRIPTEN)
+            target_compile_options(${engine} PUBLIC -pthread -fexceptions)
+            target_link_options(${engine} PUBLIC -fexceptions)
+        endif()
+    endforeach()
 
     option(FLUIDSIM_BUILD_TESTS "Build the fluid engine regression tests" OFF)
     if(FLUIDSIM_BUILD_TESTS)
         enable_testing()
         if(BITLOOP_DEV_MODE)
-            foreach(test FluidSurfaceTensionWave FluidSnapshotSceneTests FluidSceneTests FluidSplashCubesTests)
+            foreach(test FluidSurfaceTensionWave FluidSnapshotSceneTests FluidSceneTests FluidSplashCubesTests FluidHoneyTapTests)
                 add_executable(${test} tests/${test}.cpp
                     "${SRC_DIR}/scenarios/CrashingWave.cpp" "${SRC_DIR}/scenarios/SplashCubes.cpp"
                     "${SRC_DIR}/FluidGridDisplay.cpp"
@@ -113,8 +120,10 @@ if(NOT BITLOOP_DISCOVERY)
                     unofficial::brotli::brotlienc unofficial::brotli::brotlidec)
                 bitloop_deploy_webgpu_runtime(${test})
             endforeach()
+            target_sources(FluidHoneyTapTests PRIVATE "${SRC_DIR}/scenarios/HoneyTap.cpp")
             add_test(NAME FluidSceneTests COMMAND FluidSceneTests)
             add_test(NAME FluidSplashCubesTests COMMAND FluidSplashCubesTests)
+            add_test(NAME FluidHoneyTapTests COMMAND FluidHoneyTapTests)
             add_test(NAME FluidSnapshotSceneTests COMMAND FluidSnapshotSceneTests)
             add_executable(FluidCheckpointTests tests/FluidCheckpointTests.cpp
                 "${SRC_DIR}/FluidCheckpointIO.cpp" "${SRC_DIR}/FluidSnapshot.cpp")
@@ -141,6 +150,15 @@ if(NOT BITLOOP_DISCOVERY)
         add_executable(FluidPressureRecoveryTests tests/FluidPressureRecoveryTests.cpp)
         target_link_libraries(FluidPressureRecoveryTests PRIVATE FluidSimEngine)
         bitloop_deploy_webgpu_runtime(FluidPressureRecoveryTests)
+        add_executable(FluidViscosityTests tests/FluidViscosityTests.cpp)
+        target_link_libraries(FluidViscosityTests PRIVATE FluidUniformWebGPUCore)
+        bitloop_deploy_webgpu_runtime(FluidViscosityTests)
+        add_executable(FluidViscosityIntegrationTests tests/FluidViscosityIntegrationTests.cpp)
+        add_executable(FluidBoundaryTests tests/FluidBoundaryTests.cpp)
+        target_link_libraries(FluidBoundaryTests PRIVATE FluidSimEngine)
+        bitloop_deploy_webgpu_runtime(FluidBoundaryTests)
+        target_link_libraries(FluidViscosityIntegrationTests PRIVATE FluidSimEngine)
+        bitloop_deploy_webgpu_runtime(FluidViscosityIntegrationTests)
         add_executable(FluidSurfaceTensionTests tests/FluidSurfaceTensionTests.cpp)
         target_link_libraries(FluidSurfaceTensionTests PRIVATE FluidSimEngine)
         bitloop_deploy_webgpu_runtime(FluidSurfaceTensionTests)
@@ -170,8 +188,9 @@ if(NOT BITLOOP_DISCOVERY)
         if(EMSCRIPTEN)
             # Native hidden-window display checks are conditional in the API fixture.
             set_source_files_properties(tests/FluidGridWebGPUTests.cpp tests/FluidWebGPUAPITests.cpp tests/FluidSurfaceTensionTests.cpp tests/FluidAccelerationTests.cpp PROPERTIES COMPILE_DEFINITIONS main=fluidWebGpuTestMain)
-            set_source_files_properties(tests/FluidPressureRecoveryTests.cpp PROPERTIES COMPILE_DEFINITIONS main=fluidWebGpuTestMain)
-            foreach(test FluidUniformWebGPUTests FluidWebGPUAPITests FluidSurfaceTensionTests FluidAccelerationTests FluidPressureRecoveryTests)
+            set_source_files_properties(tests/FluidPressureRecoveryTests.cpp tests/FluidViscosityTests.cpp tests/FluidViscosityIntegrationTests.cpp PROPERTIES COMPILE_DEFINITIONS main=fluidWebGpuTestMain)
+            set_source_files_properties(tests/FluidBoundaryTests.cpp PROPERTIES COMPILE_DEFINITIONS main=fluidWebGpuTestMain)
+            foreach(test FluidUniformWebGPUTests FluidWebGPUAPITests FluidSurfaceTensionTests FluidAccelerationTests FluidPressureRecoveryTests FluidViscosityTests FluidViscosityIntegrationTests FluidBoundaryTests)
                 target_sources(${test} PRIVATE tests/webgpu/main.cpp)
                 target_link_options(${test} PRIVATE -sPROXY_TO_PTHREAD=1 -sPTHREAD_POOL_SIZE=1 -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1)
                 set_target_properties(${test} PROPERTIES SUFFIX ".html")
@@ -179,6 +198,9 @@ if(NOT BITLOOP_DISCOVERY)
         else()
             add_test(NAME FluidUniformWebGPUTests COMMAND FluidUniformWebGPUTests)
             add_test(NAME FluidPressureRecoveryTests COMMAND FluidPressureRecoveryTests)
+            add_test(NAME FluidViscosityTests COMMAND FluidViscosityTests)
+            add_test(NAME FluidViscosityIntegrationTests COMMAND FluidViscosityIntegrationTests)
+            add_test(NAME FluidBoundaryTests COMMAND FluidBoundaryTests)
             add_test(NAME FluidSurfaceTensionTests COMMAND FluidSurfaceTensionTests)
             add_test(NAME FluidAccelerationTests COMMAND FluidAccelerationTests)
             add_test(NAME FluidWebGPUAPITests COMMAND FluidWebGPUAPITests)
