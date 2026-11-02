@@ -56,9 +56,11 @@ void FluidGridAdaptiveWebGPU::upload(const State& state)
     auto initialized =
         std::make_unique<FluidGridAdaptiveGPU>(width, height, cell_size, substances, liquid, gas, AmrLayout{});
     initialized->upload(state); // Preserve the native 1e-4 initialization projection policy.
+
     selector.reset();
     engine = std::move(initialized);
     selector = std::make_unique<FluidCoarseningGPU>();
+
     simulation_time = next_refinement_time = 0.0;
     projection_tolerance = 1e-4;
     refinement_checks = 0;
@@ -77,6 +79,7 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveWebGPU::step(
 {
     if (timings)
         *timings = {};
+
     native();
 
     if (dt == 0.0)
@@ -93,6 +96,7 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveWebGPU::step(
         const auto layout = selector->proposeLayout(*engine);
         if (timings)
             timings->selection_ms = std::chrono::duration<double, std::milli>(Clock::now() - selection_started).count();
+
         const auto regrid_started = timings ? Clock::now() : Clock::time_point{};
         next_refinement_time = simulation_time + settings.check_interval;
         ++refinement_checks;
@@ -133,6 +137,7 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveWebGPU::step(
     {
         result = {failure.iterations, engine->maxDivergence(), false};
     }
+
     simulation_time += dt;
 
     return result;
@@ -186,6 +191,7 @@ FluidGridBase::State FluidGridAdaptiveWebGPU::download() const
         read(level.conserved, data.q);
         read(level.velocity[0], data.u);
         read(level.velocity[1], data.v);
+
         const auto mask = gpu.commands().read(level.active);
         data.active.resize(mask.size());
 
@@ -200,8 +206,8 @@ FluidGridBase::State FluidGridAdaptiveWebGPU::download() const
 
         for (size_t i = 0; i < plane; ++i)
             data.pressure[i] = double(pressure[i]) + pressure[i + plane];
-        const int scale = int(std::lround(level.geometry.cell_size / cell_size));
 
+        const int scale = int(std::lround(level.geometry.cell_size / cell_size));
         for (size_t index = 0; index < level.qLayout.patches.size(); ++index)
         {
             const auto& q = level.qLayout.patches[index];
@@ -281,6 +287,7 @@ void FluidGridAdaptiveWebGPU::refineForEdits(const detail::CellEditBatch& batch)
                 }
             }
         }
+
         for (const auto& cell : batch.cells)
             mark(cell.x, cell.y);
     }

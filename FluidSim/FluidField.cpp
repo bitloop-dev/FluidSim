@@ -176,6 +176,7 @@ void FluidFieldWebGPUGenerator::generate(FluidField& field, std::span<const std:
     settings.level[0] = float(layout.origin.x);
     settings.level[1] = float(layout.origin.y);
     std::copy(parameters.begin(), parameters.end(), settings.vectors.begin());
+
     const auto& output = FluidFieldAccess::gpuField(field);
     if (impl->output.Get() != output.buffer.Get())
     {

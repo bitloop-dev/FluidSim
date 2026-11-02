@@ -114,7 +114,6 @@ struct ViscositySolverGPU::Impl : ViscosityKernels
             {unsigned(group_count * lanes), 1, 1});
 
         p.grid[0] = group_count;
-
         compute.run(finish_reduce, {&stats}, {{"source", &partials}}, p, {lanes, 1, 1});
     }
 
@@ -153,12 +152,16 @@ struct ViscositySolverGPU::Impl : ViscosityKernels
 
         smoothLevel(level, b, true);
         smoothLevel(level, b, false);
+
         run(residual_pass, level, {&l.residual}, {{"source", &l.x}, {"rhs", &b}, {"coeff", &l.coefficients}});
+
         auto& coarse = levels[level + 1];
         run(restrict_pass, level + 1, {&coarse.rhs}, {{"source", &l.residual}, {"state", &state}});
         cycle(level + 1, coarse.rhs);
+
         run(prolong, level, {&l.next}, {{"source", &l.x}, {"coarse", &coarse.x}, {"state", &state}});
         l.x.swap(l.next);
+
         smoothLevel(level, b, false);
         smoothLevel(level, b, false);
     }
@@ -209,6 +212,7 @@ struct ViscositySolverGPU::Impl : ViscosityKernels
 
         trueResidual(residual);
         reduce(residual, solution, 0);
+
         const auto initial = compute.read(stats);
         const double target = tolerance * tolerance * initial[1] + 1e-12 * initial[2];
         if (initial[3] != 0.0)
@@ -223,6 +227,7 @@ struct ViscositySolverGPU::Impl : ViscosityKernels
         p.value[2] = float(tolerance);
 
         compute.run(initialize, {&state}, {{"stats", &stats}}, p, {1, 1, 1});
+
         int iterations = 0;
 
         while (maximum < 0 || iterations < maximum)
@@ -233,23 +238,29 @@ struct ViscositySolverGPU::Impl : ViscosityKernels
                 cycle(0, residual);
                 reduce(residual, levels[0].x, 1);
                 scalars(1);
+
                 run(direction_pass, 0, {&next_direction},
                     {{"correction", &levels[0].x}, {"previous", &direction}, {"state", &state}});
                 direction.swap(next_direction);
+
                 run(apply, 0, {&product},
                     {{"source", &direction}, {"coeff", &levels[0].coefficients}, {"state", &state}});
                 reduce(direction, product, 2);
                 scalars(2);
+
                 run(update, 0, {&next_solution, &next_residual},
                     {{"solution", &solution}, {"residual", &residual}, {"direction", &direction}, {"product", &product},
                         {"state", &state}});
+
                 solution.swap(next_solution);
                 residual.swap(next_residual);
             }
 
             iterations += batch;
+
             trueResidual(truth);
             reduce(truth, truth, 3);
+
             const auto check = compute.read(stats);
             relative_residual = std::sqrt(check[0] / std::max(double(initial[1]), 1e-30));
 

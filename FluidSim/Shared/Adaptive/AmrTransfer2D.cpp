@@ -122,8 +122,8 @@ void AmrTransfer2D::average(const AmrField2D<double>& fine, AmrField2D<double>& 
     const int nx = axis == 0 ? 1 : ratio;
     const int ny = axis == 1 ? 1 : ratio;
     const double weight = 1.0 / (nx * ny);
-#pragma omp parallel for
 
+#pragma omp parallel for
     for (int p = 0; p < coarse.size(); ++p)
     {
         const auto out = coarse.array(p);

@@ -61,6 +61,7 @@ FluidGrid::State SplashCubes::initialFluidState() const
                     coverage = red;
                 else if (component.substance == water_substance)
                     coverage = blue;
+
                 initial.liquid_mass[k][i] = component.density * coverage * cell_volume;
             }
 
@@ -74,6 +75,7 @@ FluidGrid::State SplashCubes::initialFluidState() const
                     share = cloud;
                 else if (component.substance == hydrogen_substance)
                     share = 1.0 - cloud;
+
                 initial.gas_mass[k][i] = component.density * (1.0 - fraction) * cell_volume * share;
             }
         }

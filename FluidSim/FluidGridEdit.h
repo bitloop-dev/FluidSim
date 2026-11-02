@@ -38,6 +38,7 @@ struct CellEditBatch
     {
         cells.clear();
         cells.reserve(changes.size());
+
         size_t component = 0;
         double mass = 0;
 
@@ -85,6 +86,7 @@ struct CellEditBatch
             size_t last = first + 1;
             while (last < cells.size() && cells[last].x == cells[first].x && cells[last].y == cells[first].y)
                 ++last;
+
             cells[kept++] = cells[last - 1];
             first = last;
         }

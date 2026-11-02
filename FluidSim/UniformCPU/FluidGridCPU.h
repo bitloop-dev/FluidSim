@@ -191,7 +191,6 @@ private:
     void rebuildTransfersY(double step);
 
     void rebuildComponentTransfersX(double step, const std::vector<Scalar>& mass, bool is_liquid);
-
     void rebuildComponentTransfersY(double step, const std::vector<Scalar>& mass, bool is_liquid);
 
     void freezeComponentCorrections();

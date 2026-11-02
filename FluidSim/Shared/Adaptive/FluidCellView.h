@@ -255,6 +255,7 @@ public:
                     const auto c = at(gx + dx, gy + dy);
                     for (int n = 0; n < components(); ++n)
                         plane.stencil[side * plane.count + n] += c.density(n) / samples;
+
                     if (includeMomentum)
                     {
                         for (int d = 0; d < 2; ++d)
@@ -275,9 +276,9 @@ public:
         };
 
         const auto limiter = linearLimiter(components(), sample);
-
         for (int n = 0; n < components(); ++n)
             plane.slopes[n] = linearSlope(n, sample, limiter);
+
         if (includeMomentum)
         {
             const auto momentum = linearMomentumSlopes(components(), sample, limiter);
@@ -305,7 +306,6 @@ public:
     int components() const { return int(mixture->components.size()); }
 
     int width;
-
     int height;
     double cellSize;
     const FluidMixture* mixture;

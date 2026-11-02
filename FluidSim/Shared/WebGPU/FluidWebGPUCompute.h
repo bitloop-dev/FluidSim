@@ -151,6 +151,7 @@ public:
             @group(0) @binding(0) var<uniform> params: Parameters;
             var<private> point: vec2i;
             var<private> invocationZ: u32;
+
             fn cell() -> vec2i
             {
                 return point;
@@ -193,6 +194,7 @@ public:
         )wgsl";
         if (subgroups)
             code = "enable subgroups;\nvar<private> subgroupLane:u32;\n" + code;
+
         std::vector<wgpu::BindGroupLayoutEntry> entries(outputs + inputs.size() + 1);
         entries[0].binding = 0;
         entries[0].visibility = wgpu::ShaderStage::Compute;
@@ -291,11 +293,14 @@ public:
                 execute();
             }
         )wgsl";
+
         kernel.module = gpu.shader(code, label);
+
         wgpu::BindGroupLayoutDescriptor group_descriptor;
         group_descriptor.entryCount = entries.size();
         group_descriptor.entries = entries.data();
         kernel.layout = gpu.device().CreateBindGroupLayout(&group_descriptor);
+
         wgpu::PipelineLayoutDescriptor layout_descriptor;
         layout_descriptor.bindGroupLayoutCount = 1;
         layout_descriptor.bindGroupLayouts = &kernel.layout;
@@ -364,9 +369,11 @@ public:
             kernel.pipeline = variant->second;
             kernel.pipeline_channels = channels;
         }
+
         if (extent[0] == 0)
             extent = {unsigned(fields[0]->width), unsigned(fields[0]->height), 1};
         settings.extent = {extent[0], extent[1], extent[2], 0};
+
         auto [cached, inserted] = kernel.bindings.try_emplace(std::move(key));
         if (inserted)
         {
@@ -389,15 +396,18 @@ public:
             descriptor.entries = entries.data();
             cached->second.group = gpu.device().CreateBindGroup(&descriptor);
         }
+
         if (parameters.size() == stride * batch_capacity)
             flush();
         if (!encoder)
             encoder = gpu.device().CreateCommandEncoder();
         if (!pass)
             pass = encoder.BeginComputePass();
+
         const uint32_t offset = uint32_t(parameters.size());
         parameters.resize(parameters.size() + stride);
         std::memcpy(parameters.data() + offset, &settings, sizeof(settings));
+
         pass.SetPipeline(kernel.pipeline);
         pass.SetBindGroup(0, cached->second.group, 1, &offset);
         pass.DispatchWorkgroups((extent[0] + kernel.workgroup[0] - 1) / kernel.workgroup[0],
@@ -412,8 +422,10 @@ public:
         endPass();
         if (!parameters.empty())
             gpu.queue().WriteBuffer(uniforms, 0, parameters.data(), parameters.size());
+
         auto commands = encoder.Finish();
         gpu.queue().Submit(1, &commands);
+
         encoder = nullptr;
         parameters.clear();
     }

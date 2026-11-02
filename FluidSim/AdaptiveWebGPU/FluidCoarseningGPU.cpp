@@ -39,6 +39,7 @@ constexpr std::string_view sweepShader = R"wgsl(
     @group(0) @binding(0) var<uniform> config: Config;
     @group(0) @binding(1) var<storage, read> observations: array<f32>;
     @group(0) @binding(2) var<storage, read_write> differences: array<atomic<i32>>;
+
     @compute @workgroup_size(64)
     fn main(@builtin(global_invocation_id) id: vec3u)
     {
@@ -150,8 +151,8 @@ struct FluidCoarseningGPU::Impl
             shader::displayAndScales, native);
         commands.build(summary, "AMR selection summary", 1, {"labels", "observations"}, shader::summary);
         commands.build(reduce, "AMR selection summary reduction", 1, {"partials"}, shader::reduceSummary);
-        std::array<wgpu::BindGroupLayoutEntry, 3> entries{};
 
+        std::array<wgpu::BindGroupLayoutEntry, 3> entries{};
         for (unsigned i = 0; i < entries.size(); ++i)
         {
             entries[i].binding = i;
@@ -162,14 +163,17 @@ struct FluidCoarseningGPU::Impl
         entries[0].buffer.minBindingSize = 16;
         entries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
         entries[2].buffer.type = wgpu::BufferBindingType::Storage;
+
         wgpu::BindGroupLayoutDescriptor group;
         group.entryCount = entries.size();
         group.entries = entries.data();
         sweepLayout = commands.gpu.device().CreateBindGroupLayout(&group);
+
         wgpu::PipelineLayoutDescriptor layoutDescriptor;
         layoutDescriptor.bindGroupLayoutCount = 1;
         layoutDescriptor.bindGroupLayouts = &sweepLayout;
         auto layout = commands.gpu.device().CreatePipelineLayout(&layoutDescriptor);
+
         wgpu::ComputePipelineDescriptor descriptor;
         descriptor.label = "AMR swept rectangle accumulation";
         descriptor.layout = layout;
@@ -254,6 +258,7 @@ struct FluidCoarseningGPU::Impl
             a.uniform = commands.gpu.buffer(
                 sizeof(config), wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, "AMR sweep shape");
             commands.gpu.queue().WriteBuffer(a.uniform, 0, config.data(), sizeof(config));
+
             std::array<wgpu::BindGroupEntry, 3> entries{};
             entries[0].binding = 0;
             entries[0].buffer = a.uniform;
@@ -264,6 +269,7 @@ struct FluidCoarseningGPU::Impl
             entries[2].binding = 2;
             entries[2].buffer = a.differences.buffer;
             entries[2].size = a.differences.bytes();
+
             wgpu::BindGroupDescriptor binding;
             binding.layout = sweepLayout;
             binding.entryCount = entries.size();
@@ -348,6 +354,7 @@ struct FluidCoarseningGPU::Impl
 
         for (const auto& component : grid.materialMixture().components)
             data.push_back(float(component.density));
+
         metadata = commands.field(int(data.size()), 1, 1, "AMR selection geometry");
         commands.write(metadata, data);
         snapshot = commands.field(int(stateSize), 1, 1, "AMR native selection snapshot");
@@ -381,6 +388,7 @@ struct FluidCoarseningGPU::Impl
         auto encoder = commands.gpu.device().CreateCommandEncoder();
         for (int lev = 0; lev < levelCount; ++lev)
             encoder.ClearBuffer(assessments[lev].differences.buffer);
+
         auto pass = encoder.BeginComputePass();
         pass.SetPipeline(sweep);
 
@@ -481,8 +489,10 @@ void FluidCoarseningGPU::update(const FluidGridAdaptiveGPU& grid, const Toleranc
 
         commands.run(p.assessMaterial, {&p.observations},
             {{"metadata", &p.metadata}, {"state", &p.snapshot}, {"planes", &p.planes}}, settings, extent);
+
         commands.run(p.assessVelocity, {&p.observations},
             {{"metadata", &p.metadata}, {"state", &p.snapshot}, {"planes", &p.planes}}, settings, extent);
+
         commands.run(p.assess, {&p.observations},
             {{"metadata", &p.metadata}, {"state", &p.snapshot}, {"previous", &p.previous}}, settings, extent);
     }
@@ -498,6 +508,7 @@ void FluidCoarseningGPU::update(const FluidGridAdaptiveGPU& grid, const Toleranc
 
         commands.run(p.stabilise, {&p.observations, &p.history}, {{"metadata", &p.metadata}, {"state", &p.snapshot}},
             settings, {unsigned(a.width), unsigned(a.height), 1});
+
         commands.run(p.makeTiles, {&p.tiles},
             {{"metadata", &p.metadata}, {"state", &p.snapshot}, {"observations", &p.observations}}, settings,
             {unsigned((p.width + tile - 1) / tile), unsigned((p.height + tile - 1) / tile), 1});
@@ -508,13 +519,15 @@ void FluidCoarseningGPU::update(const FluidGridAdaptiveGPU& grid, const Toleranc
     commands.run(p.display, {&p.displayLabels, &p.previous},
         {{"metadata", &p.metadata}, {"state", &p.snapshot}, {"observations", &p.observations}}, p.parameters,
         {unsigned(width), unsigned(height), 1});
+
     commands.run(p.summary, {&p.partials}, {{"labels", &p.displayLabels}, {"observations", &p.observations}},
         p.parameters, {p.parameters.padding[3][3], 1, 1});
     commands.run(p.reduce, {&p.totals}, {{"partials", &p.partials}}, p.parameters, {11, 1, 1});
+
     const auto masks = commands.read(p.tiles);
     const auto totals = commands.read(p.totals);
-    p.requests.clear();
 
+    p.requests.clear();
     for (int lev = 0; lev < levels; ++lev)
     {
         const auto& a = p.assessments[lev];
@@ -525,11 +538,13 @@ void FluidCoarseningGPU::update(const FluidGridAdaptiveGPU& grid, const Toleranc
         for (int i = 0; i < a.tileCount; ++i)
             request.tiles[i] = masks[a.tileOffset + i] != 0.0f;
     }
+
     for (int i = 0; i < FluidCoarseningPreview::LabelCount; ++i)
         counts[i] = int(totals[i]);
     statistics = {int(totals[7]), int(totals[8]), int(totals[9]), int(totals[10])};
     labels.clear();
     ++revision;
+
     if (trace)
     {
         *trace = {};

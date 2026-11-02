@@ -244,7 +244,6 @@ void FluidGridCPU::upload(const State& state)
     assign_components(gas_mass, state.gas_mass, gas_mixture.components.size());
 
     liquid_correction_weights.assign(liquid_mass.size(), std::vector<Scalar>(cell_count, 0.0));
-
     gas_correction_weights.assign(gas_mass.size(), std::vector<Scalar>(cell_count, 0.0));
 
     previous_pressure = pressure;
@@ -555,7 +554,6 @@ double FluidGridCPU::momentumTransfer(double mass_transfer, double velocity_befo
 {
     // the transferred mass carries the donor's velocity
     const double donor_velocity = mass_transfer >= 0.0 ? velocity_before : velocity_after;
-
     return mass_transfer * donor_velocity;
 }
 
@@ -865,6 +863,7 @@ void FluidGridCPU::applySurfaceTension(double dt)
 {
     if (!capillary)
         capillary.emplace(width, height);
+
     auto& geometry = *capillary;
     geometry.liquid = liquid_fraction;
     geometry.cell_size = cell_size;
@@ -919,6 +918,7 @@ void FluidGridCPU::applySurfaceTension(double dt)
                 const int cell = y * width + x;
                 const double jump = surface_tension * geometry.faceCurvature(cell - width, cell) *
                                     (liquid_fraction[cell] - liquid_fraction[cell - width]);
+
                 v[cell] += dt * inv_density_v[cell] * jump / cell_size;
             }
         }
@@ -1013,7 +1013,6 @@ void FluidGridCPU::addVortex(DVec2 center, double radius, double strength)
         for (int x = 0; x <= width; ++x)
         {
             DVec2 pos{origin.x + x * cell_size, origin.y + (y + 0.5) * cell_size};
-
             u[uIndex(x, y)] += vortexVelocity(pos).x;
         }
     }
@@ -1023,7 +1022,6 @@ void FluidGridCPU::addVortex(DVec2 center, double radius, double strength)
         for (int x = 0; x < width; ++x)
         {
             DVec2 pos{origin.x + (x + 0.5) * cell_size, origin.y + y * cell_size};
-
             v[vIndex(x, y)] += vortexVelocity(pos).y;
         }
     }
@@ -1173,6 +1171,7 @@ void FluidGridCPU::rebuildPressureCoefficients()
 
             for (int x = 1; x < width; ++x)
                 horizontal[x] = 2.0 / (row[x - 1] + row[x]);
+
             if (y == 0)
                 std::fill_n(vertical, width, 0.0);
             else
@@ -1342,6 +1341,7 @@ void FluidGridCPU::freezeComponentCorrections()
                     }
                 }
             };
+
             freeze.operator()<true>(liquid_mass, liquid_correction_weights);
             freeze.operator()<false>(gas_mass, gas_correction_weights);
         }
@@ -1355,7 +1355,6 @@ void FluidGridCPU::advectComponents(double step, bool horizontal)
     const int face_offset = horizontal ? 1 : width;
 
     auto& total_mass_transfer = horizontal ? mass_transfer_u : mass_transfer_v;
-
     std::fill(total_mass_transfer.begin(), total_mass_transfer.end(), 0.0);
 
     auto advect_mixture = [&](auto& fields, const auto& corrections, bool is_liquid)
@@ -1379,7 +1378,6 @@ void FluidGridCPU::advectComponents(double step, bool horizontal)
                     {
                         // Before/after means left/right for X, or top/bottom for Y.
                         const int before = horizontal ? uIndex(x, y) : i;
-
                         const int after = before + face_offset;
 
                         const double net_fluid_transfer = scale * (flow[after] - flow[before]);
@@ -1413,7 +1411,6 @@ void FluidGridCPU::rebuildDensity()
 
             for (const auto& mass : liquid_mass)
                 total_mass += mass[i];
-
             for (const auto& mass : gas_mass)
                 total_mass += mass[i];
 
@@ -1674,7 +1671,7 @@ FluidGridCPU::ResidualStats FluidGridCPU::rebuildPressureResidual()
         }
 
         return part;
-    },[](ResidualStats a, ResidualStats b)
+    }, [](ResidualStats a, ResidualStats b)
     {
         return ResidualStats{a.sum + b.sum, std::max(a.maximum, b.maximum)};
     });
@@ -1770,6 +1767,7 @@ int FluidGridCPU::solvePressure(int max_iterations, double residual_tolerance)
 
     double residual_mean = initial.sum / double(pressure_residual.size());
     double residual_dot_correction = applyPreconditioner(pressure_residual, pressure_correction, residual_mean);
+
     forBatches(int(pressure.size()), [&](int first, int last)
     {
         std::copy(pressure_correction.begin() + first, pressure_correction.begin() + last,

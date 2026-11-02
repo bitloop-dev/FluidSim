@@ -52,8 +52,10 @@ PressureMultigrid::PressureMultigrid(int width, int height)
         height = (height + 1) / 2;
         spacing *= 2;
     }
+
     for (size_t i = 0; i + 1 < levels.size(); ++i)
         buildTransfers(levels[i], levels[i + 1]);
+
     const int unknowns = levels.back().width * levels.back().height - 1;
     coarse_factor.resize(size_t(unknowns) * unknowns);
     coarse_rhs.resize(unknowns);
@@ -263,6 +265,7 @@ void PressureMultigrid::restrictResidual(Level& fine, Level& coarse)
                     double horizontal = 0.0;
                     for (int ix = 0; ix < rx.count; ++ix)
                         horizontal += rx.weights[ix] * row[rx.indices[ix]];
+
                     value += ry.weights[iy] * horizontal;
                 }
 
@@ -363,6 +366,7 @@ void PressureMultigrid::solveCoarsest()
             value -= coarse_factor[row * n + col] * coarse_rhs[col];
         coarse_rhs[row] = value / coarse_factor[row * n + row];
     }
+
     for (int row = n - 1; row >= 0; --row)
     {
         double value = coarse_rhs[row];
@@ -392,9 +396,9 @@ void PressureMultigrid::cycle(int index)
     constexpr int smoothing_sweeps = 4;
 
     smooth(fine, false, true);
-
     for (int sweep = 1; sweep < smoothing_sweeps; ++sweep)
         smooth(fine, false);
+
     restrictResidual(fine, coarse);
     cycle(index + 1);
     prolongCorrection(coarse, fine);
@@ -417,8 +421,8 @@ void PressureMultigrid::apply(
     });
 
     cycle(0);
-    correction.resize(residual.size());
 
+    correction.resize(residual.size());
     forRows(fine.width, fine.height, [&](int y0, int y1)
     {
         for (int y = y0; y < y1; ++y)

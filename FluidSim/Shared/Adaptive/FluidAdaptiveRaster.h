@@ -34,6 +34,7 @@ inline FluidGridBase::State adaptiveRaster(const FluidCellView& view)
 
                 if (p.scale > 1)
                     view.reconstruct(plane, x, y, p.scale);
+
                 for (int dy = 0; dy < p.scale; ++dy)
                 {
                     for (int dx = 0; dx < p.scale; ++dx)
@@ -71,8 +72,8 @@ inline FluidGridBase::State adaptiveRaster(const FluidCellView& view)
         const auto other = view.at(x - (axis == 0), y - (axis == 1));
         if (other.patch->scale < c.patch->scale)
             c = other;
-        const double t = double(axis ? y : x) / c.patch->scale - (axis ? c.y : c.x);
 
+        const double t = double(axis ? y : x) / c.patch->scale - (axis ? c.y : c.x);
         return std::lerp(c.face(axis, 0), c.face(axis, 1), t);
     };
 

@@ -22,6 +22,7 @@ std::string encodeFluidSnapshot(const FluidSnapshot& snapshot)
     std::string packet = header.dump();
     packet.push_back('\0'); // JSON cannot contain a literal NUL; the remaining bytes are native state.
     packet.append(reinterpret_cast<const char*>(snapshot.checkpoint.data.data()), snapshot.checkpoint.data.size());
+
     const auto encoded = compressCheckpointData(std::as_bytes(std::span(packet)), 1);
     const std::string_view bytes(reinterpret_cast<const char*>(encoded.data()), encoded.size());
 
@@ -52,6 +53,7 @@ FluidSnapshot decodeFluidSnapshot(std::string_view payload)
     const size_t header_bytes = size_t(end - packet.begin());
     const auto header = bl::JSON::json::parse(
         reinterpret_cast<const char*>(packet.data()), reinterpret_cast<const char*>(packet.data()) + header_bytes);
+
     FluidSnapshot snapshot;
     snapshot.width = header.at("width").get<int>();
     snapshot.height = header.at("height").get<int>();

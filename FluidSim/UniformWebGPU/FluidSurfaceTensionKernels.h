@@ -59,6 +59,7 @@ struct SurfaceTensionKernels
                 return normalize(plicNormal(s));
             }
         )wgsl";
+
         const std::string fitting = R"wgsl(
             struct Fit
             {
@@ -250,6 +251,7 @@ struct SurfaceTensionKernels
                     {
                         k = heightCurvature(p, vec2i(first.y, first.x));
                     }
+
                     if (k.y == 0.0)
                     {
                         var fit: Fit;
@@ -404,6 +406,7 @@ struct SurfaceTensionKernels
                     {
                         k = (left.x * left.y + right.x * right.y) / (left.y + right.y);
                     }
+
                     let capillary = params.value.w * k * (liquid(p).x - liquid(p - axis).x);
                     let pressure_jump = pressure(p).x - pressure(p - axis).x;
                     let a = weights(p);

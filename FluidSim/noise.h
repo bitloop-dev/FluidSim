@@ -16,6 +16,7 @@ static inline double perlinNoise(double x, double y)
         hash ^= hash >> 15;
         hash *= 0x846ca68bu;
         hash ^= hash >> 16;
+
         constexpr double diagonal = 0.7071067811865476;
         constexpr double directions[8][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {diagonal, diagonal},
             {-diagonal, diagonal}, {diagonal, -diagonal}, {-diagonal, -diagonal}};

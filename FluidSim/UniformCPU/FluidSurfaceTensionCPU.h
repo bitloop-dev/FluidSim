@@ -88,8 +88,8 @@ struct FluidSurfaceTensionCPU
         const double magnitude = std::max(std::abs(n.x), std::abs(n.y));
         n.x /= magnitude;
         n.y /= magnitude;
-        const double length = std::sqrt(n.x * n.x + n.y * n.y);
 
+        const double length = std::sqrt(n.x * n.x + n.y * n.y);
         return {n.x / length, n.y / length};
     }
 
@@ -136,6 +136,7 @@ struct FluidSurfaceTensionCPU
     {
         auto& h = heights[size_t(y) * width + x];
         h = {};
+
         double low = 1.0;
         double high = 0.0;
 
@@ -165,6 +166,7 @@ struct FluidSurfaceTensionCPU
             h.x = -h.x;
             h.orientation_x = -h.orientation_x;
         }
+
         if (y < 0 || y >= height)
         {
             h.y = -h.y;
@@ -181,6 +183,7 @@ struct FluidSurfaceTensionCPU
         const auto a = heightAt(x - tangent_x, y - tangent_y);
         const auto b = heightAt(x, y);
         const auto c = heightAt(x + tangent_x, y + tangent_y);
+
         const double orientation = horizontal ? b.orientation_x : b.orientation_y;
         if (orientation == 0.0 || (horizontal ? a.orientation_x : a.orientation_y) != orientation ||
             (horizontal ? c.orientation_x : c.orientation_y) != orientation)
@@ -300,6 +303,7 @@ struct FluidSurfaceTensionCPU
                     high = std::max(high, s);
                 }
             }
+
             if (std::abs(n.y) > 1e-7)
             {
                 const double py = (offset - n.x * i) / n.y;

@@ -20,6 +20,7 @@ AmrPressure2D::AmrPressure2D(const std::vector<Level>& levels)
 
             for (auto& beta : grid.beta)
                 beta.resize(grid.size);
+
             destination.push_back(std::move(grid));
         }
     };
@@ -62,6 +63,7 @@ void AmrPressure2D::fillBoundary(const Grid& grid, std::vector<double>& field, c
             double value = g.first_weight * field[g.first];
             if (g.second_weight != 0.0)
                 value += g.second_weight * field[g.second];
+
             if (coarse)
             {
                 double boundary = 0.0;
@@ -149,8 +151,8 @@ void AmrPressure2D::applyGrid(
     double factor = 1.0 / (grid.cell_size * grid.cell_size);
     const auto& bx = grid.beta[0];
     const auto& by = grid.beta[1];
-#pragma omp parallel for schedule(static) if (grid.cells >= 65536)
 
+#pragma omp parallel for schedule(static) if (grid.cells >= 65536)
     for (int r = 0; r < int(grid.rows.size()); ++r)
     {
         const auto& row = grid.rows[r];
@@ -234,6 +236,7 @@ void AmrPressure2D::fluxes(Faces& output, Field& pressure)
             }
         }
     }
+
     for (int l = int(grids.size()) - 1; l > 0; --l)
     {
         for (int d = 0; d < 2; ++d)
@@ -248,8 +251,10 @@ void AmrPressure2D::apply(Field& output, Field& pressure)
 {
     for (int l = 0; l < int(grids.size()); ++l)
         applyGrid(grids[l], output[l], pressure[l], l ? &pressure[l - 1] : nullptr);
+
     for (int l = int(grids.size()) - 2; l >= 0; --l)
         reflux(l, output, pressure, 1.0);
+
     restrictField(output);
 }
 
@@ -352,6 +357,7 @@ void AmrPressure2D::residualLevel(int level, Field& output, Field& pressure, con
 {
     const auto& grid = grids[level];
     applyGrid(grid, output[level], pressure[level], level ? &pressure[level - 1] : nullptr);
+
     for (const auto& row : grid.rows)
     {
         for (int i = row.begin; i < row.end; ++i)
@@ -403,8 +409,8 @@ void AmrPressure2D::precondition(Field& output, const Field& rhs, bool bottomKry
 {
     rhs_work = rhs;
     restrictField(rhs_work);
-    double sum = 0.0;
 
+    double sum = 0.0;
     for (const auto& row : grids[0].rows)
     {
         for (int i = row.begin; i < row.end; ++i)
@@ -561,6 +567,7 @@ bool AmrPressure2D::solveBottom(const Grid& grid, std::vector<double>& pressure,
     std::vector<double> p(grid.size);
     std::vector<double> v(grid.size);
     std::vector<double> t(grid.size);
+
     const double initial = maximum(r);
     const double target = 1.0e-4 * initial;
     if (initial == 0.0)
@@ -610,7 +617,6 @@ bool AmrPressure2D::solveBottom(const Grid& grid, std::vector<double>& pressure,
         });
 
         magnitude = maximum(r);
-
         if (magnitude < target)
             return true;
 
@@ -632,7 +638,6 @@ bool AmrPressure2D::solveBottom(const Grid& grid, std::vector<double>& pressure,
         });
 
         magnitude = maximum(r);
-
         if (magnitude < target)
             return true;
 
@@ -687,8 +692,8 @@ AmrPressure2D::Result AmrPressure2D::solveMultigrid(
         apply(error, pressure);
         scale(error, -1.0);
         increment(error, right, 1.0);
-        magnitude = 0.0;
 
+        magnitude = 0.0;
         for (int l = 0; l < int(grids.size()); ++l)
         {
             for (const auto& row : grids[l].rows)
@@ -759,6 +764,7 @@ AmrPressure2D::Result AmrPressure2D::solve(Field& pressure, const Field& rhs, do
             int k = count;
             if (int(basis.size()) <= k + 1)
                 basis.push_back(makeField());
+
             precondition(work, basis[k]);
             apply(basis[k + 1], work);
 
@@ -767,6 +773,7 @@ AmrPressure2D::Result AmrPressure2D::solve(Field& pressure, const Field& rhs, do
                 std::array<double, restart> products{};
                 for (int j = 0; j <= k; ++j)
                     products[j] = dot(basis[k + 1], basis[j]);
+
                 for (int j = 0; j <= k; ++j)
                 {
                     increment(basis[k + 1], basis[j], -products[j]);
@@ -809,6 +816,7 @@ AmrPressure2D::Result AmrPressure2D::solve(Field& pressure, const Field& rhs, do
             if (happy)
                 break;
         }
+
         for (int k = count - 1; k >= 0; --k)
         {
             double value = g[k];
@@ -821,10 +829,12 @@ AmrPressure2D::Result AmrPressure2D::solve(Field& pressure, const Field& rhs, do
 
             g[k] = value / h[k][k];
         }
+
         for (auto& level : combination)
             std::fill(level.begin(), level.end(), 0.0);
         for (int k = 0; k < count; ++k)
             increment(combination, basis[k], g[k]);
+
         precondition(work, combination);
         increment(update, work, 1.0);
     }

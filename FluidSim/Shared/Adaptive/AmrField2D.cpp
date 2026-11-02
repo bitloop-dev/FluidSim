@@ -40,6 +40,7 @@ std::vector<AmrBox2D> splitAmrBoxes(const std::vector<AmrBox2D>& boxes, int maxi
                     box.smallEnd(d) + (i * size + std::min(i, extra)) * ratio, (size + (i < extra)) * ratio);
             }
         }
+
         for (auto [y, h] : spans[1])
         {
             for (auto [x, w] : spans[0])
@@ -83,11 +84,10 @@ std::pair<int, int> findCut(const std::vector<int>& hist, int lo)
         return {lo + cut, status};
 
     std::vector<int> derivative(length, 0);
-
     for (int i = 1; i < length - 1; ++i)
         derivative[i] = hist[i + 1] - 2 * hist[i] + hist[i - 1];
-    int largest = -1;
 
+    int largest = -1;
     for (int i = 2; i < length - 2; ++i)
     {
         const int change = std::abs(derivative[i - 1] - derivative[i]);
@@ -175,6 +175,7 @@ std::vector<AmrBox2D> clusterAmrTags(std::vector<std::array<int, 2>> points, dou
             std::array<std::pair<int, int>, 2> cuts;
             for (int d = 0; d < 2; ++d)
                 cuts[d] = d == invalid ? std::pair{0, 3} : findCut(hist[d], old.box.smallEnd(d));
+
             const int status = std::min(cuts[0].second, cuts[1].second);
             int direction = -1;
             int balance = -1;

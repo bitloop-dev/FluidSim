@@ -169,6 +169,7 @@ FluidGridBase::ProjectionResult FluidGridWebGPU::step(
 {
     if (timings)
         *timings = {};
+
     requireUploaded();
 
     // The native API returns an empty result at zero time. The common contract

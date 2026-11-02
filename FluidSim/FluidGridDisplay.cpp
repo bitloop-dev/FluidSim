@@ -14,6 +14,7 @@ std::uint32_t uploadTexture(std::uint32_t& cpu_texture, int& width, int& height,
     bl::GLStateGuard guard;
     glActiveTexture(GL_TEXTURE0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
     if (!cpu_texture)
     {
         glGenTextures(1, &cpu_texture);
@@ -91,9 +92,11 @@ void FluidGridDisplay::destroy()
         glDeleteTextures(1, &cpu_texture);
     if (proximity_texture)
         glDeleteTextures(1, &proximity_texture);
+
     cpu_texture = 0;
     width = height = 0;
     pixels.clear();
+
     proximity_texture = 0;
     proximity_width = proximity_height = 0;
     proximity.clear();

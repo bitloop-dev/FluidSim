@@ -42,8 +42,10 @@ PressureMultigridGPU::PressureMultigridGPU(PassRunner& runner, int width, int he
         h = (h + 1) / 2;
         spacing *= 2;
     }
+
     for (size_t i = 0; i + 1 < levels.size(); ++i)
         buildTransfers(levels[i], levels[i + 1]);
+
     const int unknowns = std::max(1, w * h - 1);
     coarse_factor = Texture(unknowns, unknowns);
 
@@ -135,6 +137,7 @@ void main()
     output0 = vec4(face(p, 0), face(p + ivec2(1, 0), 0), face(p, 1), face(p + ivec2(0, 1), 1));
 }
 )");
+
     build(smooth_pair, "multigrid fused red black sweep", R"(
 uniform sampler2D source, rhs, coefficients;
 
@@ -172,6 +175,7 @@ void main()
     output0 = vec4(diagonal > 0.0 ? value / diagonal : 0.0);
 }
 )");
+
     build(polynomial_smooth, "multigrid polynomial smoothing", R"(
 uniform sampler2D source, rhs, coefficients;
 uniform float relaxation;
@@ -187,6 +191,7 @@ void main()
     output0 = vec4((mode == 0 ? at(source, p) : 0.0) + (diagonal > 0.0 ? relaxation * value / diagonal : 0.0));
 }
 )");
+
     build(residual, "multigrid residual", R"(
 uniform sampler2D source, rhs, coefficients;
 
@@ -195,6 +200,7 @@ void main()
     output0 = vec4(rhsAt(rhs, cell()) - product(source, coefficients, cell()));
 }
 )");
+
     const char* restriction = R"(
 uniform sampler2D source, maps;
 
@@ -230,6 +236,7 @@ void main()
     build(restrict_pass, "multigrid transpose restriction", restriction);
     runner.build(
         restrict_cpu, "multigrid CPU restriction and statistics", geometry + "\n#define CPU_COARSE\n", restriction);
+
     build(prolong, "multigrid prolong correction", R"(
 uniform sampler2D source, coarse, maps;
 
@@ -242,6 +249,7 @@ void main()
     output0 = vec4(at(source, p) + (1.0 - py.z) * a + py.z * b);
 }
 )");
+
     build(factor, "multigrid coarse Cholesky", R"(
 uniform sampler2D coefficients;
 
@@ -305,6 +313,7 @@ void main()
     }
 }
 )");
+
     build(coarse_solve, "multigrid coarse solve", R"(
 uniform sampler2D rhs, factor;
 
@@ -342,7 +351,6 @@ void main()
     }
 
     mean = 0.0;
-
     for (int i = 0; i < n; ++i)
         mean += values[i];
     mean /= float(count);
@@ -423,6 +431,7 @@ void PressureMultigridGPU::rebuild(const Texture& fine)
     const int last = cpu_coarse ? cpu_level : int(levels.size()) - 1;
     for (int i = 1; i <= last; ++i)
         run(coarsen, i, {&levels[i].coefficients}, {{"source", &coefficients(i - 1)}});
+
     if (cpu_coarse)
         cpu_matrix_stale = true;
     else
@@ -440,6 +449,7 @@ void PressureMultigridGPU::useCPUCoarsePressure(int max_cells)
 
     while (cpu_level + 1 < int(levels.size()) && levels[cpu_level].width * levels[cpu_level].height > max_cells)
         ++cpu_level;
+
     const auto& level = levels[cpu_level];
     cpu_coarse = std::make_unique<PressureMultigrid>(level.width, level.height);
     cpu_matrix_stale = true;
@@ -467,6 +477,7 @@ void PressureMultigridGPU::rebuildCPU()
 {
     const auto& level = levels[cpu_level];
     readCPU(coefficients(cpu_level));
+
     for (int y = 0; y < level.height; ++y)
     {
         for (int x = 0; x < level.width; ++x)
@@ -510,9 +521,9 @@ void PressureMultigridGPU::solveCPU(const Texture& rhs)
     }
 
     const size_t stride = cpu_pixels.size() / cpu_rhs.size();
-
     for (size_t i = 0; i < cpu_rhs.size(); ++i)
         cpu_rhs[i] = double(cpu_pixels[stride * i]) - mean;
+
     if (cpu_matrix_stale)
     {
         rebuildCPU();
@@ -524,6 +535,7 @@ void PressureMultigridGPU::solveCPU(const Texture& rhs)
 
     for (size_t i = 0; i < cpu_rhs.size(); ++i)
         cpu_pixels[i] = float(cpu_solution[i]);
+
     glBindTexture(GL_TEXTURE_2D, level.solution.id);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, level.width, level.height, GL_RED, GL_FLOAT, cpu_pixels.data());
 }
@@ -560,12 +572,13 @@ void PressureMultigridGPU::cycle(int index, const Texture& rhs)
 
     auto& coarse = levels[index + 1];
     smoothLevel(index, rhs, false, true, 0);
-
     for (int sweep = 1; sweep < smoothing_sweeps; ++sweep)
         smoothLevel(index, rhs, false, false, sweep);
+
     run(residual, index, {&fine.residual},
         {{"source", &fine.solution}, {"rhs", &rhs}, {"coefficients", &coefficients(index)},
             {"rhs_stats", residual_stats}});
+
     const bool to_cpu = cpu_coarse && index + 1 == cpu_level;
     if (to_cpu)
     {

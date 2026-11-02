@@ -441,6 +441,7 @@ inline constexpr std::string_view predictor = R"wgsl(
         }
 
         output1Data[fi(p, d, 0, false)] = 2.0 / (left + right);
+
         let global = p + vec2i(patchValue(0), patchValue(1));
         let wall = global[d] == 0 || global[d] == params.grid[d];
         var speed = 0.0;
@@ -672,6 +673,7 @@ inline constexpr std::string_view ghost = R"wgsl(
                 output0Data[destination + n * destinationPlane] = parentData[source + n * plane] + dot(delta, slope);
             }
         }
+
         if ((flags & 2) != 0)
         {
             output0Data[destination + params.grid.z * destinationPlane] *= -1.0;

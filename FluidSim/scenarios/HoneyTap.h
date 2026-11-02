@@ -9,11 +9,14 @@ struct HoneyTap : FluidScene<HoneyTap>
     static constexpr const char* scenario_id = "honey-tap";
 
     inline static const std::array presets{
-        FluidScenePreset{"Default (512 x 420)", {.grid_w = 512,
-                                                    .grid_h = 420,
-                                                    .gravity_y = 100.0,
-                                                    .surface_tension = 2000.0,
-                                                    .liquid_viscosities = {300000.0}}}};
+        FluidScenePreset{"Default (512 x 420)", {
+            .grid_w = 512,
+            .grid_h = 420,
+            .gravity_y = 100.0,
+            .surface_tension = 2000.0,
+            .liquid_viscosities = {300000.0}
+        }}
+    };
 
     struct Config : Base::Config
     {

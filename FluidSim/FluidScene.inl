@@ -41,6 +41,7 @@ template <class Derived> void FluidScene<Derived>::sceneStart()
         restartSimulation();
     else
         resumeFromImage(resume_image);
+
     surface.setFragmentSource(fluid_shader_src);
 }
 
@@ -97,16 +98,17 @@ template <class Derived> void FluidScene<Derived>::restartSimulation()
             apply(fluid::Phase::Liquid, liquid_viscosities, fluid.getLiquidMixture().components.size());
             apply(fluid::Phase::Gas, gas_viscosities, fluid.getGasMixture().components.size());
             refreshViscosityControls();
+
             fluid.upload(initialFluidState());
             fluid.writeColorPixels(display_pixels, true);
         });
     }
-
     catch (const std::runtime_error& error)
     {
         simulation_failed = true;
         blPrint() << error.what();
     }
+
     this->requestRedraw(true);
 }
 
@@ -120,6 +122,7 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
     replacement.setAdaptiveSettings(next_adaptive_settings);
     replacement.setDevice(settings.fluid_device);
     replacement.setAdaptiveMode(settings.adaptive_mode);
+
     auto liquid = fluid.getLiquidMixture();
     auto gas = fluid.getGasMixture();
     auto apply = [](fluid::FluidMixture& mixture, const std::vector<double>& values)
@@ -133,6 +136,7 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
 
     apply(liquid, settings.liquid_viscosities);
     apply(gas, settings.gas_viscosities);
+
     replacement.configureMaterials(fluid.getSubstances(), std::move(liquid), std::move(gas));
     replacement.setOrigin(fluid.getOrigin());
     replacement.setGravityY(settings.gravity_y);
@@ -155,22 +159,27 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
     cell_size = settings.cell_size;
     world_w = grid_w * cell_size;
     world_h = grid_h * cell_size;
+
     fluid_device = settings.fluid_device;
     adaptive_mode = settings.adaptive_mode;
     adaptive_settings = next_adaptive_settings;
+
     frame_time = settings.frame_time;
     steps_per_second = settings.steps_per_second;
     projection_max_iterations = settings.projection_max_iterations;
     projection_tolerance = settings.projection_tolerance;
     pressure_recovery_frames = settings.pressure_recovery_frames;
+
     gravity_y = settings.gravity_y;
     surface_tension = settings.surface_tension;
     liquid_viscosities = settings.liquid_viscosities;
     gas_viscosities = settings.gas_viscosities;
+
     liquid_tint_depth = float(settings.gas_proximity_scale * 0.01 * std::hypot(double(grid_w), double(grid_h)));
 
     restartSimulation();
     snapshot_error.clear();
+
     if (resize)
     {
         const auto origin = fluid.getOrigin();
@@ -186,6 +195,7 @@ template <class Derived> void FluidScene<Derived>::refreshViscosityControls()
     {
         values.clear();
         names.clear();
+
         for (const auto& component : mixture.components)
         {
             values.push_back(component.dynamic_viscosity);
@@ -355,6 +365,7 @@ template <class Derived> void FluidScene<Derived>::sceneProcess(double dt)
         withFluidContext([&]()
         {
             beforeFluidFrame(frame_time);
+
             for (int substep = 0; substep < step_count; ++substep)
             {
                 FluidGrid::StepTimings timings;
@@ -374,10 +385,12 @@ template <class Derived> void FluidScene<Derived>::sceneProcess(double dt)
                 frame_statistics.stages.pressure_ms += timings.pressure_ms;
                 frame_statistics.stages.selection_ms += timings.selection_ms;
                 frame_statistics.stages.regrid_ms += timings.regrid_ms;
+
                 frame_statistics.substeps += result.physical_steps;
                 frame_statistics.transport_steps += result.transport_steps;
                 frame_statistics.pressure_iterations += result.iterations;
                 frame_statistics.viscosity_iterations += result.viscosity_iterations;
+
                 frame_statistics.max_volume_error =
                     std::max(frame_statistics.max_volume_error, result.max_volume_error);
                 frame_statistics.rms_volume_error =
@@ -399,12 +412,12 @@ template <class Derived> void FluidScene<Derived>::sceneProcess(double dt)
                 std::chrono::duration<double, std::milli>(Clock::now() - colour_started).count();
         });
     }
-
     catch (const std::runtime_error& error)
     {
         simulation_failed = true;
         blPrint() << error.what();
     }
+
     frame_statistics.update_ms = std::chrono::duration<double, std::milli>(Clock::now() - frame_started).count();
 }
 
@@ -507,15 +520,28 @@ template <class Derived> void FluidScene<Derived>::onEvent(Event e)
 
 template <class Derived> JSON::json FluidScene<Derived>::captureSceneState() const
 {
-    return {{"version", pressure_recovery_frames > 0 ? 4 : 3}, {"scenario", Derived::scenario_id},
-        {"simulation_time", simulation_time}, {"real_time", real_time}, {"simulation_failed", simulation_failed},
-        {"projection_tolerance", projection_tolerance}, {"pressure_recovery_frames", pressure_recovery_frames},
-        {"profile_stages", profile_stages}, {"frame_time", frame_time}, {"liquid_tint_depth", liquid_tint_depth},
-        {"liquid_deep_brightness", liquid_deep_brightness}, {"mouse_attraction", mouse_attraction},
-        {"mouse_attraction_strength", mouse_attraction_strength}, {"mouse_attraction_radius", mouse_attraction_radius},
-        {"mouse_target", {mouse_target.x, mouse_target.y}}, {"steps_per_second", steps_per_second},
-        {"projection_max_iterations", projection_max_iterations}, {"device", int(fluid.getDevice())},
-        {"adaptive_mode", int(fluid.getAdaptiveMode())}, {"scenario_state", captureScenarioState()}};
+    return {
+        {"version", pressure_recovery_frames > 0 ? 4 : 3},
+        {"scenario", Derived::scenario_id},
+        {"simulation_time", simulation_time},
+        {"real_time", real_time},
+        {"simulation_failed", simulation_failed},
+        {"projection_tolerance", projection_tolerance},
+        {"pressure_recovery_frames", pressure_recovery_frames},
+        {"profile_stages", profile_stages},
+        {"frame_time", frame_time},
+        {"liquid_tint_depth", liquid_tint_depth},
+        {"liquid_deep_brightness", liquid_deep_brightness},
+        {"mouse_attraction", mouse_attraction},
+        {"mouse_attraction_strength", mouse_attraction_strength},
+        {"mouse_attraction_radius", mouse_attraction_radius},
+        {"mouse_target", {mouse_target.x, mouse_target.y}},
+        {"steps_per_second", steps_per_second},
+        {"projection_max_iterations", projection_max_iterations},
+        {"device", int(fluid.getDevice())},
+        {"adaptive_mode", int(fluid.getAdaptiveMode())},
+        {"scenario_state", captureScenarioState()}
+    };
 }
 
 template <class Derived> void FluidScene<Derived>::captureFluidImage(CaptureFrame& output) const
@@ -528,14 +554,17 @@ template <class Derived> void FluidScene<Derived>::captureFluidImage(CaptureFram
         const bool scissor = glIsEnabled(GL_SCISSOR_TEST);
         glDisable(GL_SCISSOR_TEST); // A viewport's clip must not crop a native capture.
         renderFluidSurface();
+
         GLuint framebuffer;
         glGenFramebuffers(1, &framebuffer);
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, surface.texture(), 0);
+
         output.frame.data.resize(size_t(output.resolution.x) * output.resolution.y * 4);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(
             0, 0, output.resolution.x, output.resolution.y, GL_RGBA, GL_UNSIGNED_BYTE, output.frame.data.data());
+
         glDeleteFramebuffers(1, &framebuffer);
         if (scissor)
             glEnable(GL_SCISSOR_TEST);
@@ -704,6 +733,7 @@ template <class Derived> void FluidScene<Derived>::resumeFromImage(const std::fi
 
     for (auto* viewport : this->mountedToViewports())
         camera.focusWorldRect(*viewport, origin.x, origin.y, origin.x + world_w, origin.y + world_h);
+
     snapshot_error.clear();
 }
 

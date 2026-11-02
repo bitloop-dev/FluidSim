@@ -127,6 +127,7 @@ struct BoundaryGPU
         max_speed = 0.0f;
         for (size_t i = 0; i < values.size(); i += 4)
             max_speed = std::max(max_speed, std::abs(values[i]));
+
         compute.write(records, values);
     }
 

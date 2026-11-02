@@ -21,12 +21,14 @@ template <class Sample> Vec normal(const Sample& f)
     const double bl = f(-1, 1);
     const double b = f(0, 1);
     const double br = f(1, 1);
+
     const double left = tl + l + bl;
     const double right = tr + r + br;
     const double top = tl + t + tr;
     const double bottom = bl + b + br;
     Vec centered{0.5 * (left - right), 0.5 * (top - bottom)};
     const Vec youngs{left + l - right - r, top + t - bottom - b};
+
     if (centered.x == 0.0 && centered.y == 0.0)
         return youngs.x == 0.0 && youngs.y == 0.0 ? Vec{1.0, 0.0} : youngs;
 
@@ -84,7 +86,6 @@ template <class Vector> double area(Vector n, double offset, Vector lo, Vector h
         return total * (cut - 0.5 * a) / b;
 
     const double dry = a + b - cut;
-
     return total * (1.0 - dry * dry / (2.0 * a * b));
 }
 }

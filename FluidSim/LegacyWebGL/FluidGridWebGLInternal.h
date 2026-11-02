@@ -68,11 +68,13 @@ struct ComputeState
                 glBindSampler(i, 0);
             }
         }
+
         for (size_t i = 0; i < std::size(capabilities); ++i)
         {
             enabled[i] = glIsEnabled(capabilities[i]);
             glDisable(capabilities[i]);
         }
+
         for (size_t i = 0; i < std::size(pixel_parameters); ++i)
         {
             glGetIntegerv(pixel_parameters[i], &pixel_values[i]);
@@ -99,13 +101,16 @@ struct ComputeState
         }
 
         glActiveTexture(active_texture);
+
         for (size_t i = 0; i < std::size(capabilities); ++i)
         {
             if (enabled[i])
                 glEnable(capabilities[i]);
         }
+
         for (size_t i = 0; i < std::size(pixel_parameters); ++i)
             glPixelStorei(pixel_parameters[i], pixel_values[i]);
+
         glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpack_buffer);
         glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
@@ -139,6 +144,7 @@ struct Texture
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
         const GLenum format = channels == 1 ? GL_RED : channels == 2 ? GL_RG : GL_RGBA;
         const GLint storage = channels == 1 ? GL_R32F : channels == 2 ? GL_RG32F : GL_RGBA32F;
         glTexImage2D(GL_TEXTURE_2D, 0, storage, w, h, 0, format, GL_FLOAT, nullptr);
@@ -190,6 +196,7 @@ inline GLuint compile(GLenum type, const std::string& source, std::string_view n
     const char* text = source.c_str();
     glShaderSource(shader, 1, &text, nullptr);
     glCompileShader(shader);
+
     GLint success = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
 
@@ -284,6 +291,7 @@ void main()
 }
 )",
             "vertex shader");
+
         glGenFramebuffers(1, &framebuffer);
         glGenVertexArrays(1, &vertex_array);
     }
@@ -325,6 +333,7 @@ void main()
             glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i++], GL_TEXTURE_2D, output->id, 0);
         for (; size_t(i) < attached_count; ++i)
             glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i], GL_TEXTURE_2D, 0, 0);
+
         attached_count = outputs.size();
         glDrawBuffers(GLsizei(outputs.size()), attachments);
         glViewport(0, 0, first.width, first.height);
@@ -360,6 +369,7 @@ void main()
 #endif
         glLinkProgram(program.id);
         glDeleteShader(fragment);
+
         GLint success = 0;
         glGetProgramiv(program.id, GL_LINK_STATUS, &success);
 

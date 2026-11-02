@@ -78,6 +78,7 @@ struct FluidGridWebGL::Impl
     {
         if (cell_size != float(grid.cell_size))
             density_valid = false;
+
         cell_size = float(grid.cell_size);
         gravity_y = float(grid.gravity_y);
         use_multigrid = grid.pressure_preconditioner == FluidGridWebGL::PressurePreconditioner::Multigrid;
@@ -217,6 +218,7 @@ void main()
     output0 = mode == 1 ? vec4(0, 0, 0, 1) : vec4(time_step);
 }
 )");
+
     build(density_pass, "rebuildDensity", R"(
 uniform sampler2D masses0, masses1, masses2, masses3, previous;
 uniform vec4 liquid_masks[4], gas_masks[4];
@@ -242,6 +244,7 @@ void main()
     output0 = vec4(sum, 0, 0);
 }
 )");
+
     build(color_pass, "catalogue colors", R"(
 uniform sampler2D masses0, masses1, masses2, masses3, previous;
 uniform vec4 red[4], green[4], blue[4];
@@ -267,6 +270,7 @@ void main()
     output0 = vec4(sum, 1);
 }
 )");
+
     build(pressure_coefficient, "pressure face weights", R"(
 uniform sampler2D density;
 
@@ -291,6 +295,7 @@ void main()
     output0 = weights;
 }
 )");
+
     build(divergence, "divergence", R"(
 uniform sampler2D u, v;
 
@@ -301,6 +306,7 @@ void main()
     output0 = vec4(mode == 0 ? value : -value * cell_size * cell_size / time_step);
 }
 )");
+
     build(velocity_stats, "divergence and CFL reduction", R"(
 uniform sampler2D u, v;
 
@@ -338,6 +344,7 @@ void main()
     output0 = result;
 }
 )");
+
     build(pressure_operator, "applyPressureOperator", R"(
 uniform sampler2D source, coefficients;
 
@@ -353,6 +360,7 @@ void main()
     output0 = vec4(value);
 }
 )");
+
     build(predict_pressure, "predict pressure", R"(
 uniform sampler2D latest, previous;
 
@@ -361,6 +369,7 @@ void main()
     output0 = vec4(2.0 * at(latest, cell()) - at(previous, cell()));
 }
 )");
+
     build(add_pressure, "accumulate pressure", R"(
 uniform sampler2D base, correction;
 
@@ -369,6 +378,7 @@ void main()
     output0 = vec4(at(base, cell()) + at(correction, cell()));
 }
 )");
+
     build(subtract_mean, "removeMean", R"(
 uniform sampler2D source, stats;
 
@@ -377,6 +387,7 @@ void main()
     output0 = vec4(at(source, cell()) - at(stats, ivec2(0)) / float(grid_size.x * grid_size.y));
 }
 )");
+
     build(residual, "true residual", R"(
 uniform sampler2D rhs, product;
 
@@ -385,6 +396,7 @@ void main()
     output0 = vec4(at(rhs, cell()) - at(product, cell()));
 }
 )");
+
     build(reduce_pass, "reduction", R"(
 uniform sampler2D source, other;
 
@@ -412,6 +424,7 @@ void main()
                 value = vec4(value.r, 0, value.r * at(other, p), 0);
             if (!finite(value.r) || !finite(value.g) || !finite(value.b))
                 value = vec4(0, 0, 0, 1);
+
             result.r += value.r;
             result.b = mode == 4 ? max(result.b, value.b) : result.b + value.b;
             result.g = max(result.g, value.g);
@@ -422,6 +435,7 @@ void main()
     output0 = result;
 }
 )");
+
     build(precondition, "applyPreconditioner", R"(
 uniform sampler2D residual, stats, coefficients;
 
@@ -433,6 +447,7 @@ void main()
     output0 = vec4(diagonal > 0.0 ? (at(residual, cell()) - mean) / diagonal : 0.0);
 }
 )");
+
     build(coefficients, "PCG coefficients", R"(
 uniform sampler2D residual_stats, correction_stats, previous, denominator;
 
@@ -461,6 +476,7 @@ void main()
     output0 = vec4(failed != 0.0 ? -1.0 : dot, mean, r.g, iterations);
 }
 )");
+
     build(direction, "pressure direction", R"(
 uniform sampler2D correction, old_direction, state, previous;
 
@@ -478,6 +494,7 @@ void main()
     output0 = vec4(at(correction, cell()) - s.g + beta * at(old_direction, cell()));
 }
 )");
+
     build(update_pressure, "updatePressureAndResidual", R"(
 OUT1 vec4 output1;
 uniform sampler2D pressure, residual, direction, product, state, denominator;
@@ -498,6 +515,7 @@ void main()
     output1 = vec4(at(residual, cell()) - alpha * at(product, cell()));
 }
 )");
+
     build(correct_velocity, "pressure gradient", R"(
 uniform sampler2D velocity, pressure, coefficients;
 
@@ -516,6 +534,7 @@ void main()
     output0 = vec4(at(velocity, p) - gradient * time_step * (mode == 0 ? a.x : a.z));
 }
 )");
+
     build(gravity, "applyGravity", R"(
 uniform sampler2D velocity;
 
@@ -524,6 +543,7 @@ void main()
     output0 = vec4(cell().y == 0 || cell().y == grid_size.y ? 0.0 : at(velocity, cell()) + time_step);
 }
 )");
+
     buildTransportPrograms();
 }
 
@@ -550,6 +570,7 @@ void FluidGridWebGL::Impl::rebuildResidual()
 void FluidGridWebGL::Impl::applyPreconditioner(bool restart)
 {
     const Texture* correction = &pressure_correction;
+
     if (use_multigrid)
         correction = &multigrid.apply(pressure_residual, residual_stats, tolerance);
     else
@@ -562,14 +583,17 @@ void FluidGridWebGL::Impl::applyPreconditioner(bool restart)
         return;
 
     reduce(*correction, correction_stats, 2, &pressure_residual);
+
     run(coefficients, {&next_solver_state},
         {{"residual_stats", &residual_stats}, {"correction_stats", &correction_stats}, {"previous", &solver_state},
             {"denominator", &denominator}},
         0, restart ? 1 : 0);
+
     run(direction, {&next_direction},
         {{"correction", correction}, {"old_direction", &pressure_direction}, {"state", &next_solver_state},
             {"previous", &solver_state}},
         0, restart ? 1 : 0);
+
     pressure_direction.swap(next_direction);
     solver_state.swap(next_solver_state);
 }
@@ -581,6 +605,7 @@ int FluidGridWebGL::Impl::solvePressure(int max_iterations, float residual_toler
     // solve a correction from zero so small updates are not added to a large warm-start pressure
     run(fill, {&pressure});
     rebuildResidual();
+
     auto stats = readScalar(residual_stats);
     if (stats[1] <= tolerance || max_iterations == 0 || stats[3] != 0)
         return 0;
@@ -588,7 +613,9 @@ int FluidGridWebGL::Impl::solvePressure(int max_iterations, float residual_toler
     run(fill, {&solver_state});
     run(fill, {&pressure_direction});
     run(fill, {&denominator});
+
     applyPreconditioner(true);
+
     int submitted = 0;
     int batch = use_multigrid ? (refinement ? 2 : std::clamp(previous_solve_iterations + 1, 2, 64)) : 8;
     const bool cpu_coarse = use_multigrid && multigrid.usesCPUCoarsePressure();
@@ -597,6 +624,7 @@ int FluidGridWebGL::Impl::solvePressure(int max_iterations, float residual_toler
     const bool check_each_iteration = use_multigrid && !cpu_coarse && previous_solve_iterations <= 8;
     if (check_each_iteration)
         batch = 1;
+
     int extra_batch = 4;
     std::array<float, 4> state = {};
 
@@ -608,11 +636,19 @@ int FluidGridWebGL::Impl::solvePressure(int max_iterations, float residual_toler
         {
             applyPressureOperator(pressure_direction);
             reduce(pressure_direction, denominator, 1, &pressure_product);
-            run(update_pressure, {&next_pressure, &next_residual},
-                {{"pressure", &pressure}, {"residual", &pressure_residual}, {"direction", &pressure_direction},
-                    {"product", &pressure_product}, {"state", &solver_state}, {"denominator", &denominator}});
+
+            run(update_pressure, {&next_pressure, &next_residual}, {
+                {"pressure", &pressure},
+                {"residual", &pressure_residual},
+                {"direction", &pressure_direction},
+                {"product", &pressure_product},
+                {"state", &solver_state},
+                {"denominator", &denominator}
+            });
+
             pressure.swap(next_pressure);
             pressure_residual.swap(next_residual);
+
             reduce(pressure_residual, residual_stats);
 
             if (check_each_iteration)
@@ -665,10 +701,11 @@ FluidGridWebGL::ProjectionResult FluidGridWebGL::Impl::project(
         {{"velocity", &u}, {"pressure", &pressure_base}, {"coefficients", &pressure_coefficients}}, float(dt));
     run(correct_velocity, {&next_v},
         {{"velocity", &v}, {"pressure", &pressure_base}, {"coefficients", &pressure_coefficients}}, float(dt), 1);
+
     u.swap(next_u);
     v.swap(next_v);
-    ProjectionResult result;
 
+    ProjectionResult result;
     for (;;)
     {
         run(divergence, {&pressure_rhs}, {{"u", &u}, {"v", &v}}, float(dt), 1);
@@ -677,15 +714,20 @@ FluidGridWebGL::ProjectionResult FluidGridWebGL::Impl::project(
         // leave room for float rounding when applying the pressure gradient to velocity
         const int iterations = solvePressure(max_iterations - result.iterations,
             float(0.25 * divergence_tolerance * cell_size * cell_size / dt), result.iterations != 0);
+
         if (result.iterations == 0)
             previous_solve_iterations = iterations;
+
         result.iterations += iterations;
+
         run(correct_velocity, {&next_u},
             {{"velocity", &u}, {"pressure", &pressure}, {"coefficients", &pressure_coefficients}}, float(dt));
         run(correct_velocity, {&next_v},
             {{"velocity", &v}, {"pressure", &pressure}, {"coefficients", &pressure_coefficients}}, float(dt), 1);
+
         u.swap(next_u);
         v.swap(next_v);
+
         run(add_pressure, {&next_pressure}, {{"base", &pressure_base}, {"correction", &pressure}});
         pressure_base.swap(next_pressure);
 
@@ -757,6 +799,7 @@ void FluidGridWebGL::Impl::uploadComponents(const FluidGridWebGL& grid, const St
 {
     liquid_count = grid.liquid_mixture.components.size();
     gas_count = grid.gas_mixture.components.size();
+
     const size_t cell_count = size_t(width) * height;
     auto validate = [&](const auto& fields, size_t count)
     {
@@ -772,12 +815,13 @@ void FluidGridWebGL::Impl::uploadComponents(const FluidGridWebGL& grid, const St
 
     validate(state.liquid_mass, liquid_count);
     validate(state.gas_mass, gas_count);
-    const size_t group_count = (liquid_count + gas_count + 3) / 4;
 
+    const size_t group_count = (liquid_count + gas_count + 3) / 4;
     while (components.size() > group_count)
         components.pop_back();
     while (components.size() < group_count)
         components.emplace_back(width, height);
+
     std::vector<float> packed(cell_count * 4);
 
     for (size_t group = 0; group < group_count; ++group)
@@ -817,6 +861,7 @@ void FluidGridWebGL::Impl::rebuildDensity()
 
     if (components.empty())
         run(fill, {&density});
+
     for (size_t first = 0; first < components.size(); first += 4)
     {
         std::array<std::array<float, 4>, 4> liquid_masks = {};
@@ -840,6 +885,7 @@ void FluidGridWebGL::Impl::rebuildColor(const FluidGridWebGL& grid)
 {
     if (components.empty())
         run(fill, {&color}, {}, 0, 1);
+
     for (size_t first = 0; first < components.size(); first += 4)
     {
         std::array<std::array<float, 4>, 4> channels[3] = {};
@@ -875,11 +921,16 @@ void FluidGridWebGL::Impl::sumGroups(Program& program, Texture& result, Texture&
     const Texture* inputs[4];
     for (size_t j = 0; j < 4; ++j)
         inputs[j] = &components[first + std::min(j, count - 1)].mass;
+
     program.integer("group_count", int(count));
-    run(program, {&scratch},
-        {{"masses0", inputs[0]}, {"masses1", inputs[1]}, {"masses2", inputs[2]}, {"masses3", inputs[3]},
-            {"previous", &result}},
-        0, first != 0);
+    run(program, {&scratch}, {
+        {"masses0", inputs[0]},
+        {"masses1", inputs[1]},
+        {"masses2", inputs[2]},
+        {"masses3", inputs[3]},
+        {"previous", &result}
+    }, 0, first != 0);
+
     result.swap(scratch);
 }
 
@@ -907,6 +958,7 @@ void FluidGridWebGL::upload(const State& state)
     ComputeState guard;
     if (!gpu)
         gpu = std::make_unique<Impl>(width, height);
+
     gpu->configure(*this);
 
     auto upload = [&](Texture& field, const std::vector<float>& values)
@@ -930,7 +982,9 @@ void FluidGridWebGL::upload(const State& state)
     upload(gpu->v, state.v);
     upload(gpu->pressure, state.pressure);
     upload(gpu->previous_pressure, state.pressure);
+
     gpu->uploadComponents(*this, state);
+
     gpu->previous_solve_iterations = 7;
     gpu->cached_outflow = 0;
     gpu->velocity_stats_valid = state.u.empty() && state.v.empty();
@@ -1336,6 +1390,7 @@ void main()
     runner.build(transport_single_x, "advect single group X", common + "\n#define HORIZONTAL\n#define SINGLE_GROUP\n",
         component_transport);
     runner.build(transport_single_y, "advect single group Y", common + "\n#define SINGLE_GROUP\n", component_transport);
+
     runner.build(momentum, "momentum and velocity", common, R"(
 OUT1 vec4 output1;
 uniform sampler2D density, source;
@@ -1457,10 +1512,12 @@ void FluidGridWebGL::Impl::advectComponents(double dt, int direction)
         glUseProgram(program.id);
         program.vector("liquid_mask", component.liquid_mask);
         program.vector("gas_mask", component.gas_mask);
+
         const std::initializer_list<Input> inputs = {{"liquid", &liquid_fraction}, {"masses", &component.mass},
             {"corrections", direction == 0 ? &component.mass : &component.correction},
             {"transfers", direction == 0 ? &transfers_u : &transfers_v}, {"flow", direction == 0 ? &u : &v},
             {"weights", &split_weights}};
+
         if (single_group && direction == 0)
         {
             run(program, {&component.next_mass, &component.correction, &next_density, &next_liquid_fraction}, inputs,
@@ -1512,10 +1569,12 @@ void FluidGridWebGL::Impl::advectMomentumX(double dt)
         {{"momentum", &momentum_u}, {"donor_velocity", &next_u}, {"original_velocity", &u}, {"flow", &u},
             {"weights", &split_weights}, {"transfers", &transfers_u}},
         float(dt), 0);
+
     run(transport_momentum, {&next_momentum_v},
         {{"momentum", &momentum_v}, {"donor_velocity", &next_v}, {"original_velocity", &v}, {"flow", &u},
             {"weights", &split_weights}, {"transfers", &transfers_u}},
         float(dt), 1);
+
     momentum_u.swap(next_momentum_u);
     momentum_v.swap(next_momentum_v);
 }
@@ -1526,10 +1585,12 @@ void FluidGridWebGL::Impl::advectMomentumY(double dt)
         {{"momentum", &momentum_u}, {"donor_velocity", &next_u}, {"original_velocity", &u}, {"flow", &v},
             {"weights", &split_weights}, {"transfers", &transfers_v}},
         float(dt), 2);
+
     run(transport_momentum, {&next_momentum_v},
         {{"momentum", &momentum_v}, {"donor_velocity", &next_v}, {"original_velocity", &v}, {"flow", &v},
             {"weights", &split_weights}, {"transfers", &transfers_v}},
         float(dt), 3);
+
     momentum_u.swap(next_momentum_u);
     momentum_v.swap(next_momentum_v);
 }
@@ -1560,6 +1621,7 @@ void FluidGridWebGL::Impl::advect(double dt)
         advectMomentumY(step);
         advectComponents(step, 1);
         recoverVelocity();
+
         remaining -= step;
     }
 

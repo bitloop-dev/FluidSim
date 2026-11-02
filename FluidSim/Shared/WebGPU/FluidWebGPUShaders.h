@@ -14,6 +14,7 @@ inline constexpr std::string_view geometry = R"wgsl(
         let bottom = s[6] + s[7] + s[8];
         let centered = 0.5 * vec2f(left - right, top - bottom);
         let youngs = vec2f(left + s[3] - right - s[5], top + s[1] - bottom - s[7]);
+
         var normal = centered;
         if (all(centered == vec2f(0)))
         {
@@ -37,7 +38,6 @@ inline constexpr std::string_view geometry = R"wgsl(
         }
 
         let magnitude = max(abs(normal.x), abs(normal.y));
-
         if (magnitude == 0.0)
         {
             return vec2f(1, 0);
@@ -51,6 +51,7 @@ inline constexpr std::string_view geometry = R"wgsl(
         let a = min(abs(normal.x), abs(normal.y));
         let b = max(abs(normal.x), abs(normal.y));
         let triangle = 0.5 * a / b;
+
         var cut: f32;
         if (fraction < triangle)
         {
@@ -104,7 +105,6 @@ inline constexpr std::string_view geometry = R"wgsl(
         }
 
         let dry = a + b - cut;
-
         return total * (1.0 - 0.5 * (dry / a) * (dry / b));
     }
 

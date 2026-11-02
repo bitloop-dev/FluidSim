@@ -12,6 +12,7 @@ inline constexpr std::string_view nativeView = R"wgsl(
     const Refine = 5u;
     const Approaching = 6u;
     const sides = array<vec2i, 5>(vec2i(0), vec2i(-1, 0), vec2i(1, 0), vec2i(0, -1), vec2i(0, 1));
+
     fn word(i: u32) -> u32
     {
         return bitcast<u32>(metadataData[i]);
@@ -467,6 +468,7 @@ inline constexpr std::string_view materialAssessment = R"wgsl(
                 evaluated = true;
             }
         }
+
         if (evaluated)
         {
             error = representation(origin, scale, g);
@@ -535,6 +537,7 @@ inline constexpr std::string_view velocityAssessment = R"wgsl(
                     }
                 }
             }
+
             for (var side = 0u; side < 4u; side++)
             {
                 let start = origin + scale * sides[side + 1u];
@@ -711,6 +714,7 @@ inline constexpr std::string_view assessment = R"wgsl(
                 error = max(error, 0.5 * abs(gradient[2u * d] - gradient[2u * d + 1u]));
             }
         }
+
         for (var j = 0u; j < 8u; j++)
         {
             let n = pressureNeighbour(origin, scale, j / 2u, j % 2u);
@@ -768,8 +772,8 @@ inline constexpr std::string_view assessment = R"wgsl(
         output0Data[base + 5u] = select(0.0, 1.0, quiet);
         output0Data[base + 6u] = f32(actual);
         output0Data[base + 7u] = select(0.0, 1.0, evaluated);
-        var rectangle = vec4i(0);
 
+        var rectangle = vec4i(0);
         if (params.value.w > 0.0 && (label == Detail || label == LiquidBuffer || label == Refine))
         {
             var low = vec2f(0);
@@ -990,6 +994,7 @@ inline constexpr std::string_view summary = R"wgsl(
                 totals[7u + j] += observationsData[24u * i + 16u + j];
             }
         }
+
         for (var j = 0u; j < 11u; j++)
         {
             output0Data[11u * block + j] = totals[j];

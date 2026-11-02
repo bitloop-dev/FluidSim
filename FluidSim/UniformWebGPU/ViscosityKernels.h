@@ -144,6 +144,7 @@ struct ViscosityKernels
                     {
                         mu = 0.25 * (m.y + material(p - vec2i(1, 0)).y + material(p - vec2i(0, 1)).y + material(p - vec2i(1, 1)).y);
                     }
+
                     let mass =
                         0.5 * cellSize() * cellSize() * (vec2f(m.x) + vec2f(material(p - vec2i(1, 0)).x, material(p - vec2i(0, 1)).x));
                     write0(p, vec4f(m.y, mu, mass));
@@ -246,6 +247,7 @@ struct ViscosityKernels
         const std::string shared = R"wgsl(
             var<workgroup> velocity: array<vec2f, 256>;
             var<workgroup> material: array<vec4f, 256>;
+
             fn index(p: vec2i) -> u32
             {
                 let q = clamp(p, vec2i(0), gridSize());
@@ -401,6 +403,7 @@ struct ViscosityKernels
 
         const std::string reductions = R"wgsl(
             var<workgroup> partial: array<vec4f, 128>;
+
             fn combine(a: vec4f, b: vec4f) -> vec4f
             {
                 return vec4f(a.xy + b.xy, select(max(a.z, b.z), a.z + b.z, mode() == 0), max(a.w, b.w));
@@ -420,6 +423,7 @@ struct ViscosityKernels
             {
                 partial[lane] = checked(value);
                 workgroupBarrier();
+
                 for (var stride = 64u; stride > 0u; stride /= 2u)
                 {
                     if (lane < stride)

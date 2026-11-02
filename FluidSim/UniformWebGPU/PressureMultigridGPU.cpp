@@ -70,9 +70,9 @@ PressureMultigridGPU::PressureMultigridGPU(Compute& compute, int width, int heig
     }
 
     std::vector<float> packed_maps;
-
     for (size_t i = 0; i + 1 < levels.size(); ++i)
         buildTransfers(levels[i], levels[i + 1], tile_level >= 0 && int(i) >= tile_level ? &packed_maps : nullptr);
+
     const int unknowns = std::max(1, w * h - 1);
     coarse_factor = compute.field(unknowns, unknowns);
 
@@ -92,6 +92,7 @@ PressureMultigridGPU::PressureMultigridGPU(Compute& compute, int width, int heig
     )wgsl";
     const std::string shared_control = R"wgsl(
         var<workgroup> skip_cycle: u32;
+
         fn skipSharedCycle(lane: u32) -> bool
         {
             if (tolerance() < 0.0)
@@ -393,6 +394,7 @@ PressureMultigridGPU::PressureMultigridGPU(Compute& compute, int width, int heig
                         {
                             value = -a.z;
                         }
+
                         for (var k = 0; k < col; k++)
                         {
                             value -= lower[row * 15 + k] * lower[col * 15 + k];
@@ -469,7 +471,6 @@ PressureMultigridGPU::PressureMultigridGPU(Compute& compute, int width, int heig
                 }
 
                 mean = 0.0;
-
                 for (var i = 0; i < n; i++)
                 {
                     mean += values[i];
@@ -491,11 +492,13 @@ PressureMultigridGPU::PressureMultigridGPU(Compute& compute, int width, int heig
         shared_red_black, rhs_helpers + shared_control, true, {16, 16});
     compute.build(polynomial_pair, "fluid MG polynomial pair", 1, {"source", "rhs", "weights", "rhs_stats"},
         paired_polynomial, rhs_helpers + shared_control, true, {16, 16});
+
     if (tile_level >= 0)
     {
         tile_coefficients = compute.field(tile_cells, 1, 4);
         tile_maps = compute.field(int(packed_maps.size()), 1);
         compute.write(tile_maps, packed_maps);
+
         compute.build(pack_coefficients, "fluid MG packed coarse coefficients", 1, {"source"},
             R"wgsl(
                 fn execute()
@@ -631,6 +634,7 @@ void PressureMultigridGPU::smoothSweeps(int index, const Field& rhs, bool revers
 {
     auto& level = levels[index];
     const bool pair = use_paired_smoothing && level.width * level.height > 65536;
+
     for (int sweep = 0; sweep < smoothing_sweeps;)
     {
         const bool from_zero = !reverse && sweep == 0;
@@ -638,10 +642,12 @@ void PressureMultigridGPU::smoothSweeps(int index, const Field& rhs, bool revers
         {
             const int first = reverse ? smoothing_sweeps - 1 - sweep : sweep;
             const int second = first + (reverse ? -1 : 1);
+
             run(polynomial_pair, index, {&level.next_solution},
                 {{"source", &level.solution}, {"rhs", &rhs}, {"weights", &coefficients(index)},
                     {"rhs_stats", residual_stats}},
                 int(from_zero), smoothing_weights[first], smoothing_weights[second]);
+
             level.solution.swap(level.next_solution);
             sweep += 2;
         }
@@ -691,15 +697,19 @@ void PressureMultigridGPU::cycle(int index, const Field& rhs)
 
     auto& coarse = levels[index + 1];
     smoothSweeps(index, rhs, false);
+
     run(residual, index, {&fine.residual},
         {{"source", &fine.solution}, {"rhs", &rhs}, {"weights", &coefficients(index)}, {"rhs_stats", residual_stats}});
     run(restrict_pass, index, {&coarse.rhs},
         {{"source", &fine.residual}, {"maps", &fine.restrict_map}, {"rhs_stats", residual_stats}});
+
     cycle(index + 1, coarse.rhs);
+
     run(prolong, index, {&fine.next_solution},
         {{"source", &fine.solution}, {"coarse", &coarse.solution}, {"maps", &fine.prolong_map},
             {"rhs_stats", residual_stats}});
     fine.solution.swap(fine.next_solution);
+
     smoothSweeps(index, rhs, true);
 }
 

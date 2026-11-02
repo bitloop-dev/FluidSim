@@ -72,6 +72,7 @@ struct UniformKernels
                     {
                         sum += phases(masses3(p), 3u);
                     }
+
                     if (mode() != 0)
                     {
                         sum += previous(p).xy;
@@ -105,6 +106,7 @@ struct UniformKernels
                     {
                         sum += color(masses3(p), 3u);
                     }
+
                     if (mode() != 0)
                     {
                         sum += previous(p).xyz;
@@ -269,6 +271,7 @@ struct UniformKernels
                             {
                                 value = vec4f(0, 0, 0, 1);
                             }
+
                             result.x += value.x;
                             result.y = max(result.y, value.y);
                             result.w = max(result.w, value.w);
@@ -593,6 +596,7 @@ struct UniformKernels
                     let donor_liquid = clamp(fraction, 0.0, 1.0);
                     let strip = abs(fluid);
                     amount = clamp(amount, max(0.0, strip - (1.0 - donor_liquid)), min(strip, donor_liquid)) * sign(fluid);
+
                     var ratios = vec2f(0);
                     if (fraction > 0.0)
                     {

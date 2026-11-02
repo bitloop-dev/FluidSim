@@ -118,7 +118,6 @@ Buffer packGrid(webgpu::Compute& compute, const Topology::Grid& grid, std::array
     }
 
     std::vector<const Topology::Ghost*> diagonal;
-
     for (const auto& g : grid.ghosts)
     {
         if (g.source < 0)
@@ -157,7 +156,6 @@ Buffer packGrid(webgpu::Compute& compute, const Topology::Grid& grid, std::array
     }
 
     std::vector<const Topology::Ghost*> ghosts;
-
     for (const auto& ghost : grid.ghosts)
         ghosts.push_back(&ghost);
 
@@ -263,7 +261,6 @@ Buffer packTransfer(
     }
 
     std::vector<const Topology::Join*> joins;
-
     for (const auto& join : fine.joins)
         joins.push_back(&join);
 
@@ -650,6 +647,7 @@ struct AmrPressureGPU::Impl
                 // A cleared correction already has the zero homogeneous ghosts needed by its first colour.
                 if (!zeroStart || iteration || color)
                     boundary(grid, pressure);
+
                 auto p = settings(grid);
                 p.grid[2] = color;
 
@@ -689,6 +687,7 @@ struct AmrPressureGPU::Impl
             for (int d = 0; d < 2; ++d)
                 vector(grids[l], grids[l].beta[d], coefficients[d][l], 1);
         }
+
         for (int l = int(grids.size()) - 1; l > 0; --l)
         {
             for (int d = 0; d < 2; ++d)
@@ -703,6 +702,7 @@ struct AmrPressureGPU::Impl
 
         for (auto& grid : grids)
             diagonal(grid);
+
         for (int d = 0; d < 2; ++d)
             vector(multigrid[0], multigrid[0].beta[d], grids[0].beta[d], 1);
         for (int m = 0; m < int(multigrid.size()); ++m)
@@ -766,6 +766,7 @@ struct AmrPressureGPU::Impl
                     {"by", &grid.beta[1]}},
                 p);
         }
+
         for (int l = int(grids.size()) - 1; l > 0; --l)
         {
             for (int d = 0; d < 2; ++d)
@@ -793,6 +794,7 @@ struct AmrPressureGPU::Impl
         compute.run(reductionKernel, {&grid.partials},
             {{"first", &first}, {"second", &second}, {"geometry", &grid.metadata}}, p,
             reductionExtent(grid.plan->size));
+
         const int count = std::min((grid.plan->size + reductionBlock - 1) / reductionBlock, reductionGroups);
         p.grid = {count, destination, mode == 2 || mode == 3, accumulate};
 
@@ -822,6 +824,7 @@ struct AmrPressureGPU::Impl
     {
         copy(destination, rhs);
         restrictField(destination);
+
         reduceGrid(grids[0], destination[0], destination[0], 1, 1, false);
         scalar(2, 1, float(grids[0].plan->cells));
 
@@ -879,6 +882,7 @@ struct AmrPressureGPU::Impl
             compute.run(interpolateKernel, {&mgCorrection[m], &mgRhs[m], &mgResidual[m]},
                 {{"coarse", &mgCorrection[m + 1]}, {"geometry", &multigrid[m].metadata}}, p,
                 workExtent(unsigned(multigrid[m].patchWork[1]) * patchThreads));
+
             smooth(multigrid[m], mgCorrection[m], mgRhs[m], 2);
         }
 
@@ -900,11 +904,13 @@ struct AmrPressureGPU::Impl
             vector(grid, correction[l], scalars, 0);
             smooth(grid, correction[l], residual[l], 2, true);
             vector(grid, solution[l], correction[l], 2, 1.0);
+
             residualLevel(l - 1, residual, solution, rhsWork);
             applyGrid(grid, residual[l], correction[l], nullptr, &residual[l]);
             boundary(grid, solution[l], &solution[l - 1]);
             reflux(l - 1, residual, solution, -1.0);
             restrictCells(grid, grids[l - 1], residual[l - 1], residual[l]);
+
             if (l != last)
                 held[l].swap(correction[l]);
         }
@@ -923,6 +929,7 @@ struct AmrPressureGPU::Impl
             compute.run(interpolateKernel, {&correction[l], &solution[l], &held[l]},
                 {{"coarse", &correction[l - 1]}, {"geometry", &grid.metadata}}, p,
                 workExtent(unsigned(grid.patchWork[1]) * patchThreads));
+
             applyGrid(grid, residual[l], correction[l], &correction[l - 1], &residual[l]);
             vector(grid, correction[l], scalars, 0);
             smooth(grid, correction[l], residual[l], 2, true);
@@ -993,12 +1000,12 @@ struct AmrPressureGPU::Impl
                 auto& grid = grids[l];
                 const int products = std::min(basisWidth, last - first + 1);
                 auto p = settings(grid);
-
                 p.grid[1] = products;
 
                 compute.run(productsKernel, {&grid.productPartials},
                     {{"source", &field[l]}, {"basis", &basis[first / basisWidth][l]}, {"geometry", &grid.metadata}}, p,
                     reductionExtent(grid.plan->size));
+
                 const int count = std::min((grid.plan->size + reductionBlock - 1) / reductionBlock, reductionGroups);
                 p.grid = {count, first, products, l != 0};
 
@@ -1029,9 +1036,11 @@ struct AmrPressureGPU::Impl
         prepareBasis();
         scalar(9);
         clear(update);
+
         apply(error, pressure);
         increment(error, rhs, -1.0);
         normTo(error);
+
         auto state = status();
         int iterations = 0;
 
@@ -1043,6 +1052,7 @@ struct AmrPressureGPU::Impl
             normTo(current);
             scalar(3, 0, 0.0, float(tolerance));
             normalizeBasis(current, 0);
+
             const int count = std::min(restart, maxIterations - iterations);
             int submitted = 0;
 
@@ -1050,6 +1060,7 @@ struct AmrPressureGPU::Impl
             {
                 precondition(work, current, false);
                 apply(candidate, work);
+
                 for (int pass = 0; pass < 2; ++pass)
                 {
                     // Every product uses the unchanged vector before any subtraction.
@@ -1063,17 +1074,21 @@ struct AmrPressureGPU::Impl
                 normalizeBasis(candidate, k + 1);
                 scalar(6, k, 0.0, float(tolerance));
                 current.swap(candidate);
+
                 submitted = k + 1;
                 state = status();
 
                 if (state[3] == 0.0 || state[6] != 0.0)
                     break;
             }
+
             for (int k = submitted - 1; k >= 0; --k)
                 scalar(7, k);
+
             updateBasis(candidate, submitted, true);
             precondition(work, candidate, false);
             increment(update, work, 1.0);
+
             state = status();
             iterations = int(state[5]);
 
@@ -1092,6 +1107,7 @@ struct AmrPressureGPU::Impl
         apply(work, pressure);
         increment(work, rhs, -1.0);
         normTo(work);
+
         state = status();
         const double magnitude = state[6] == 0.0 ? double(state[0]) : std::numeric_limits<double>::infinity();
 

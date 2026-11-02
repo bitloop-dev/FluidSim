@@ -40,6 +40,7 @@ AmrPressureTopology2D::Grid AmrPressureTopology2D::makeGrid(const Level& level)
 
         for (int y = box.y; y < box.y + box.height; ++y)
             grid.rows.push_back({p, y, patch.index(box.x, y), patch.index(box.x + box.width, y)});
+
         grid.size += (box.width + 2) * (box.height + 2);
         grid.cells += box.width * box.height;
     }
@@ -95,6 +96,7 @@ void AmrPressureTopology2D::buildBoundary(Grid& grid, const Grid* coarse)
                             g.boundary_weight = weights[0];
                             g.first_weight = weights[1];
                             g.second_weight = weights[2];
+
                             int cx = x / 2;
                             int cy = y / 2;
                             std::array<double, 3> points{0.0, 0.0, 0.0};
@@ -133,6 +135,7 @@ void AmrPressureTopology2D::buildBoundary(Grid& grid, const Grid* coarse)
                                 add(-2);
                             if (!low && !high)
                                 g.count = 1;
+
                             g.weights = interpolationWeights(-0.5 + (0.5 + t % 2) / 2.0, points, g.count);
 
                             for (const auto& cp : coarse->patches)
@@ -232,10 +235,12 @@ AmrPressureTopology2D::AmrPressureTopology2D(const std::vector<Level>& levels)
         Level level{base.width / 2, base.height / 2, base.cell_size * 2.0, {{0, 0, base.width / 2, base.height / 2}}};
         auto coarse = makeGrid(level);
         buildBoundary(coarse, nullptr);
+
         base.averages.clear();
         base.interpolation.clear();
         base.face_averages = {};
         buildTransfer(base, coarse);
+
         multigrid.push_back(std::move(base));
         base = std::move(coarse);
     }

@@ -237,6 +237,7 @@ void nativeRepresentationError(const FluidCellView& view, int x, int y, int scal
                 }
             }
         }
+
         for (int side = 0; side < 4; ++side)
         {
             const int gx = x + scale * offsets[side][0];
@@ -245,11 +246,12 @@ void nativeRepresentationError(const FluidCellView& view, int x, int y, int scal
                 continue;
 
             double neighbourDensity = 0.0;
-
             for (int k = 0; k < view.components(); ++k)
                 neighbourDensity += plane.mean(k, side + 1);
+
             const double neighbour = plane.mean(view.components() + d, side + 1) / neighbourDensity;
             detail = std::max(detail, 0.25 * std::abs(neighbour - extended(offsets[side][0], offsets[side][1])));
+
             double low = 0.0;
             double high = 0.0;
 
@@ -269,6 +271,7 @@ void nativeRepresentationError(const FluidCellView& view, int x, int y, int scal
                     low = std::min(low, r);
                     high = std::max(high, r);
                 }
+
                 if (d == side / 2)
                 {
                     const double px = c.cx() / view.cellSize + (d == 0 ? (side == 0 ? 0.5 : -0.5) * c.patch->scale : 0.0);
@@ -308,6 +311,7 @@ Assessment boundaryRefinement(const FluidCellView& grid, int fx, int fy, int sca
         neighbours[4 + j] = grid.at(fx + j * (scale / 2), fy - 1);
         neighbours[6 + j] = grid.at(fx + j * (scale / 2), fy + scale);
     }
+
     for (const auto& n : neighbours)
     {
         if (bool(n) && n.liquid())
@@ -326,7 +330,6 @@ Assessment boundaryRefinement(const FluidCellView& grid, int fx, int fy, int sca
     nativeRepresentationError(grid, fx, fy, scale, e, plane);
 
     double gradient[4]{};
-
     bool available[4]{};
 
     for (int side = 0; side < 4; ++side)
@@ -404,6 +407,7 @@ FluidCoarseningPreview::Error fineError(
     }
     for (auto& v : mean)
         v /= rho;
+
     if (view.isUniform())
     {
         for (int dy = 0; dy < scale; ++dy)
@@ -420,15 +424,16 @@ FluidCoarseningPreview::Error fineError(
             }
         }
     }
+
     if (view.isUniform())
         flatMaterialError(view, x, y, e);
     else
         nativeRepresentationError(view, x, y, scale, e, plane);
 
     double gradient[2]{};
-
     for (int d = 0; d < 2; ++d)
         gradient[d] = 4.0 * (pressureHalf[d][1] - pressureHalf[d][0]) / (scale * scale * scale * view.cellSize);
+
     for (int d = 0; d < 2; ++d)
     {
         for (int along = -1; along < scale; ++along)
@@ -552,6 +557,7 @@ void FluidCoarseningPreview::update(const FluidCellView& grid, const Tolerances&
 {
     if (grid.isUniform())
         maxCellScale = 2;
+
     const int levelCount = std::countr_zero(static_cast<unsigned>(maxCellScale));
     if (trace)
     {
@@ -564,10 +570,12 @@ void FluidCoarseningPreview::update(const FluidCellView& grid, const Tolerances&
                        width != (grid.width + 1) / 2 || height != (grid.height + 1) / 2 ||
                        observed_cell_size != grid.cellSize || observed_tolerances != tolerance ||
                        observed_stability != stability || observed_lookahead != lookahead || time < last_time;
+
     width = (grid.width + 1) / 2;
     height = (grid.height + 1) / 2;
     if (fresh)
         assessments.assign(levelCount, {});
+
     observed_grid = grid.identity;
     observed_cell_size = grid.cellSize;
     observed_tolerances = tolerance;
@@ -687,9 +695,11 @@ void FluidCoarseningPreview::update(const FluidCellView& grid, const Tolerances&
             for (int i = 0; i < count; ++i)
                 observed->cells[i].source = level.labels[i];
         }
+
         if (lookahead > 0.0)
             markApproaching(level, grid, tolerance, lookahead);
         stabilise(level, stability, time, fresh);
+
         if (observed)
         {
             for (int i = 0; i < count; ++i)
@@ -720,8 +730,10 @@ void FluidCoarseningPreview::update(const FluidCellView& grid, const Tolerances&
                 label = assessments[lev].labels[(y >> lev) * assessments[lev].width + (x >> lev)];
         }
     }
+
     for (auto label : labels)
         ++counts[label];
+
     for (const auto& level : assessments)
     {
         statistics.raw_changes += level.statistics.raw_changes;
@@ -755,6 +767,7 @@ void FluidCoarseningPreview::stabilise(AssessmentLevel& level, const Stability& 
             h.quiet_since = -1;
         else if (h.quiet_since < 0)
             h.quiet_since = time;
+
         const bool settled = h.quiet_since >= 0 && time >= h.quiet_since + stability.quiet_seconds;
         auto decision = raw;
         if (raw == Candidate && h.decision != Candidate && !settled)
@@ -767,6 +780,7 @@ void FluidCoarseningPreview::stabilise(AssessmentLevel& level, const Stability& 
             decision = h.decision;
             ++level.statistics.held;
         }
+
         if (!fresh)
         {
             level.statistics.raw_changes += action(raw) != action(h.raw);
@@ -810,7 +824,6 @@ void FluidCoarseningPreview::markApproaching(
                 continue;
 
             double low[2]{};
-
             double high[2]{};
 
             for (int dy = 0; dy < scale; ++dy)

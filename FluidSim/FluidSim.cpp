@@ -44,7 +44,6 @@ void FluidSim_Project::UI::sidebar()
         };
 
         int colour_index = 0;
-
         for (const SceneBase* scene : __target.scenes())
         {
             if (const auto* cubes = dynamic_cast<const SplashCubes*>(scene))

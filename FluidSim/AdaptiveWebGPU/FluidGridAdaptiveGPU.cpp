@@ -157,7 +157,9 @@ struct FluidGridAdaptiveGPU::Impl
 
         for (const auto& c : mixture.components)
             densities.push_back(float(c.density));
+
         runner.write(density, densities);
+
         palette = packed(components * 4, "adaptive display palette");
         std::vector<float> colors;
 
@@ -168,6 +170,7 @@ struct FluidGridAdaptiveGPU::Impl
         }
 
         runner.write(palette, colors);
+
         reductions.reserve(32);
         buildKernels();
         makeHierarchy(gridLayout);
@@ -294,7 +297,6 @@ struct FluidGridAdaptiveGPU::Impl
         }
 
         std::vector<float> values;
-
         for (const auto& [key, row] : unique)
             values.insert(values.end(), row.begin(), row.end());
 
@@ -320,7 +322,6 @@ struct FluidGridAdaptiveGPU::Impl
         }
 
         std::vector<float> values;
-
         for (const auto& [key, row] : unique)
             values.insert(values.end(), row.begin(), row.end());
 
@@ -381,8 +382,8 @@ struct FluidGridAdaptiveGPU::Impl
 
         if (parent)
             s.restriction = averageRecipe(l->qLayout, parent->qLayout, l->boxes, parent->boxes);
-        std::vector<float> metadata;
 
+        std::vector<float> metadata;
         for (int p = 0; p < int(l->boxes.size()); ++p)
         {
             const auto& b = l->boxes[p];
@@ -399,6 +400,7 @@ struct FluidGridAdaptiveGPU::Impl
 
             for (int value : row)
                 metadata.push_back(bits(value));
+
             s.extentX = std::max(s.extentX, unsigned(b.width));
             s.extentY = std::max(s.extentY, unsigned(b.height));
         }
@@ -414,6 +416,7 @@ struct FluidGridAdaptiveGPU::Impl
         AmrHierarchy2D hierarchy(width, height, cellSize, layout, maxGridSize);
         for (auto& l : hierarchy.levels)
             data.push_back(makeLevel(l.geometry, std::move(l.boxes), data.empty() ? nullptr : data.back().get()));
+
         activeCells = hierarchy.activeCells;
         allocatedCells = hierarchy.allocatedCells;
         status = packed(2 * int(data.size()), "adaptive compact status");
@@ -451,10 +454,11 @@ struct FluidGridAdaptiveGPU::Impl
         }
 
         pressureSolver = std::make_unique<AmrPressureGPU>(runner, levels);
-        pressure.clear();
 
+        pressure.clear();
         for (const auto& l : data)
             pressure.push_back(l->pressure);
+
         rhs = pressureSolver->makeField();
         pressureBeta = {pressureSolver->makeField(), pressureSolver->makeField()};
         pressureFlux = {pressureSolver->makeField(), pressureSolver->makeField()};
@@ -581,6 +585,7 @@ struct FluidGridAdaptiveGPU::Impl
             runner.run(divergenceKernel, {&rhs[lev], &s.scalar},
                 {{"ux", &l.velocity[0]}, {"uy", &l.velocity[1]}, {"mask", &l.active}, {"metadata", &s.metadata}},
                 params(l), extent(l));
+
             maximumStatus(s.scalar, l.cellLayout.elements, lev);
         }
 
@@ -597,6 +602,7 @@ struct FluidGridAdaptiveGPU::Impl
             auto& s = *l.storage;
             runner.run(cflKernel, {&s.scalar},
                 {{"ux", &l.velocity[0]}, {"uy", &l.velocity[1]}, {"metadata", &s.metadata}}, params(l), extent(l));
+
             rate = runner.read(reduceMaximum(s.scalar, l.cellLayout.elements), 0, sizeof(float))[0];
         }
         else
@@ -675,6 +681,7 @@ struct FluidGridAdaptiveGPU::Impl
                 runner.run(geometryKernel, {&s.phaseGeometry},
                     {{"state", &l->conserved}, {"density", &density}, {"metadata", &s.metadata}}, params(*l, dt),
                     extent(*l, 2));
+
                 runner.run(phaseFluxKernel, {&s.flux[d]},
                     {{"state", &l->conserved}, {"velocity", &l->velocity[d]}, {"geometry", &s.phaseGeometry},
                         {"metadata", &s.metadata}},
@@ -702,6 +709,7 @@ struct FluidGridAdaptiveGPU::Impl
         lastPressureInterval = dt;
         if (dt > 0.0)
             lastAcceleration = acceleration;
+
         fillGhosts();
 
         for (auto& l : data)
@@ -718,6 +726,7 @@ struct FluidGridAdaptiveGPU::Impl
         }
 
         averageFaces(false);
+
         const double predicted = divergence();
         const bool needs = predicted > tolerance;
         int iterations = 0;
@@ -740,6 +749,7 @@ struct FluidGridAdaptiveGPU::Impl
                                                    maxIterations < 0 ? (liquidComponents ? 2000 : 200) : maxIterations)
                                              : pressureSolver->solve(pressure, rhs, tolerance,
                                                    maxIterations < 0 ? (liquidComponents ? 2000 : 200) : maxIterations);
+
             if (!result.converged)
             {
                 std::ostringstream message;
@@ -787,6 +797,7 @@ struct FluidGridAdaptiveGPU::Impl
         }
 
         restrictState();
+
         const double actual = needs ? divergence() : predicted;
 
         return {iterations, actual, std::isfinite(actual) && actual <= 1.01 * tolerance};
@@ -886,6 +897,7 @@ struct FluidGridAdaptiveGPU::Impl
             source = bridge.get();
             bridges.push_back(std::move(bridge));
         }
+
         for (int lev = 0; lev < int(data.size()); ++lev)
         {
             auto& target = *data[lev];
@@ -999,6 +1011,7 @@ void FluidGridAdaptiveGPU::upload(const State& state, double tolerance)
                         q[g.components + 1] += rho * v / (ratio * ratio);
                     }
                 }
+
                 for (int n = 0; n < g.components + 2; ++n)
                     values[address(p, i, j) + n * p.plane] = float(q[n]);
             });
@@ -1121,6 +1134,7 @@ AdaptiveStepResult FluidGridAdaptiveGPU::step(double dt, double tolerance, doubl
 
     result.projection = project(tolerance, dt, acceleration, maxIterations);
     synchronize();
+
     if (measureTimings)
         result.projectionMs = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
 

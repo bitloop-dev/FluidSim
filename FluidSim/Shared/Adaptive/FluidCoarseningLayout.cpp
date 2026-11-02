@@ -76,6 +76,7 @@ AmrLayout FluidCoarseningPreview::clusterRequests(
         }
         if (trace)
             trace->levels[lev].nested = tags;
+
         auto patches = cluster(tags, tile);
         if (nearlyFull(patches))
         {

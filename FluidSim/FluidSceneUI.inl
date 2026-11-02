@@ -8,14 +8,15 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
     bl_pull_temp(fluid_device, adaptive_mode);
     bl_view(cell_size, steps_per_second, projection_max_iterations);
 
-    const bool viscous = std::ranges::any_of(liquid_viscosities,
-                             [](double value)
-    {
-        return value != 0.0;
-    }) || std::ranges::any_of(gas_viscosities, [](double value)
-    {
-        return value != 0.0;
-    });
+    const bool viscous =
+        std::ranges::any_of(liquid_viscosities, [](double value)
+        {
+            return value != 0.0;
+        }) ||
+        std::ranges::any_of(gas_viscosities, [](double value)
+        {
+            return value != 0.0;
+        });
 
     // Scenario presets.
     if constexpr (std::tuple_size_v<decltype(Derived::presets)> != 0)
@@ -37,8 +38,8 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
             .liquid_viscosities = liquid_viscosities,
             .gas_viscosities = gas_viscosities,
             .gas_proximity_scale = proximity_percent};
-        const char* preset_name = "Custom";
 
+        const char* preset_name = "Custom";
         for (const auto& preset : Derived::presets)
         {
             if (current_settings == preset.settings)
@@ -120,7 +121,6 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
     // CPU / WebGPU combo box.
     int device = int(fluid_device);
     ImGui::BeginDisabled(pressure_recovery_frames != 0 || viscous);
-
     if (ImGui::Combo("Device", &device, "CPU\0WebGPU\0"))
     {
         bl_schedule([device](Derived& scene)
@@ -137,11 +137,10 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
     // Adaptive grid selection.
     bl_scoped(mouse_attraction);
     int mode = 0;
-
     for (int scale = int(adaptive_mode); scale > 1; scale /= 2)
         ++mode;
-    ImGui::BeginDisabled(surface_tension != 0.0 || mouse_attraction || pressure_recovery_frames != 0 || viscous);
 
+    ImGui::BeginDisabled(surface_tension != 0.0 || mouse_attraction || pressure_recovery_frames != 0 || viscous);
     if (ImGui::Combo("Adaptive Mode", &mode, "Disabled\0Max 2x2\0Max 4x4\0Max 8x8\0Max 16x16\0Max 32x32\0"))
     {
         bl_schedule([mode](Derived& scene)
@@ -160,7 +159,6 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
     ImGui::EndDisabled();
 
     ImGui::SliderDouble("Frame Time", &frame_time, 0.001, 0.2, "%.3f s", ImGuiSliderFlags_AlwaysClamp);
-
     if (ImGui::IsItemDeactivatedAfterEdit())
     {
         bl_schedule([value = frame_time](Derived& scene)
@@ -173,7 +171,6 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
     }
 
     ImGui::InputDouble("Gravity", &gravity_y, 0.0, 0.0, "%.6g");
-
     if (ImGui::IsItemDeactivatedAfterEdit() && std::isfinite(gravity_y))
     {
         bl_schedule([value = gravity_y](Derived& scene)

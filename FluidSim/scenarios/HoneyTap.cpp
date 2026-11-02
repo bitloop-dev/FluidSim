@@ -143,6 +143,7 @@ void HoneyTap::restoreScenarioState(const JSON::json& state)
     hydrogen_substance = ids[0];
     helium_substance = ids[1];
     honey_substance = ids[2];
+
     tap_width_percent = state.value("tap_width_percent", 100.0 / 24.0);
     tap_speed = state.value("tap_speed", 20.0);
 }

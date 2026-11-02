@@ -59,6 +59,7 @@ struct EditVelocityGPU
                     let incoming = select(params.value.y, params.value.x, horizontal);
                     let speeds = select(vec2f(velocity), vec2f(incoming), edited);
                     let result = dot(rho, speeds) / (rho.x + rho.y);
+
                     if (horizontal)
                     {
                         write0(p, vec4f(result, 0, 0, 0));
@@ -113,6 +114,7 @@ struct EditVelocityGPU
 
         merge(horizontal);
         merge(vertical);
+
         const int count = int(horizontal.size() + vertical.size());
         if (records.width < count)
         {
@@ -130,6 +132,7 @@ struct EditVelocityGPU
         }
 
         compute.write(records, upload);
+
         Parameters params;
         params.grid = {width, height, 0, int(horizontal.size())};
         params.value = {float(batch.velocity->x), float(batch.velocity->y), 0, 0};

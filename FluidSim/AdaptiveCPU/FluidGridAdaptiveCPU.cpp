@@ -61,6 +61,7 @@ void FluidGridAdaptiveCPU::upload(const State& state)
         std::make_unique<FluidGridAdaptive>(width, height, cell_size, substances, liquid, gas, AmrLayout{});
     initialized->upload(state);
     engine = std::move(initialized);
+
     simulation_time = next_refinement_time = 0.0;
     refinement_checks = 0;
     selector.reset();
@@ -79,6 +80,7 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveCPU::step(
 {
     if (timings)
         *timings = {};
+
     native();
 
     if (dt == 0.0)
@@ -95,6 +97,7 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveCPU::step(
         const auto layout = selector.proposeLayout(width, height);
         if (timings)
             timings->selection_ms = std::chrono::duration<double, std::milli>(Clock::now() - selection_started).count();
+
         const auto regrid_started = timings ? Clock::now() : Clock::time_point{};
         next_refinement_time = simulation_time + settings.check_interval;
         ++refinement_checks;
@@ -135,6 +138,7 @@ FluidGridBase::ProjectionResult FluidGridAdaptiveCPU::step(
     {
         result = {failure.iterations, engine->maxDivergence(), false};
     }
+
     simulation_time += dt;
 
     return result;
@@ -173,6 +177,7 @@ void FluidGridAdaptiveCPU::writeColorPixels(std::vector<float>& pixels, bool liq
 
                     if (p.scale > 1)
                         view.reconstruct(plane, x, y, p.scale);
+
                     for (int dy = 0; dy < p.scale; ++dy)
                     {
                         for (int dx = 0; dx < p.scale; ++dx)
@@ -244,6 +249,7 @@ void FluidGridAdaptiveCPU::refineForEdits(const detail::CellEditBatch& batch)
                 }
             }
         }
+
         for (const auto& cell : batch.cells)
             mark(cell.x, cell.y);
     }
@@ -263,6 +269,7 @@ void FluidGridAdaptiveCPU::commitEdits(detail::CellEditBatch& batch)
     native();
     batch.prepare(width, height, cell_size * cell_size, liquid, gas);
     refineForEdits(batch);
+
     const FluidCellView view(engine->cellView());
     const int nc = view.components();
     std::vector<double> delta(nc + 2);

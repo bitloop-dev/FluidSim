@@ -129,7 +129,6 @@ inline constexpr std::string_view coarse_cycle_shader = R"wgsl(
         }
 
         mean = 0.0;
-
         for (var i = 0; i < n; i++)
         {
             mean += values[i];
@@ -282,6 +281,7 @@ inline constexpr std::string_view coarse_cycle_shader = R"wgsl(
                 smoothLevel(l, lane, true, false);
             }
         }
+
         for (var batch = 0; batch < size.x * size.y; batch += 256)
         {
             let i = batch + lane;

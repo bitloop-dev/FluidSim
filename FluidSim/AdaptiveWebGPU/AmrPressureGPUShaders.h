@@ -524,6 +524,7 @@ inline constexpr std::string_view reductionLayout = R"wgsl(
     const reductionBlock = 4u * reductionWidth;
     const reductionGroups = 1024u;
     var<workgroup> reductionValues: array<vec2f, 128>;
+
     fn reductionLane() -> u32
     {
         return u32(point.x) % reductionWidth;
@@ -683,6 +684,7 @@ inline constexpr std::string_view reduceFinish = R"wgsl(
         {
             output0Data[destination] += value.x;
         }
+
         if (value.y != 0.0 || !finite(value.x))
         {
             output0Data[6] = 1.0;
@@ -693,6 +695,7 @@ inline constexpr std::string_view reduceFinish = R"wgsl(
 inline constexpr std::string_view productsLayout = R"wgsl(
     var<workgroup> productSums: array<vec4f, 128>;
     var<workgroup> productFailures: array<f32, 128>;
+
     fn storeProducts(group: u32, value: vec4f)
     {
         for (var j = 0u; j < 4u; j++)
@@ -738,6 +741,7 @@ inline constexpr std::string_view productsSubgroups = R"wgsl(
         productSums[lane] = select(vec4f(0), total, elected);
         productFailures[lane] = select(0.0, failure, elected);
         workgroupBarrier();
+
         let lanes = subgroupAdd(1u);
         var partial = vec4f(0);
         var bad = 0.0;
@@ -1385,6 +1389,7 @@ inline constexpr std::string_view bottom = R"wgsl(
 
                     output0Data[i] = value;
                 }
+
                 for (var i = 0u; i < n; i++)
                 {
                     if (!valid(i) || ((flags(i) >> 1u) & 1u) != color)

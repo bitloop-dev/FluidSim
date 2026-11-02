@@ -27,7 +27,6 @@ FluidGrid::State CrashingWave::initialFluidState() const
     const double cell_volume = fluid.getCellSize() * fluid.getCellSize();
 
     initial.liquid_mass.assign(fluid.getLiquidMixture().components.size(), std::vector<Scalar>(cell_count, 0.0));
-
     initial.gas_mass.assign(fluid.getGasMixture().components.size(), std::vector<Scalar>(cell_count, 0.0));
 
     for (int y = 0; y < fluid.getHeight(); ++y)
@@ -52,7 +51,6 @@ FluidGrid::State CrashingWave::initialFluidState() const
                 const auto& component = fluid.getLiquidMixture().components[k];
 
                 double share = 0.0;
-
                 if (component.substance == water_substance)
                     share = 1.0 - red_share;
                 else if (component.substance == glycerol_substance)

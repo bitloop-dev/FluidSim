@@ -203,6 +203,7 @@ void main()
             window_sum += milliseconds - window[window_next];
             window[window_next] = milliseconds;
             window_next = (window_next + 1) % average_window;
+
             count = std::min(count + 1, capacity);
             times[next] = time;
             averages[next] = window_sum / std::min(count, average_window);

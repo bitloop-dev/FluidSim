@@ -20,7 +20,6 @@ std::vector<std::byte> compressCheckpointData(std::span<const std::byte> data, i
     }
 
     encoded.resize(bytes);
-
     return encoded;
 }
 

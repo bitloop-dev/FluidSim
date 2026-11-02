@@ -105,6 +105,7 @@ struct FluidGridAdaptive::PressureWorkspace
                         rhs[lev][i] = -div(x, y);
                     }
                 }
+
                 for (int d = 0; d < 2; ++d)
                 {
                     const auto b = level.beta[d].const_array(patchIndex);
@@ -140,6 +141,7 @@ struct FluidGridAdaptive::PressureWorkspace
                     for (int x = box.x; x < box.x + box.width; ++x)
                         p(x, y) = pressure[lev][patch.index(x, y)];
                 }
+
                 for (int d = 0; d < 2; ++d)
                 {
                     const auto u = level.velocity[d].array(patchIndex);
@@ -214,11 +216,13 @@ FluidGridAdaptive::FluidGridAdaptive(int width, int height, double cellSize, Sub
             auto faces = level.boxes;
             for (auto& b : faces)
                 b = b.faces(d);
+
             level.velocity[d].define(faces, 1, 0);
             level.beta[d].define(faces, 1, 0);
             level.beta[d].setVal(1.0);
             level.flux[d].define(faces, fields, 0);
             level.predictedVelocity[d].define(faces, 1, 0);
+
             level.faceSync[d] = std::make_unique<AmrFaceSync2D>(level.boxes, d);
             if (lev)
                 level.faceTransfer[d] = std::make_unique<AmrTransfer2D>(level.boxes, data[lev - 1]->boxes, 2, d);
@@ -262,6 +266,7 @@ bool FluidGridAdaptive::regrid(AmrLayout layout)
 
     restrictState();
     fillGhosts();
+
     FluidGridAdaptive next(width, height, cellSize, catalogue, liquidPhase, gasPhase, std::move(layout), maxGridSize);
     const int fields = components + 2;
     auto refine = [&](AmrField2D<double>& fine, const AmrField2D<double>& coarse, int ratio)
@@ -309,11 +314,13 @@ bool FluidGridAdaptive::regrid(AmrLayout layout)
     }
 
     next.restrictState();
+
     data.swap(next.data);
     pressureWorkspace.swap(next.pressureWorkspace);
     std::swap(gridLayout, next.gridLayout);
     std::swap(activeCells, next.activeCells);
     std::swap(allocatedCells, next.allocatedCells);
+
     lastPressureInterval = 0.0;
 
     return true;
@@ -426,6 +433,7 @@ FluidProjectionResult FluidGridAdaptive::project(
     lastPressureInterval = dt;
     if (dt > 0.0)
         lastAcceleration = acceleration;
+
     fillGhosts();
 
     // Predict shared face velocities and density coefficients from cell momentum.
@@ -440,8 +448,8 @@ FluidProjectionResult FluidGridAdaptive::project(
             const int di = d == 0;
             const int dj = d == 1;
             const double impulse = dt * acceleration[d];
-#pragma omp parallel for
 
+#pragma omp parallel for
             for (int patchIndex = 0; patchIndex < level.velocity[d].size(); ++patchIndex)
             {
                 const auto q = level.conserved.const_array(patchIndex);
@@ -533,6 +541,7 @@ FluidProjectionResult FluidGridAdaptive::project(
     }
 
     restrictState();
+
     FluidProjectionResult result;
     result.iterations = iterations;
     result.max_divergence = needsProjection ? maxDivergence() : predictedDivergence;
@@ -695,6 +704,7 @@ void FluidGridAdaptive::transportPhases(double dt)
                     w(i, j, n) = ((n < nl) == selected) ? q(i, j, n) / volume : 0.0;
                     mass += w(i, j, n);
                 }
+
                 for (int d = 0; d < 2; ++d)
                     w(i, j, nc + d) = mass * q(i, j, nc + d) / rho;
             });
@@ -749,8 +759,8 @@ void FluidGridAdaptive::transportPhases(double dt)
                     }
                 });
             }
-#pragma omp parallel for
 
+#pragma omp parallel for
             for (int patchIndex = 0; patchIndex < level.flux[d].size(); ++patchIndex)
             {
                 const auto q = level.conserved.const_array(patchIndex);
@@ -808,6 +818,7 @@ void FluidGridAdaptive::transportPhases(double dt)
                         massFlux += transfer;
                         rho += q(x, y, n);
                     }
+
                     for (int axis = 0; axis < 2; ++axis)
                         flux(i, j, nc + axis) = massFlux * q(x, y, nc + axis) / rho;
                 });
@@ -819,6 +830,7 @@ void FluidGridAdaptive::transportPhases(double dt)
         // A coarse face uses exactly the fine phase/ingredient/momentum flux.
         for (int lev = int(data.size()) - 1; lev > 0; --lev)
             data[lev]->faceTransfer[d]->average(data[lev]->flux[d], data[lev - 1]->flux[d]);
+
         for (auto& entry : data)
         {
             auto& level = *entry;

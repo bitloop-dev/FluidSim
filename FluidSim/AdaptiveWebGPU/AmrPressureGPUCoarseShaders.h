@@ -31,6 +31,7 @@ inline constexpr std::string_view coarsePack = R"wgsl(
 inline constexpr std::string_view coarseCycle = R"wgsl(
     var<workgroup> solution: array<f32, 2048>;
     var<workgroup> forcing: array<f32, 2048>;
+
     fn size(l: u32) -> u32
     {
         return u32(params.vectors[l].x);
@@ -198,6 +199,7 @@ inline constexpr std::string_view coarseCycle = R"wgsl(
             workgroupBarrier();
             smoothLevel(level, lane, 2u);
         }
+
         for (var i = lane; i < size(0u); i += 128u)
         {
             output0Data[i] = solution[i];

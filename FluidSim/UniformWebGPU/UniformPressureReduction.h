@@ -14,6 +14,7 @@ public:
     {
         constexpr std::string_view shared = R"wgsl(
             var<workgroup> partial: array<vec4f, 128>;
+
             fn combine(a: vec4f, b: vec4f) -> vec4f
             {
                 return vec4f(a.x + b.x, max(a.y, b.y), a.z + b.z, max(a.w, b.w));
@@ -33,6 +34,7 @@ public:
             {
                 partial[lane] = checked(value);
                 workgroupBarrier();
+
                 for (var stride = 64u; stride > 0u; stride /= 2u)
                 {
                     if (lane < stride)
@@ -81,6 +83,7 @@ public:
                             {
                                 value = vec4f(value.x, 0, value.x * other(p).x, 0);
                             }
+
                             total = combine(total, checked(value));
                         }
                     }
@@ -119,10 +122,12 @@ public:
     {
         const int cells = input.width * input.height;
         const int groups = groupCount(cells);
+
         Parameters parameters;
         parameters.grid = {cells, groups, mode, 0};
         compute.run(first, {&partials}, {{"source", &input}, {"other", other ? other : &input}}, parameters,
             {unsigned(groups) * threads, 1, 1});
+
         parameters.grid[0] = groups;
         compute.run(finish, {&result}, {{"source", &partials}}, parameters, {threads, 1, 1});
     }

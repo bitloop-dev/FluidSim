@@ -34,6 +34,7 @@ template <typename To, typename From> FluidGridState<To> convertFluidState(const
     copy(result.u, source.u);
     copy(result.v, source.v);
     copy(result.pressure, source.pressure);
+
     result.liquid_mass.resize(source.liquid_mass.size());
     result.gas_mass.resize(source.gas_mass.size());
 
