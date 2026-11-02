@@ -425,8 +425,51 @@ void checkElasticScene()
         "Elastic scene checkpoint changed continuation");
     scene.restartSimulation();
     require(sameState(initial, scene.fluid.download()), "Elastic scene restart lost reference configuration");
+
+    require(
+        !scene.implicit_elasticity && !scene.fluid.getImplicitElasticity(), "Elastic scene default is not explicit");
+    scene.setImplicitElasticity(true);
+    require(sameState(initial, scene.fluid.download()), "Scene implicit toggle reset deformation");
+    project.processHeadlessFrame(0.02);
+    require(!scene.simulation_failed && scene.frame_statistics.elasticity_iterations > 0,
+        "Scene implicit setting did not reach the coupled solver");
+
+    const auto implicit_scene = scene.captureSceneState();
+    fluid::FluidCheckpoint implicit_checkpoint;
+    scene.fluid.saveCheckpoint(implicit_checkpoint);
+    require(implicit_scene.at("version") == 5 && implicit_scene.at("implicit_elasticity") == true,
+        "Scene JSON lost implicit mode");
+    project.processHeadlessFrame(0.02);
+    const auto implicit_continued = scene.fluid.download();
+    scene.setImplicitElasticity(false);
+    scene.restoreSceneState(implicit_scene, implicit_checkpoint, scene.grid_w, scene.grid_h, scene.cell_size);
+    require(scene.implicit_elasticity && scene.fluid.getImplicitElasticity(),
+        "Restored implicit control disagrees with engine");
+    project.processHeadlessFrame(0.02);
+    require(!scene.simulation_failed && sameState(implicit_continued, scene.fluid.download()),
+        "Implicit scene checkpoint changed continuation");
+    scene.restartSimulation();
+    require(scene.implicit_elasticity && sameState(initial, scene.fluid.download()),
+        "Restart lost implicit mode or initial deformation");
+
+    auto preset = FluidSim::ElasticTest::presets.front().settings;
+    preset.grid_w = scene.grid_w;
+    preset.grid_h = scene.grid_h;
+    auto implicit_preset = preset;
+    implicit_preset.implicit_elasticity = true;
+    require(!(implicit_preset == preset), "Implicit toggle did not mark preset Custom");
+    scene.applyPreset(preset);
+    require(!scene.implicit_elasticity && !scene.fluid.getImplicitElasticity() &&
+                sameState(initial, scene.fluid.download()),
+        "Explicit preset failed to restore default mode");
+    scene.applyPreset(implicit_preset);
+    require(scene.implicit_elasticity && scene.fluid.getImplicitElasticity(), "Preset lost implicit mode");
+    scene.restoreSceneState(scene_state, checkpoint, scene.grid_w, scene.grid_h, scene.cell_size);
+    require(!scene.implicit_elasticity && !scene.fluid.getImplicitElasticity(),
+        "Old explicit scene inherited implicit mode");
+
     project.stopHeadless();
-    std::cout << "PASS GPU ElasticTest recovery rejection, checkpoint continuation and restart\n";
+    std::cout << "PASS GPU ElasticTest modes, recovery rejection, checkpoint continuation, presets and restart\n";
 }
 }
 

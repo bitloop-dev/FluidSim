@@ -54,6 +54,15 @@ public:
     bool hasViscosity() const { return getLiquidMixture().hasViscosity() || getGasMixture().hasViscosity(); }
     bool hasElasticity() const { return getLiquidMixture().hasElasticity() || getGasMixture().hasElasticity(); }
 
+    // Uniform WebGPU can update elastic history and pressure in one coupled solve.
+    virtual bool getImplicitElasticity() const { return false; }
+
+    virtual void setImplicitElasticity(bool enabled)
+    {
+        if (enabled)
+            throw std::invalid_argument("Implicit elasticity requires uniform WebGPU");
+    }
+
     // Replaces the complete boundary configuration; an empty set closes all faces.
     // Material edits do not create, move or change these openings.
     virtual void setBoundaryFlows(const BoundaryFlows& flows)

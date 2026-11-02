@@ -83,6 +83,7 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
     selected->setSurfaceTension(getSurfaceTension());
     selected->setPressureRecoveryTime(getPressureRecoveryTime());
     selected->setBoundaryFlows(getBoundaryFlows());
+    selected->setImplicitElasticity(getImplicitElasticity());
 
     backend = std::move(selected);
 
@@ -167,6 +168,16 @@ const FluidMixture& FluidGrid::getGasMixture() const
 void FluidGrid::setComponentViscosity(Phase phase, size_t component, double coefficient)
 {
     backend->setComponentViscosity(phase, component, coefficient);
+}
+
+bool FluidGrid::getImplicitElasticity() const
+{
+    return backend->getImplicitElasticity();
+}
+
+void FluidGrid::setImplicitElasticity(bool enabled)
+{
+    backend->setImplicitElasticity(enabled);
 }
 
 double FluidGrid::getGravityY() const

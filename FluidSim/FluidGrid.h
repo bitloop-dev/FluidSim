@@ -60,6 +60,8 @@ public:
     const FluidMixture& getGasMixture() const override;
 
     void setComponentViscosity(Phase phase, size_t component, double coefficient) override;
+    bool getImplicitElasticity() const override;
+    void setImplicitElasticity(bool enabled) override;
     void setBoundaryFlows(const BoundaryFlows& flows) override;
     const BoundaryFlows& getBoundaryFlows() const override;
     double getGravityY() const override;

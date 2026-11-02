@@ -8,7 +8,8 @@ struct ElasticTest : FluidScene<ElasticTest>
     using Base = FluidScene<ElasticTest>;
     static constexpr const char* scenario_id = "elastic-test";
 
-    inline static const std::array presets{FluidScenePreset{"Default (512 x 400)", 
+    inline static const std::array presets{
+        FluidScenePreset{"Default (512 x 400)", 
         {
             .grid_w = 512,
             .grid_h = 400,
@@ -16,6 +17,16 @@ struct ElasticTest : FluidScene<ElasticTest>
             .frame_time = 0.04,
             .projection_tolerance = 1e-5,
             .gravity_y = 10.0,
+            .liquid_viscosities = {1000.0}}
+        },
+        FluidScenePreset{"High Gravity (720 x 480)", 
+        {
+            .grid_w = 720,
+            .grid_h = 480,
+            .fluid_device = fluid::FluidDevice::GPU,
+            .frame_time = 0.04,
+            .projection_tolerance = 1e-5,
+            .gravity_y = 100.0,
             .liquid_viscosities = {1000.0}}
         }
     };

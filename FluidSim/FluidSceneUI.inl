@@ -5,19 +5,19 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 {
     bl_pull(grid_w, grid_h, frame_time, gravity_y, pressure_recovery_frames, projection_tolerance, surface_tension);
     bl_pull(liquid_viscosities, gas_viscosities);
+    bl_pull(implicit_elasticity);
     bl_pull_temp(fluid_device, adaptive_mode);
     bl_view(cell_size, steps_per_second, projection_max_iterations);
     bl_view(elastic_material);
 
-    const bool viscous =
-        std::ranges::any_of(liquid_viscosities, [](double value)
-        {
-            return value != 0.0;
-        }) ||
-        std::ranges::any_of(gas_viscosities, [](double value)
-        {
-            return value != 0.0;
-        });
+    const bool viscous = std::ranges::any_of(liquid_viscosities,
+                             [](double value)
+    {
+        return value != 0.0;
+    }) || std::ranges::any_of(gas_viscosities, [](double value)
+    {
+        return value != 0.0;
+    });
 
     // Scenario presets.
     if constexpr (std::tuple_size_v<decltype(Derived::presets)> != 0)
@@ -36,6 +36,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
             .pressure_recovery_frames = pressure_recovery_frames,
             .gravity_y = gravity_y,
             .surface_tension = surface_tension,
+            .implicit_elasticity = implicit_elasticity,
             .liquid_viscosities = liquid_viscosities,
             .gas_viscosities = gas_viscosities,
             .gas_proximity_scale = proximity_percent};
@@ -121,7 +122,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     // CPU / WebGPU combo box.
     int device = int(fluid_device);
-    ImGui::BeginDisabled(pressure_recovery_frames != 0 || viscous);
+    ImGui::BeginDisabled(pressure_recovery_frames != 0 || viscous || implicit_elasticity);
     if (ImGui::Combo("Device", &device, "CPU\0WebGPU\0"))
     {
         bl_schedule([device](Derived& scene)
@@ -133,8 +134,11 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
     {
-        if (pressure_recovery_frames != 0 || viscous)
-            ImGui::SetTooltip("Set Pressure recovery frames and material viscosities to 0 before changing the device.");
+        if (pressure_recovery_frames != 0 || viscous || implicit_elasticity)
+        {
+            ImGui::SetTooltip(
+                "Set Pressure recovery frames and viscosities to 0, and disable implicit elasticity before changing the device.");
+        }
     }
     ImGui::EndDisabled();
 
@@ -240,7 +244,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     ImGui::EndDisabled();
 
-    ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED);
+    ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED || implicit_elasticity);
     const double old_tension = surface_tension;
     ImGui::InputDouble("Surface Tension", &surface_tension, 0.0, 0.0, "%.6g");
     if (ImGui::IsItemActivated())
@@ -260,11 +264,33 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
             surface_tension = surface_tension_before_edit;
     }
 
-    if (ImGui::IsItemHovered())
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
     {
         ImGui::SetTooltip(
             "Liquid-gas surface tension in scene units; zero disables it.\nUniform CPU and WebGPU. Stronger tension "
-            "may require extra physics steps.\nPress Enter or leave the field to apply.");
+            "may require extra physics steps.\nDisable implicit elasticity before changing this coefficient.\n"
+            "Press Enter or leave the field to apply.");
+    }
+
+    ImGui::EndDisabled();
+
+    ImGui::BeginDisabled(!elastic_material || fluid_device != fluid::FluidDevice::GPU ||
+                         adaptive_mode != fluid::AdaptiveMode::DISABLED || surface_tension != 0.0 ||
+                         pressure_recovery_frames != 0);
+    if (ImGui::Checkbox("Implicit elasticity (experimental)", &implicit_elasticity))
+    {
+        bl_schedule([enabled = implicit_elasticity](Derived& scene)
+        {
+            scene.setImplicitElasticity(enabled);
+        });
+    }
+
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    {
+        ImGui::SetTooltip(
+            "Couples elastic deformation and pressure, allowing larger stiffness timesteps.\n"
+            "Backward Euler adds numerical damping. Changes apply live and preserve deformation.\n"
+            "Requires elastic material, uniform WebGPU, closed boundaries, accurate pressure and zero Surface Tension.");
     }
 
     ImGui::EndDisabled();
@@ -390,13 +416,16 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
         if (viscous)
             ImGui::TextDisabled("%d viscosity iteration slots (batches of 4).", stats.viscosity_iterations);
 
+        if (stats.elasticity_iterations > 0)
+            ImGui::TextDisabled("%d coupled elasticity/pressure iterations.", stats.elasticity_iterations);
+
         if (stats.precision_limited_updates > 0)
         {
             ImGui::TextDisabled("Float precision limit reached; max divergence %.6g.", stats.max_divergence);
             if (ImGui::IsItemHovered())
             {
-                ImGui::SetTooltip("The remaining error is within local face-velocity rounding precision.\n"
-                                  "Further pressure iterations cannot reliably reduce it at these speeds.");
+                ImGui::SetTooltip("The step met its targets with a local floating-point allowance.\n"
+                                  "Implicit elasticity also accounts for stiffness-amplified rounding in momentum.");
             }
         }
 

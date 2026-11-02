@@ -10,7 +10,7 @@ ElasticTest::ElasticTest(const Config& config) : Base(config.settings, config)
     atmosphere_substance = substances.add({"Atmosphere", {0.0f, 0.0f, 0.0f}});
 
     // Stiffness belongs to the material; the scene supplies its initial deformation.
-    fluid::FluidMixture material{{{test_substance, 10.0, 1000.0, 20000.0}}};
+    fluid::FluidMixture material{{{test_substance, 10.0, 1000.0, 50000.0}}};
     fluid::FluidMixture atmosphere{{{atmosphere_substance, 0.01}}};
     fluid.configureMaterials(std::move(substances), std::move(material), std::move(atmosphere));
 }

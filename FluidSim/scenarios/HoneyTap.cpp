@@ -14,7 +14,7 @@ HoneyTap::HoneyTap(const Config& config)
 
     // Honey is an effective bulk material here, not a molecule with a single formula.
     honey_substance = materials.substances.add({"Honey", {1.0f, 0.58f, 0.08f}});
-    fluid::FluidMixture honey{{{honey_substance, 14.0}}};
+    fluid::FluidMixture honey{{{honey_substance, 14.0, 0.0, 1000.0}}};
     fluid.configureMaterials(std::move(materials.substances), std::move(honey), std::move(materials.gas));
 }
 

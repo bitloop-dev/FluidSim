@@ -20,6 +20,7 @@ FluidScene<Derived>::FluidScene(const FluidSceneSettings& settings, const Config
       pressure_recovery_frames(settings.pressure_recovery_frames),
       gravity_y(settings.gravity_y),
       surface_tension(settings.surface_tension),
+      implicit_elasticity(settings.implicit_elasticity),
       liquid_viscosities(settings.liquid_viscosities),
       gas_viscosities(settings.gas_viscosities),
       checkpoint_brotli_quality(config.checkpoint_brotli_quality),
@@ -33,6 +34,7 @@ FluidScene<Derived>::FluidScene(const FluidSceneSettings& settings, const Config
     fluid.setGravityY(gravity_y);
     fluid.setSurfaceTension(surface_tension);
     fluid.setPressureRecoveryTime(pressure_recovery_frames * frame_time);
+    fluid.setImplicitElasticity(implicit_elasticity);
 }
 
 template <class Derived> void FluidScene<Derived>::sceneStart()
@@ -61,6 +63,7 @@ template <class Derived> void FluidScene<Derived>::restartSimulation()
         replacement.setGravityY(gravity_y);
         replacement.setSurfaceTension(surface_tension);
         replacement.setPressureRecoveryTime(pressure_recovery_frames * frame_time);
+        replacement.setImplicitElasticity(implicit_elasticity);
 
         withFluidContext([&]
         {
@@ -142,6 +145,7 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
     replacement.setGravityY(settings.gravity_y);
     replacement.setSurfaceTension(settings.surface_tension);
     replacement.setPressureRecoveryTime(settings.pressure_recovery_frames * settings.frame_time);
+    replacement.setImplicitElasticity(settings.implicit_elasticity);
 
     const bool resize = settings.grid_w != fluid.getWidth() || settings.grid_h != fluid.getHeight() ||
                         settings.cell_size != fluid.getCellSize();
@@ -172,6 +176,7 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
 
     gravity_y = settings.gravity_y;
     surface_tension = settings.surface_tension;
+    implicit_elasticity = settings.implicit_elasticity;
     liquid_viscosities = settings.liquid_viscosities;
     gas_viscosities = settings.gas_viscosities;
 
@@ -227,6 +232,16 @@ template <class Derived> void FluidScene<Derived>::setSurfaceTension(double coef
     });
 
     surface_tension = coefficient;
+}
+
+template <class Derived> void FluidScene<Derived>::setImplicitElasticity(bool enabled)
+{
+    withFluidContext([&]
+    {
+        fluid.setImplicitElasticity(enabled);
+    });
+
+    implicit_elasticity = enabled;
 }
 
 template <class Derived> void FluidScene<Derived>::setPressureRecoveryFrames(int frames)
@@ -397,6 +412,7 @@ template <class Derived> void FluidScene<Derived>::sceneProcess(double dt)
                 frame_statistics.precision_limited_updates += int(result.precision_limited);
                 frame_statistics.max_divergence = std::max(frame_statistics.max_divergence, result.max_divergence);
                 frame_statistics.viscosity_iterations += result.viscosity_iterations;
+                frame_statistics.elasticity_iterations += result.elasticity_iterations;
 
                 frame_statistics.max_volume_error =
                     std::max(frame_statistics.max_volume_error, result.max_volume_error);
@@ -527,8 +543,8 @@ template <class Derived> void FluidScene<Derived>::onEvent(Event e)
 
 template <class Derived> JSON::json FluidScene<Derived>::captureSceneState() const
 {
-    return {
-        {"version", pressure_recovery_frames > 0 ? 4 : 3},
+    JSON::json state = {
+        {"version", implicit_elasticity ? 5 : (pressure_recovery_frames > 0 ? 4 : 3)},
         {"scenario", Derived::scenario_id},
         {"simulation_time", simulation_time},
         {"real_time", real_time},
@@ -549,6 +565,11 @@ template <class Derived> JSON::json FluidScene<Derived>::captureSceneState() con
         {"adaptive_mode", int(fluid.getAdaptiveMode())},
         {"scenario_state", captureScenarioState()}
     };
+
+    if (implicit_elasticity)
+        state["implicit_elasticity"] = true;
+
+    return state;
 }
 
 template <class Derived> void FluidScene<Derived>::captureFluidImage(CaptureFrame& output) const
@@ -613,7 +634,7 @@ template <class Derived>
 void FluidScene<Derived>::restoreSceneState(
     const JSON::json& scene, const fluid::FluidCheckpoint& checkpoint, int width, int height, double spacing)
 {
-    if (scene.at("version") != 2 && scene.at("version") != 3 && scene.at("version") != 4)
+    if (scene.at("version") != 2 && scene.at("version") != 3 && scene.at("version") != 4 && scene.at("version") != 5)
         throw std::runtime_error("Unsupported fluid scene snapshot version");
 
     if (scene.at("scenario") != Derived::scenario_id)
@@ -626,7 +647,8 @@ void FluidScene<Derived>::restoreSceneState(
     }
 
     const double saved_frame_time = scene.at("frame_time").get<double>();
-    const int saved_recovery = scene.at("version") == 4 ? scene.at("pressure_recovery_frames").get<int>() : 0;
+    const int saved_recovery = scene.at("version") >= 4 ? scene.at("pressure_recovery_frames").get<int>() : 0;
+    const bool saved_implicit = scene.at("version") >= 5 && scene.at("implicit_elasticity").get<bool>();
     if (saved_recovery < 0 || saved_recovery > 10)
         throw std::runtime_error("Invalid saved pressure recovery horizon");
 
@@ -679,6 +701,9 @@ void FluidScene<Derived>::restoreSceneState(
     if (restored.getPressureRecoveryTime() != saved_recovery * saved_frame_time)
         throw std::runtime_error("Scene and engine pressure recovery settings disagree");
 
+    if (restored.getImplicitElasticity() != saved_implicit)
+        throw std::runtime_error("Scene and engine implicit elasticity settings disagree");
+
     validateScenarioState(scene.at("scenario_state"), restored);
     std::vector<float> pixels;
     restored.writeColorPixels(pixels, true);
@@ -706,6 +731,7 @@ void FluidScene<Derived>::restoreSceneState(
     adaptive_mode = fluid.getAdaptiveMode();
     gravity_y = fluid.getGravityY();
     surface_tension = fluid.getSurfaceTension();
+    implicit_elasticity = fluid.getImplicitElasticity();
     refreshViscosityControls();
 
     mouse_attraction = saved_mouse_attraction;
@@ -758,6 +784,7 @@ template <class Derived> void FluidScene<Derived>::traceFrame(SimTraceFrame& fra
     frame.metric("precision_limited_updates", frame_statistics.precision_limited_updates);
     frame.metric("max_divergence", frame_statistics.max_divergence);
     frame.metric("viscosity_iterations", frame_statistics.viscosity_iterations);
+    frame.metric("elasticity_iterations", frame_statistics.elasticity_iterations);
     frame.metric("surface_tension", fluid.getSurfaceTension());
     frame.metric("phase_timings_available", frame_statistics.detailed);
     frame.metric("projection_tolerance", frame_statistics.projection_tolerance);

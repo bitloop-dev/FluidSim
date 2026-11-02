@@ -81,8 +81,9 @@ struct FluidProjectionResult
     double rms_volume_error = 0.0;
     int viscosity_iterations = 0; // Dispatched slots; convergence is observed in batches of four.
 
-    // Requested divergence is exceeded only within local face-velocity rounding error.
+    // Convergence accepted with a local floating-point allowance (pressure or coupled momentum).
     bool precision_limited = false;
+    int elasticity_iterations = 0; // Coupled velocity/pressure MINRES updates.
 
     bool accepted() const { return converged || relaxed || precision_limited; }
 };

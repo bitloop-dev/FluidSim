@@ -50,6 +50,10 @@ public:
 
     void setComponentViscosity(Phase phase, size_t component, double coefficient);
 
+    bool getImplicitElasticity() const { return implicit_elasticity; }
+
+    void setImplicitElasticity(bool enabled);
+
     void setBoundaryFlows(const BoundaryFlows& flows);
 
     const BoundaryFlows& getBoundaryFlows() const { return boundary_flows; }
@@ -118,6 +122,7 @@ private:
     std::unique_ptr<Impl> gpu;
     double surface_tension = 0.0;
     double pressure_recovery_time = 0.0;
+    bool implicit_elasticity = false;
     BoundaryFlows boundary_flows;
 };
 

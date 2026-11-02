@@ -104,6 +104,12 @@ void FluidSim_Project::projectPrepare(Layout& layout)
                     continue;
                 }
 
+                if (key == "implicit_elasticity")
+                {
+                    config.settings.implicit_elasticity = value.get<bool>();
+                    continue;
+                }
+
                 if (key != "checkpoint_brotli_quality")
                     throw std::invalid_argument("Unknown FluidSim config field: " + key);
 

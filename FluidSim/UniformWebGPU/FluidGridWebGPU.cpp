@@ -65,6 +65,16 @@ void FluidGridWebGPU::setComponentViscosity(Phase phase, size_t component, doubl
     engine->setComponentViscosity(phase, component, coefficient);
 }
 
+bool FluidGridWebGPU::getImplicitElasticity() const
+{
+    return engine->getImplicitElasticity();
+}
+
+void FluidGridWebGPU::setImplicitElasticity(bool enabled)
+{
+    engine->setImplicitElasticity(enabled);
+}
+
 double FluidGridWebGPU::getGravityY() const
 {
     return engine->gravity_y;

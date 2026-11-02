@@ -33,6 +33,7 @@ struct FluidSceneSettings
     int pressure_recovery_frames = 0;
     double gravity_y = 0.0;
     double surface_tension = 0.0;
+    bool implicit_elasticity = false;
 
     // Mixture component order; omitted entries have zero viscosity.
     std::vector<double> liquid_viscosities;
@@ -47,7 +48,7 @@ struct FluidSceneSettings
         {
             return std::tie(s.grid_w, s.grid_h, s.cell_size, s.fluid_device, s.adaptive_mode, s.frame_time,
                 s.steps_per_second, s.projection_max_iterations, s.projection_tolerance, s.pressure_recovery_frames,
-                s.gravity_y, s.surface_tension);
+                s.gravity_y, s.surface_tension, s.implicit_elasticity);
         };
 
         auto same = [](const std::vector<double>& a, const std::vector<double>& b)
@@ -107,6 +108,7 @@ template <class Derived> struct FluidScene : bl::Scene<Derived>
     int pressure_recovery_frames;
     double gravity_y; // Positive Y points down.
     double surface_tension;
+    bool implicit_elasticity;
     std::vector<double> liquid_viscosities;
     std::vector<double> gas_viscosities;
     std::vector<std::string> liquid_viscosity_names;
@@ -173,6 +175,7 @@ void main()
         int precision_limited_updates = 0;
         double max_divergence = 0.0;
         int viscosity_iterations = 0;
+        int elasticity_iterations = 0;
         bool detailed = false;
         bool adaptive = false;
         double projection_tolerance = 1e-2;
@@ -220,6 +223,7 @@ void main()
     void restartSimulation();
     void applyPreset(const FluidSceneSettings& settings);
     void setSurfaceTension(double coefficient);
+    void setImplicitElasticity(bool enabled);
     void setPressureRecoveryFrames(int frames);
     void setComponentViscosity(fluid::Phase phase, size_t component, double coefficient);
     void refreshViscosityControls();
