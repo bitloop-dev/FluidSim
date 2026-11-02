@@ -87,6 +87,7 @@ void blending(int liquids, int gases)
     FluidGridGPU grid(24, 18, 0.7);
     initialize(grid, liquids, gases);
     grid.setComponentViscosity(Phase::Gas, gases - 1, 5.0);
+
     const auto initial = grid.download();
     std::vector<float> material(2 * grid.width * grid.height);
 
@@ -121,6 +122,7 @@ void blending(int liquids, int gases)
     compute.write(u, initial.u);
     compute.write(v, initial.v);
     compute.write(coefficients, material);
+
     webgpu::ViscositySolverGPU reference(compute, grid.width, grid.height);
     reference.solve(u, v, coefficients, 0.01, grid.cell_size);
     const auto expected_u = compute.read(u);
@@ -148,12 +150,11 @@ void blending(int liquids, int gases)
         grid.setComponentViscosity(Phase::Gas, k, 0.0);
 
     require(grid.applyViscosity(0.01) == 0 && same(result, grid.download()), "Disabled viscosity changed state");
-    grid.setComponentViscosity(Phase::Gas, gases - 1, 5.0);
 
+    grid.setComponentViscosity(Phase::Gas, gases - 1, 5.0);
     require(grid.applyViscosity(0.01) > 0, "Gas-only viscosity did not activate the solver");
 
     const auto gas_only = grid.download();
-
     require(gas_only.liquid_fraction == result.liquid_fraction && gas_only.liquid_mass == result.liquid_mass &&
                 gas_only.gas_mass == result.gas_mass,
         "Gas-only viscosity changed composition");
@@ -169,6 +170,7 @@ void continuation(double recovery)
 
     for (int i = 0; i < 12; ++i)
         require(grid.step(0.004, 2000, 0.001).accepted(), "Viscous coupled step failed");
+
     FluidCheckpoint saved;
     grid.saveCheckpoint(saved);
 
@@ -236,6 +238,7 @@ void unsupported()
     }
 
     require(rejected, "CPU silently accepted viscous materials");
+
     grid.setDevice(FluidDevice::GPU);
     grid.configureMaterials(catalogue, mixture, {});
     rejected = false;

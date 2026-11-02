@@ -35,6 +35,7 @@ FluidGridCPU::State configure(FluidGridCPU& g, double density_b = 0.1)
     g.gas_mixture.components = {{a, 0.1}, {b, density_b}};
     g.liquid_mixture.components = {{w, 100}};
     g.gravity_y = 0;
+
     const int n = g.width * g.height;
     const double area = g.cell_size * g.cell_size;
     FluidGridCPU::State s;
@@ -71,6 +72,7 @@ void detailCases()
     require(preview.labels[3 * preview.width + 3] == Preview::Candidate,
         "uniform fast flow and linear pressure are coarsenable");
     expectNear(Preview::estimate(g.cellView(), 6, 6).score(t), 0, "affine pressure has no gradient detail");
+
     auto linear = s;
 
     for (int y = 0; y < 16; ++y)
@@ -86,6 +88,7 @@ void detailCases()
     g.upload(linear);
     expectNear(Preview::estimate(g.cellView(), 6, 6).ingredient, 0.015,
         "flat coarse material loses half the fine-cell gradient along each axis");
+
     auto shifted = s;
 
     for (auto& v : shifted.u)
@@ -105,6 +108,7 @@ void detailCases()
 
     require(Preview::estimate(g.cellView(), 6, 6).velocity >= 0.5,
         "internal alternating faces cannot disappear in an average");
+
     std::fill(s.u.begin(), s.u.end(), 20);
 
     for (int y = 0; y < 16; ++y)
@@ -136,6 +140,7 @@ void detailCases()
     preview.update(g.cellView(), t, instant, 0);
 
     require(preview.labels[3 * preview.width + 3] == Preview::Detail, "quiet ingredient pocket stays detailed");
+
     t.ingredient = 0.11;
     preview.update(g.cellView(), t, instant, 0);
 
@@ -180,6 +185,7 @@ void uniformProtectionAndStability()
     p.update(grid.cellView(), {}, {}, 0.24);
 
     require(p.labels == labels, "paused time cannot age history");
+
     state.liquid_fraction[5 * 16 + 5] = 1e-14;
     state.liquid_mass[0][5 * 16 + 5] = 1e-12;
     grid.upload(state);
@@ -187,8 +193,8 @@ void uniformProtectionAndStability()
 
     require(p.labels[3 * p.width + 3] == Preview::LiquidBuffer, "liquid halo revokes candidate immediately");
     require(p.labels[0] == Preview::Unassessed, "physical boundary remains unknown");
-    p.reset();
 
+    p.reset();
     require(p.labels.empty(), "disabled preview releases visible labels");
 }
 
@@ -313,6 +319,7 @@ void nativeViews()
     p.update(grid.cellView(), t, {}, 0.24, 0.0, 2);
 
     require(p.counts[Preview::Candidate] > 0, "native fine merge candidates mature");
+
     grid.regrid({2, {{{4, 4, 16, 16}}}});
     grid.project(1e-9);
     p.update(grid.cellView(), t, {}, 0.32, 0.0, 2);
@@ -320,6 +327,7 @@ void nativeViews()
     require(p.counts[Preview::Candidate] > 0 && p.statistics.waiting > 0,
         "layout change preserves overlap history and delays newly fine cells");
     require(grid.totals().ingredientMass == before.ingredientMass, "uniform mixture regrid conserves exact mass");
+
     grid.regrid({});
     grid.project(1e-9);
     p.update(grid.cellView(), t, instant, 0.4, 0.0, 2);

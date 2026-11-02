@@ -23,6 +23,7 @@ void conservativeCompression(int count)
 
     grid.gravity_y = 0.0;
     grid.setPressureRecoveryTime(0.1);
+
     FluidGridGPU::State state;
     state.liquid_fraction.assign(w * h, 0.3f);
     state.u.resize((w + 1) * h);
@@ -38,6 +39,7 @@ void conservativeCompression(int count)
         for (int x = 0; x <= w; ++x)
             state.u[y * (w + 1) + x] = x == w ? 0.0f : float(std::sin(2.0 * 3.141592653589793 * x / w));
     }
+
     for (int k = 0; k < count; ++k)
     {
         const auto id = grid.substances.add({"Component", {0.2f, 0.4f, 0.6f}});
@@ -70,6 +72,7 @@ void conservativeCompression(int count)
             require(std::abs(result / before - 1.0) < 2e-6, "Conservative compression changed component mass");
         }
     }
+
     for (int y = 0; y < h; ++y)
     {
         for (int x = 0; x < w; ++x)
@@ -80,6 +83,7 @@ void conservativeCompression(int count)
                 q += after.liquid_mass[k][i] / grid.liquid_mixture.components[k].density;
             for (size_t k = 0; k < after.gas_mass.size(); ++k)
                 q += after.gas_mass[k][i] / grid.gas_mixture.components[k].density;
+
             const double x_factor = 1.0 - dt * (state.u[y * (w + 1) + x + 1] - state.u[y * (w + 1) + x]);
             const double expected = x_factor * (1.0 - dt * (state.v[(y + 1) * w + x] - state.v[y * w + x]));
 
@@ -206,6 +210,7 @@ void checkpointRecovery()
 
     for (int i = 0; i < 11; ++i)
         require(original.step(0.003, 2000, 0.001).accepted(), "Checkpoint warmup failed");
+
     FluidCheckpoint checkpoint;
     original.saveCheckpoint(checkpoint);
 
@@ -227,8 +232,8 @@ void checkpointRecovery()
 
     require(rejected && unchanged.metadata == checkpoint.metadata && unchanged.data == checkpoint.data,
         "Invalid recovery checkpoint changed live state");
-    resumed.loadCheckpoint(checkpoint);
 
+    resumed.loadCheckpoint(checkpoint);
     require(resumed.getPressureRecoveryTime() == 0.1, "Checkpoint lost recovery horizon");
 
     for (int i = 0; i < 30; ++i)

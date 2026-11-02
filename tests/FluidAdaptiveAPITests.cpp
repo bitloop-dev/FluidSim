@@ -42,6 +42,7 @@ struct Fixture
     {
         grid.configureMaterials(substances, liquid, gas);
         grid.setGravityY(0.0);
+
         const int w = grid.getWidth();
         const int h = grid.getHeight();
         const double area = grid.getCellSize() * grid.getCellSize();
@@ -146,8 +147,8 @@ void manualParity()
         FluidGridAdaptive raw(32, 32, 1.0, f.substances, f.liquid, f.gas, {});
         raw.upload(initial);
         compareNative(raw, backend.native());
-        const auto before = api.download();
 
+        const auto before = api.download();
         require(api.step(0.0).converged, "Zero-time step failed");
         require(before.gas_mass == api.download().gas_mass && backend.refinementChecks() == 0,
             "Zero-time step ran selection or changed state");
@@ -171,8 +172,8 @@ void manualParity()
         require(raster.u.size() == 33 * 32 && raster.v.size() == 32 * 33 && pixels.size() == 32 * 32 * 4,
             "Common observation dimensions incorrect");
         compareNative(raw, backend.native());
-        const auto failure = api.step(0.1, 0, 1e-12);
 
+        const auto failure = api.step(0.1, 0, 1e-12);
         require(!failure.converged && failure.iterations == 0,
             "Adaptive API ignored the caller iteration cap or hid failure");
     }
@@ -210,6 +211,7 @@ void automaticParity(const std::filesystem::path& directory)
     FluidGridAdaptive raw(96, 96, 1.0, f.substances, f.gas, {});
 
     raw.upload(initial);
+
     FluidCoarseningPreview selection;
     double time = 0.0;
     double next = 0.0;
@@ -233,6 +235,7 @@ void automaticParity(const std::filesystem::path& directory)
         require(raw.step(0.02, 1e-8, 0.0, {}, 2000).projection.converged, "Raw evolution failed");
         require(backend.step(0.02, 2000, 1e-8).converged, "Automatic common step failed");
         time += 0.02;
+
         compareNative(raw, backend.native());
         if (raw.layout() != old)
         {
@@ -251,6 +254,7 @@ void automaticParity(const std::filesystem::path& directory)
 
     for (size_t k = 0; k < mass0.size(); ++k)
         require(std::abs(totals.ingredientMass[k] / mass0[k] - 1.0) < 1e-10, "Automatic remap lost component mass");
+
     auto raster = backend.download();
 
     for (size_t k = 0; k < mass0.size(); ++k)
@@ -294,15 +298,14 @@ void automaticParity(const std::filesystem::path& directory)
     require(backend.native().cellView().at(4, 4).patch->scale == 1, "Fine edit silently overwrote a coarse cell");
 
     const auto edited = backend.download();
-
     require(edited.gas_mass[0][4 * 96 + 4] == 0.0 && edited.gas_mass[1][4 * 96 + 4] == 0.1,
         "Adaptive last-write replacement incorrect");
 
     const auto after = backend.native().totals().ingredientMass;
-
     require(std::abs(after[0] - before[0] + removedAir) < 1e-10 &&
                 std::abs(after[1] - before[1] + removedCloud - 0.1) < 1e-10,
         "Sparse adaptive edit changed unselected material budget");
+
     edit.setCell(3, 3, Phase::Gas, 0);
     edit.setCell(-1, 3, Phase::Gas, 0);
     bool rejected = false;
@@ -354,8 +357,8 @@ void selectionAndLifecycle()
         require(api.step(0.02, 2000, 1e-8).converged, "Runtime quality policy update failed");
 
         FluidGrid moved = std::move(grid);
-
         require(moved.step(0.02, 2000, 1e-8).converged, "Moved facade lost adaptive configuration dispatch");
+
         moved.destroy();
         moved.setAdaptiveMode(AdaptiveMode::DISABLED);
         f.configure(moved, false);
@@ -374,9 +377,9 @@ void liquidSourceInCoarseGas()
 
     std::fill(initial.liquid_fraction.begin(), initial.liquid_fraction.end(), 0.0);
     std::fill(initial.liquid_mass[0].begin(), initial.liquid_mass[0].end(), 0.0);
-
     for (auto& mass : initial.gas_mass)
         std::fill(mass.begin(), mass.end(), 0.05);
+
     backend.upload(initial);
     FluidGridBase& api = backend;
 
@@ -388,6 +391,7 @@ void liquidSourceInCoarseGas()
     auto edit = api.beginEdit();
     edit.setCell(4, 4, Phase::Liquid, 2);
     edit.commit();
+
     const auto state = api.download();
     const int i = 4 * 96 + 4;
 
@@ -396,12 +400,11 @@ void liquidSourceInCoarseGas()
         "Liquid source did not replace one finest gas cell");
 
     const auto after = backend.native().totals().ingredientMass;
-
     require(std::abs(after[0] - before[0] - 100.0) < 1e-10 && std::abs(after[1] - before[1] + 0.05) < 1e-10 &&
                 std::abs(after[2] - before[2] + 0.05) < 1e-10,
         "Liquid source changed unselected budgets");
-    backend.setGravityY(100.0);
 
+    backend.setGravityY(100.0);
     require(api.step(0.02, 2000, 1e-8).converged && backend.native().cellView().at(4, 4).patch->scale == 1,
         "Automatic policy lost a newly edited liquid cell");
     require(backend.native().totals().finite, "Liquid edit produced non-finite evolving state");

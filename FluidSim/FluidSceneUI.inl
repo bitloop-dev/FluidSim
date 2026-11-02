@@ -7,6 +7,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
     bl_pull(liquid_viscosities, gas_viscosities);
     bl_pull_temp(fluid_device, adaptive_mode);
     bl_view(cell_size, steps_per_second, projection_max_iterations);
+    bl_view(elastic_material);
 
     const bool viscous =
         std::ranges::any_of(liquid_viscosities, [](double value)
@@ -130,8 +131,11 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
         });
     }
 
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && (pressure_recovery_frames != 0 || viscous))
-        ImGui::SetTooltip("Set Pressure recovery frames and material viscosities to 0 before changing the device.");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    {
+        if (pressure_recovery_frames != 0 || viscous)
+            ImGui::SetTooltip("Set Pressure recovery frames and material viscosities to 0 before changing the device.");
+    }
     ImGui::EndDisabled();
 
     // Adaptive grid selection.
@@ -140,7 +144,8 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
     for (int scale = int(adaptive_mode); scale > 1; scale /= 2)
         ++mode;
 
-    ImGui::BeginDisabled(surface_tension != 0.0 || mouse_attraction || pressure_recovery_frames != 0 || viscous);
+    ImGui::BeginDisabled(
+        surface_tension != 0.0 || mouse_attraction || pressure_recovery_frames != 0 || viscous || elastic_material);
     if (ImGui::Combo("Adaptive Mode", &mode, "Disabled\0Max 2x2\0Max 4x4\0Max 8x8\0Max 16x16\0Max 32x32\0"))
     {
         bl_schedule([mode](Derived& scene)
@@ -152,8 +157,11 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
     {
-        ImGui::SetTooltip("Restarts the simulation. Adaptive mode requires zero Surface Tension, zero Pressure "
-                          "recovery frames, zero material viscosities and Mouse attraction off.");
+        if (elastic_material)
+            ImGui::SetTooltip("This elastic material requires a uniform grid.");
+        else
+            ImGui::SetTooltip("Restarts the simulation. Adaptive mode requires zero Surface Tension, zero Pressure "
+                              "recovery frames, zero material viscosities and Mouse attraction off.");
     }
 
     ImGui::EndDisabled();
@@ -184,7 +192,8 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
         });
     }
 
-    ImGui::BeginDisabled(fluid_device != fluid::FluidDevice::GPU || adaptive_mode != fluid::AdaptiveMode::DISABLED);
+    ImGui::BeginDisabled(
+        fluid_device != fluid::FluidDevice::GPU || adaptive_mode != fluid::AdaptiveMode::DISABLED || elastic_material);
     ImGui::SliderInt("Pressure recovery frames", &pressure_recovery_frames, 0, 10, "%d", ImGuiSliderFlags_AlwaysClamp);
 
     if (ImGui::IsItemDeactivatedAfterEdit())
@@ -359,6 +368,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
             row("    Transport", stats.stages.transport_ms, stats.detailed);
             if (!stats.adaptive)
                 row("    Viscosity", stats.stages.viscosity_ms, stats.detailed);
+            row("    Elasticity", stats.stages.elasticity_ms, stats.detailed);
             if (!stats.adaptive)
                 row("    Forces", stats.stages.forces_ms, stats.detailed);
             row(stats.adaptive ? "    Projection + forces" : "    Projection", stats.stages.pressure_ms,
@@ -379,6 +389,16 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
             "%d transport steps; %d pressure iterations.", stats.transport_steps, stats.pressure_iterations);
         if (viscous)
             ImGui::TextDisabled("%d viscosity iteration slots (batches of 4).", stats.viscosity_iterations);
+
+        if (stats.precision_limited_updates > 0)
+        {
+            ImGui::TextDisabled("Float precision limit reached; max divergence %.6g.", stats.max_divergence);
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("The remaining error is within local face-velocity rounding precision.\n"
+                                  "Further pressure iterations cannot reliably reduce it at these speeds.");
+            }
+        }
 
         ImGui::TextDisabled("GPU profiling adds completion waits.");
         if (ImGui::IsItemHovered())

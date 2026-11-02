@@ -140,6 +140,7 @@ void prescribe(Pair& pair, int material, int velocity, int pressureMode = 0, boo
                     cq(x, y, k) = value;
                     q[b.offset + b.index(x, y) + k * b.plane] = value;
                 }
+
                 for (int d = 0; d < 2; ++d)
                 {
                     const float value = float(rho * speed(fx, fy, d));
@@ -233,11 +234,13 @@ double compare(Pair& pair, Preview::Tolerances tolerances, Preview::Stability st
 
     require(error < 3e-5, "GPU representation/pressure errors differ from CPU");
     require(ca == cb, "GPU proposed layout differs from CPU");
+
     pair.selection.downloadLabels();
 
     require(pair.reference.labels == pair.selection.labels, "GPU display labels differ from CPU");
     require(pair.reference.counts == pair.selection.counts && pair.reference.statistics == pair.selection.statistics,
         "GPU compact statistics differ from CPU");
+
     if (out)
         *out = std::move(b);
 
@@ -312,6 +315,7 @@ void history()
 
     for (double time : {0.0, 0.0, 0.16, 0.32})
         compare(pair, {}, {1.0, 0.24}, time, 0.0, 32, &trace);
+
     const int changed = 2 * 4 + 2;
     const int unchanged = 0;
 
@@ -350,6 +354,7 @@ void lookahead()
     prescribe(pair, 4, 1);
     Preview::Trace trace;
     compare(pair, {10.0, 1.0, 0.02, 0.02}, {0.5, 0.24}, 0.0, 4.0, 32, &trace);
+
     int approaching = 0;
 
     for (const auto& lev : trace.levels)
@@ -421,6 +426,7 @@ void compensatedPressure()
             compare(pair, tolerances, {0.5, 0.0}, 0.0, 0.0, 32, &observed);
             Preview oracle;
             oracle.update(pair.cpu.cellView(), tolerances, {0.5, 0.0}, 0.0, 0.0, 32, &expected);
+
             double error = 0.0;
             int detailCount = 0;
 
@@ -463,8 +469,10 @@ void benchmark(int n)
     for (int i = 0; i < 7; ++i)
         elapsed.push_back(run(0.32 * (i + 1)));
     std::sort(elapsed.begin(), elapsed.end());
+
     pair.selection.reset();
     const double reset = run(3.0);
+
     std::cout << "selection timing n=" << n << " first_ms=" << first << " reset_ms=" << reset
               << " median_ms=" << elapsed[3] << " range=" << elapsed.front() << ',' << elapsed.back()
               << " includes_native_snapshot_masks_clustering excludes_setup_trace_display\n";
@@ -490,6 +498,7 @@ void roundoff()
 
     pair.gpu.regrid({8, {}});
     pair.gpu.regrid({1, {}});
+
     double local = 0.0;
     double global = 0.0;
 
@@ -505,6 +514,7 @@ void roundoff()
                 double rho = 0.0;
                 for (int k = 0; k < 2; ++k)
                     rho += values[patch.offset + patch.index(x, y) + k * patch.plane];
+
                 for (int d = 0; d < 2; ++d)
                 {
                     const double v = values[patch.offset + patch.index(x, y) + (2 + d) * patch.plane] / rho;

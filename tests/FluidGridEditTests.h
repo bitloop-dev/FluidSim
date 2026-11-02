@@ -42,6 +42,7 @@ template <class Grid> void materialEditingIsSparseAndReusable()
         auto edit = grid.beginEdit();
         edit.commit();
         edit.setCell(0, 0, liquids ? Phase::Liquid : Phase::Gas, shared);
+
         bool needs_upload = false;
         try
         {
@@ -53,6 +54,7 @@ template <class Grid> void materialEditingIsSparseAndReusable()
         }
         requireEdit(needs_upload && edit.size() == 1, "nonempty edit accepted an uninitialized grid");
         edit.clear();
+
         typename Grid::State initial;
         initial.liquid_fraction.resize(117);
         initial.liquid_mass.assign(liquids, std::vector<Scalar>(117));
@@ -64,6 +66,7 @@ template <class Grid> void materialEditingIsSparseAndReusable()
             initial.u[i] = Scalar(0.03 * std::sin(double(i)));
         for (size_t i = 0; i < initial.v.size(); ++i)
             initial.v[i] = Scalar(0.02 * std::cos(double(i)));
+
         for (size_t i = 0; i < 117; ++i)
         {
             const double fraction = liquids == 0 ? 0.0 : gases == 0 ? 1.0 : 0.25 * (i % 5);
@@ -83,6 +86,7 @@ template <class Grid> void materialEditingIsSparseAndReusable()
         grid.upload(initial);
         const double tolerance = std::is_same_v<Scalar, double> ? 1e-8 : 1e-3;
         requireEdit(grid.project(0.004, 2000, tolerance).converged, "edit fixture projection failed");
+
         const auto before = grid.download();
         auto expected = before;
         const Phase a = liquids ? Phase::Liquid : Phase::Gas;
@@ -102,6 +106,7 @@ template <class Grid> void materialEditingIsSparseAndReusable()
                 mass[i] = 0;
             for (auto& mass : expected.gas_mass)
                 mass[i] = 0;
+
             const auto& mixture = phase == Phase::Liquid ? grid.liquid_mixture : grid.gas_mixture;
             const auto found = std::find_if(mixture.components.begin(), mixture.components.end(),
                 [&](const MixtureComponent& component)
@@ -110,7 +115,6 @@ template <class Grid> void materialEditingIsSparseAndReusable()
             });
 
             auto& masses = phase == Phase::Liquid ? expected.liquid_mass : expected.gas_mass;
-
             masses[size_t(found - mixture.components.begin())][i] = Scalar(found->density * 6.25);
         };
 
@@ -127,16 +131,19 @@ template <class Grid> void materialEditingIsSparseAndReusable()
         paint(1, 6, a, shared);
         paint(4, 2, b, shared);
         requireEdit(edit.size() == 12 && sameEditState(grid.download(), before), "staging edits mutated the live grid");
+
         auto moved = std::move(edit);
         moved.commit();
         requireEdit(moved.empty() && sameEditState(grid.download(), expected),
             "sparse material replacement or last-write ordering failed");
+
         moved.commit();
         requireEdit(sameEditState(grid.download(), expected), "empty commit changed the state");
 
         moved.setCell(1, 1, a, shared);
         moved.clear();
         moved.commit();
+
         {
             auto abandoned = grid.beginEdit();
             abandoned.setCell(2, 2, b, shared);
@@ -190,6 +197,7 @@ template <class Grid> void materialEditingIsSparseAndReusable()
         fresh.applyGravity(0.004);
         requireEdit(grid.project(0.004, 2000, tolerance).converged && fresh.project(0.004, 2000, tolerance).converged,
             "post-edit projection failed");
+
         const auto cached = grid.download();
         const auto rebuilt = fresh.download();
         const double velocity_tolerance = std::is_same_v<Scalar, double> ? 1e-6 : 0.003;
@@ -216,12 +224,14 @@ template <class Grid> void bulkMaterialEditsPreserveEveryCell()
 
     grid.liquid_mixture.components = {{water, 100}};
     grid.gas_mixture.components = {{air, 0.125}};
+
     const size_t count = size_t(grid.width) * grid.height;
     typename Grid::State state;
     state.liquid_fraction.assign(count, 0);
     state.liquid_mass.assign(1, std::vector<Scalar>(count, 0));
     state.gas_mass.assign(1, std::vector<Scalar>(count, Scalar(0.125)));
     grid.upload(state);
+
     auto edit = grid.beginEdit();
     edit.reserve(count);
 
@@ -255,6 +265,7 @@ template <class Grid> void repeatedMaterialEditsPreservePhaseVolumes()
 
     grid.liquid_mixture.components = {{water, 100}};
     grid.gas_mixture.components = {{air, 0.1}};
+
     typename Grid::State initial;
     initial.liquid_fraction.resize(17 * 13);
     initial.liquid_mass.assign(1, std::vector<Scalar>(17 * 13));
@@ -281,8 +292,8 @@ template <class Grid> void repeatedMaterialEditsPreservePhaseVolumes()
 
     auto expected = totals(initial);
     auto edit = grid.beginEdit();
-
     edit.reserve(2);
+
     const double tolerance = std::is_same_v<Scalar, double> ? 1e-8 : 1e-3;
     const double budget = std::is_same_v<Scalar, double> ? 1e-9 : 2e-3;
 
@@ -299,6 +310,7 @@ template <class Grid> void repeatedMaterialEditsPreservePhaseVolumes()
             expected.first += 625.0 - before.liquid_mass[0][i];
             expected.second -= before.gas_mass[0][i];
             edit.setCell(x, y, Phase::Liquid, water);
+
             const size_t j = 11 * 17 + x;
             expected.first -= before.liquid_mass[0][j];
             expected.second += double(Scalar(0.625)) - before.gas_mass[0][j];
@@ -307,6 +319,7 @@ template <class Grid> void repeatedMaterialEditsPreservePhaseVolumes()
         }
 
         requireEdit(grid.step(1.0 / 120, 2000, tolerance).converged, "repeated-edit physics projection failed");
+
         const auto state = grid.download();
         const auto mass = totals(state);
         requireEdit(std::abs(mass.first - expected.first) < std::abs(expected.first) * budget &&

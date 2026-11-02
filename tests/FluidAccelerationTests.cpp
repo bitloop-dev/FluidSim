@@ -63,10 +63,12 @@ void uniformAndClear()
     original.gravity_y = supplied.gravity_y = 128;
     initialize(original);
     initialize(supplied);
+
     std::vector<float> values(32 * 24 * 2);
 
     for (size_t i = 1; i < values.size(); i += 2)
         values[i] = 128;
+
     FluidField cpu({32, 24, 1, {}, 2});
     cpu.write(values);
     supplied.setAccelerationField(cpu.upload(supplied.getWebGPUContext()));
@@ -107,6 +109,7 @@ void generationSubstepsAndResume()
     const std::array<float, 4> parameters[] = {{3, -2, 0, 0}};
 
     generator.generate(acceleration, parameters);
+
     FluidGridGPU generated(32, 24, 0.5), uploaded(32, 24, 0.5);
     generated.setWebGPUContext(context);
     generated.origin = uploaded.origin = {3, -2};
@@ -115,6 +118,7 @@ void generationSubstepsAndResume()
     initialize(generated);
     initialize(uploaded);
     generated.setAccelerationField(acceleration);
+
     std::vector<float> values(32 * 24 * 2);
 
     for (int y = 0; y < 24; ++y)
@@ -206,6 +210,7 @@ void mouseParametersAndValidation()
 
     require(first[centre] == 0 && first[centre + 1] == 0, "Mouse-centred acceleration is not zero");
     require(first[centre - 2] > 0 && first[centre + 2] < 0, "Attraction points away from the target");
+
     parameters[0][0] += 2;
     generator.generate(field, parameters);
 
@@ -261,25 +266,23 @@ void independentFieldsAndBinding()
         });
 
         auto alias = cpu;
-
         require(alias.values().data() == cpu.values().data(), "CPU handles do not share storage");
 
         auto gpu = cpu.upload(context);
-
         require(gpu.read() == cpu.read(), "Upload changed the field values");
 
         auto gpu_alias = gpu;
-
         require(detail::FluidFieldAccess::gpuField(gpu).buffer.Get() ==
                     detail::FluidFieldAccess::gpuField(gpu_alias).buffer.Get(),
             "GPU handle copy allocated another buffer");
+
         gpu.write(std::vector<float>(cpu.values().size(), -777.0f));
         generator.generate(gpu);
         const auto downloaded = gpu.download();
 
         require(cpu.read() == downloaded.read(), "Independent CPU/GPU generation or transfer changed samples");
-        alias.values()[0] = -99;
 
+        alias.values()[0] = -99;
         require(cpu.values()[0] == -99 && downloaded.values()[0] != -99 && gpu.read()[0] != -99,
             "Transfers failed to make independent copies");
     }
@@ -314,9 +317,11 @@ void independentFieldsAndBinding()
     rejectBinding(FluidField({16, 13, 1, {}, 2}, context));
     rejectBinding(FluidField({17, 13, 0.5, {}, 2}, context));
     rejectBinding(FluidField({17, 13, 1, {1, 0}, 2}, context));
+
     FluidWebGPUContext other_context;
     FluidField foreign(field.layout(), other_context);
     rejectBinding(foreign);
+
     bool rejected = false;
     try
     {
@@ -328,6 +333,7 @@ void independentFieldsAndBinding()
     }
 
     require(rejected, "Generator accepted a foreign device");
+
     rejected = false;
     try
     {
@@ -402,8 +408,8 @@ void cpuBindingAndClear()
 
     for (int i = 0; i < 5; ++i)
         advance();
-    gravity.gravity_y = 64;
 
+    gravity.gravity_y = 64;
     generateFluidField(field, [](bl::DVec2)
     {
         return std::array<float, 4>{0, 64, 0, 0};
@@ -411,6 +417,7 @@ void cpuBindingAndClear()
 
     for (int i = 0; i < 5; ++i)
         advance(); // Live updates, no rebind.
+
     supplied.clearAccelerationField();
     gravity.gravity_y = 128;
 
@@ -422,6 +429,7 @@ void cpuBindingAndClear()
     gravity.upload(gravity.download());
     gravity.gravity_y = 64;
     advance();
+
     supplied.destroy();
     gravity.gravity_y = 128;
     advance();
@@ -498,6 +506,7 @@ void uniformCpuGpuParity()
 
         require(c.converged && g.converged, "CPU/GPU acceleration parity projection failed");
         divergence = std::max({divergence, c.max_divergence, g.max_divergence});
+
         const auto a = cpu.download();
         const auto b = gpu.download();
         compare(a.liquid_fraction, b.liquid_fraction, fraction_error);
@@ -514,6 +523,7 @@ void uniformCpuGpuParity()
         {
             for (const auto f : state.liquid_fraction)
                 require(f >= -1e-6 && f <= 1.0 + 1e-6, "CPU/GPU field caused an out-of-range fraction");
+
             const double volume = std::accumulate(state.liquid_fraction.begin(), state.liquid_fraction.end(), 0.0);
             volume_drift = std::max(volume_drift, std::abs(volume / initial_volume - 1.0));
 
@@ -526,6 +536,7 @@ void uniformCpuGpuParity()
 
                 conservation_error = std::max(conservation_error, std::abs(new_mass / old_mass - 1.0));
             }
+
             for (int y = 0; y < cpu.height; ++y)
                 require(state.u[cpu.uIndex(0, y)] == 0 && state.u[cpu.uIndex(cpu.width, y)] == 0, "Open X wall");
             for (int x = 0; x < cpu.width; ++x)

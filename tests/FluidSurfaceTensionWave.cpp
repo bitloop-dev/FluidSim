@@ -58,6 +58,7 @@ void compareUniformBackends(const std::string& prefix)
     prepare(gpu, fluid::FluidDevice::GPU);
     std::cout << "paired wave: 96x72 dx=1 sigma=" << cpu.fluid.getSurfaceTension() << " gravity=" << cpu.gravity_y
               << " tolerance=" << cpu.projection_tolerance << std::endl;
+
     const auto initial = cpu.fluid.download();
     const double initial_volume = std::accumulate(initial.liquid_fraction.begin(), initial.liquid_fraction.end(), 0.0);
     std::vector<double> initial_mass;
@@ -90,6 +91,7 @@ void compareUniformBackends(const std::string& prefix)
                 worst_mass = std::max(worst_mass, std::abs(total / before - 1.0));
             }
         }
+
         for (size_t i = 0; i < state.liquid_fraction.size(); ++i)
         {
             const double f = state.liquid_fraction[i];
@@ -109,6 +111,7 @@ void compareUniformBackends(const std::string& prefix)
 
             worst_phase = std::max({worst_phase, std::abs(liquid - f), std::abs(gas - (1.0 - f))});
         }
+
         for (const auto* field : {&state.u, &state.v, &state.pressure})
         {
             for (const double value : *field)
@@ -117,6 +120,7 @@ void compareUniformBackends(const std::string& prefix)
                     throw std::runtime_error("Nonfinite paired-wave field");
             }
         }
+
         for (int y = 0; y < 72; ++y)
         {
             if (state.u[y * 97] != 0 || state.u[y * 97 + 96] != 0)
@@ -177,9 +181,11 @@ void compareUniformBackends(const std::string& prefix)
             velocity_max = std::max(velocity_max, std::abs(a.u[i] - b.u[i]));
         for (size_t i = 0; i < a.v.size(); ++i)
             velocity_max = std::max(velocity_max, std::abs(a.v[i] - b.v[i]));
+
         const double mean = fraction_sum / a.liquid_fraction.size();
         worst_fraction_mean = std::max(worst_fraction_mean, mean);
         worst_velocity = std::max(worst_velocity, velocity_max);
+
         csv << frame << ',' << mean << ',' << fraction_max << ',' << velocity_max << ',' << cpu_volume << ','
             << gpu_volume << ',' << cpu.frame_statistics.fluid_ms << ',' << gpu.frame_statistics.fluid_ms << ','
             << cpu.frame_statistics.substeps << '\n';
@@ -240,6 +246,7 @@ int main(int argc, char** argv)
         scene.setSurfaceTension(sigma);
         scene.mouse_attraction = !attraction.empty();
         scene.mouse_target = {scene.world_w * 0.5, scene.world_h * 0.55};
+
         const auto initial = scene.fluid.download();
         std::vector<double> masses;
 
@@ -330,6 +337,7 @@ int main(int argc, char** argv)
                         }
 
                         volume_error = std::max({volume_error, std::abs(lv - f), std::abs(gv - (1 - f))});
+
                         const double u = 0.5 * (state.u[y * (w + 1) + x] + state.u[y * (w + 1) + x + 1]);
                         const double v = 0.5 * (state.v[y * w + x] + state.v[(y + 1) * w + x]);
                         max_speed = std::max(max_speed, std::hypot(u, v));

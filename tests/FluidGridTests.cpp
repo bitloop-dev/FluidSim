@@ -124,6 +124,7 @@ void stateTransferPreservesCPUBehaviour()
         "CPU download omitted authoritative fields");
     require(state.liquid_mass == uploaded.liquid_mass && state.gas_mass == uploaded.gas_mass,
         "CPU download omitted component masses");
+
     uploaded.upload(initial);
     FluidGridCPU restarted(32, 24, 4);
     initializeTestMaterials(restarted);
@@ -505,6 +506,7 @@ void miscibleComponentsConserveMassAndVolume()
                     "component mass became negative or non-finite");
             }
         }
+
         for (size_t i = 0; i < count; ++i)
         {
             double occupied_fraction = 0.0;
@@ -583,6 +585,7 @@ void multigridPreservesPCGContract()
 
         for (int i = 0; i < count; ++i)
             combined[i] = 1.3 * a[i] - 0.7 * b[i];
+
         multigrid.apply(a, ma, 0.0);
         multigrid.apply(b, mb, 0.0);
         multigrid.apply(combined, mc, 0.0);
@@ -592,6 +595,7 @@ void multigridPreservesPCGContract()
         projectMean(ma);
         projectMean(mb);
         projectMean(mc);
+
         double error = 0.0;
         double scale = 0.0;
 
@@ -612,6 +616,7 @@ void multigridPreservesPCGContract()
             "multigrid is not symmetric");
         require(count == 1 ? energy_a == 0.0 : energy_a > 0.0 && energy_b > 0.0,
             "multigrid is not positive on mean-zero residuals");
+
         std::fill(a.begin(), a.end(), 7.0);
         multigrid.apply(a, ma, 7.0);
 
@@ -694,6 +699,7 @@ void parallelExecutionMatchesSerialOnOddGrid()
         serial.v[i] = std::cos(i * 0.017);
     initializeTestMaterials(serial);
     FluidGridCPU parallel = serial;
+
     const int previous_threads = int(bl::Thread::threadCount());
     bl::Thread::setMaxThreads(1);
     const auto a = serial.project(0.004, 2000, 1e-8);

@@ -54,6 +54,7 @@ void roundTrips(const fs::path& root)
 
         for (size_t i = 0; i < checkpoint.data.size(); ++i)
             checkpoint.data[i] = std::byte(kind == 1 ? i % 8 : random() & 255);
+
         for (int quality : {-1, 0, 1, 4, 6, 9, 11})
         {
             const auto path = root / (std::to_string(kind) + "-" + std::to_string(quality));
@@ -127,6 +128,7 @@ void imageRoundTrip(const fs::path& root)
 
     for (size_t i = 0; i < saved.checkpoint.data.size(); ++i)
         saved.checkpoint.data[i] = std::byte(i & 255);
+
     const auto payload = encodeFluidSnapshot(saved);
     const auto decoded = decodeFluidSnapshot(payload);
 
@@ -143,7 +145,6 @@ void imageRoundTrip(const fs::path& root)
     require(bl::webp_set_save_string_as_xmp_inplace(webp, payload), "Image XMP embedding failed");
 
     std::string extracted;
-
     require(
         bl::webp_extract_save_from_xmp(webp, extracted) && extracted == payload, "XMP extraction changed the packet");
 
@@ -154,6 +155,7 @@ void imageRoundTrip(const fs::path& root)
     require(image && width == 3 && height == 2 && std::equal(pixels.begin(), pixels.end(), image),
         "Native image pixels/orientation changed");
     WebPFree(image);
+
     fs::create_directories(root);
     const auto path = root / "round-trip.webp";
     {
@@ -231,7 +233,6 @@ void benchmark(const fs::path& source, const fs::path& output)
             });
 
             FluidCheckpoint loaded;
-
             const double load_ms = milliseconds([&]
             {
                 loaded = readFluidCheckpoint(bl::SimCheckpointReader(target));

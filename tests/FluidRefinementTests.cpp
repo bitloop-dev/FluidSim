@@ -180,6 +180,7 @@ void liquidTranslation()
 
     for (int step = 0; step < 8; ++step)
         grid.transport(0.25);
+
     fluid::FluidCellView view(grid.cellView());
 
     for (int y = 0; y < n; ++y)
@@ -216,6 +217,7 @@ void liquidSliverRoundoff()
 
     for (auto& mass : s.gas_mass)
         std::fill(mass.begin(), mass.end(), 0.1 * 5e-18);
+
     FluidGridAdaptive grid(n, n, 1.0, f.catalogue, liquid, f.mixture, {});
     grid.upload(s);
     const auto initial = grid.totals();
@@ -333,6 +335,7 @@ void transportTimeStep()
 
             for (auto& velocity : level.velocity)
                 velocity.multiply(0.25, 0, 1);
+
             const auto initial = grid.totals();
 
             for (int step = 0; step < 24; ++step)
@@ -420,6 +423,7 @@ void subcycledLiquidStep()
                 mass[i] *= 1.0 - fraction;
         }
     }
+
     for (const fluid::AmrLayout layout :
         {fluid::AmrLayout{}, fluid::AmrLayout{4, {{{8, 8, 48, 48}}, {{16, 16, 32, 32}}}}})
     {
@@ -1214,6 +1218,7 @@ void threeSizeSelection()
     require(
         view.at(96, 40).patch->scale == 4 && fineAt(p.proposeLayout(grid.finestWidth(), grid.finestHeight()), 96, 40),
         "Lookahead lost a finest request inside a 4x4 region");
+
     grid.upload(f.state(n, n, 0.0, false));
     p.reset();
 
@@ -1225,6 +1230,7 @@ void threeSizeSelection()
     }
 
     require(grid.layout() == fluid::AmrLayout{4, {}}, "Quiet nested patches must disappear without padding feedback");
+
     grid.upload(state);
     p.reset();
     p.update(grid.cellView(), {}, {}, 0, 0.4, 4);
@@ -1302,6 +1308,7 @@ void fourSizeSelection()
     require(
         view.at(112, 40).patch->scale == 8 && fineAt(p.proposeLayout(grid.finestWidth(), grid.finestHeight()), 112, 40),
         "Lookahead lost a finest request inside 8x8 cells");
+
     grid.upload(f.state(n, n, 0.0, false));
     p.reset();
 
@@ -1324,6 +1331,7 @@ void fourSizeSelection()
 
     for (int i = 0; i < 16; ++i)
         require(grid.step(0.016, 1e-9, 0.0, {0.1, -0.07}).projection.converged, "Four-level coupled transport failed");
+
     const auto totals = grid.totals();
 
     for (size_t k = 0; k < initial.ingredientMass.size(); ++k)
@@ -1407,6 +1415,7 @@ void deeperSelection()
                 }
             }
         }
+
         for (const auto& level : grid.levels())
         {
             level->velocity[0].setVal(10.0);
@@ -1419,6 +1428,7 @@ void deeperSelection()
         require(view.at(320, 88).patch->scale == maximum &&
                     fineAt(p.proposeLayout(grid.finestWidth(), grid.finestHeight()), 320, 88),
             "Finest lookahead request lost across deep levels");
+
         grid.upload(f.state(n, n, 0.0, false));
         p.reset();
 
@@ -1441,6 +1451,7 @@ void deeperSelection()
 
         for (int i = 0; i < 8; ++i)
             require(grid.step(0.016, 1e-9, 0.0, {0.1, -0.07}).projection.converged, "Deep coupled transport failed");
+
         const auto totals = grid.totals();
 
         for (size_t k = 0; k < initial.ingredientMass.size(); ++k)
@@ -1619,6 +1630,7 @@ void velocityRepresentationContract()
 
                 grid.regrid({scale, {}});
                 grid.regrid({child, {}});
+
                 double loss = 0.0;
                 double under = 0.0;
                 double interiorLoss = 0.0;
@@ -1833,6 +1845,7 @@ Measurement run(int n, int steps, double world, bool adaptive, bool health, doub
             p.update(grid.cellView(), tolerances, {}, (i + 1) * dt, 0.4, maxCellScale);
             auto layout = p.proposeLayout(grid.finestWidth(), grid.finestHeight());
             selection = elapsed(scan);
+
             const auto transfer = Clock::now();
             if (grid.regrid(std::move(layout)))
             {
@@ -2006,7 +2019,6 @@ int main(int argc, char** argv)
         }
         else
         {
-
             selectionTraceIsObservation();
             selectionTraceIsObservation(8);
             liquidTranslation();

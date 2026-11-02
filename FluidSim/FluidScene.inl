@@ -191,6 +191,7 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
 
 template <class Derived> void FluidScene<Derived>::refreshViscosityControls()
 {
+    elastic_material = fluid.hasElasticity();
     auto refresh = [&](const fluid::FluidMixture& mixture, std::vector<double>& values, std::vector<std::string>& names)
     {
         values.clear();
@@ -235,6 +236,9 @@ template <class Derived> void FluidScene<Derived>::setPressureRecoveryFrames(int
 
     if (frames > 0 && (fluid_device != fluid::FluidDevice::GPU || adaptive_mode != fluid::AdaptiveMode::DISABLED))
         throw std::invalid_argument("Pressure recovery requires uniform WebGPU");
+
+    if (frames > 0 && elastic_material)
+        throw std::invalid_argument("Elasticity currently requires incompressible pressure");
 
     const bool restart = (frames == 0) != (pressure_recovery_frames == 0);
     withFluidContext([&]
@@ -381,6 +385,7 @@ template <class Derived> void FluidScene<Derived>::sceneProcess(double dt)
                 frame_statistics.fluid_ms += std::chrono::duration<double, std::milli>(Clock::now() - started).count();
                 frame_statistics.stages.transport_ms += timings.transport_ms;
                 frame_statistics.stages.viscosity_ms += timings.viscosity_ms;
+                frame_statistics.stages.elasticity_ms += timings.elasticity_ms;
                 frame_statistics.stages.forces_ms += timings.forces_ms;
                 frame_statistics.stages.pressure_ms += timings.pressure_ms;
                 frame_statistics.stages.selection_ms += timings.selection_ms;
@@ -389,6 +394,8 @@ template <class Derived> void FluidScene<Derived>::sceneProcess(double dt)
                 frame_statistics.substeps += result.physical_steps;
                 frame_statistics.transport_steps += result.transport_steps;
                 frame_statistics.pressure_iterations += result.iterations;
+                frame_statistics.precision_limited_updates += int(result.precision_limited);
+                frame_statistics.max_divergence = std::max(frame_statistics.max_divergence, result.max_divergence);
                 frame_statistics.viscosity_iterations += result.viscosity_iterations;
 
                 frame_statistics.max_volume_error =
@@ -748,6 +755,8 @@ template <class Derived> void FluidScene<Derived>::traceFrame(SimTraceFrame& fra
     frame.metric("physics_substeps", frame_statistics.substeps);
     frame.metric("transport_substeps", frame_statistics.transport_steps);
     frame.metric("pressure_iterations", frame_statistics.pressure_iterations);
+    frame.metric("precision_limited_updates", frame_statistics.precision_limited_updates);
+    frame.metric("max_divergence", frame_statistics.max_divergence);
     frame.metric("viscosity_iterations", frame_statistics.viscosity_iterations);
     frame.metric("surface_tension", fluid.getSurfaceTension());
     frame.metric("phase_timings_available", frame_statistics.detailed);
@@ -756,6 +765,7 @@ template <class Derived> void FluidScene<Derived>::traceFrame(SimTraceFrame& fra
     {
         frame.metric("transport_ms", frame_statistics.stages.transport_ms);
         frame.metric("viscosity_ms", frame_statistics.stages.viscosity_ms);
+        frame.metric("elasticity_ms", frame_statistics.stages.elasticity_ms);
         frame.metric("forces_ms", frame_statistics.stages.forces_ms);
         frame.metric("projection_ms", frame_statistics.stages.pressure_ms);
         frame.metric("selection_ms", frame_statistics.stages.selection_ms);

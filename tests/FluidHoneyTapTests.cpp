@@ -45,6 +45,7 @@ void checkAtmosphere()
                                                             wave.fluid.getSubstances()[reference.substance].color,
                 "HoneyTap atmosphere properties differ from CrashingWave");
         }
+
         for (size_t i = 0; i < a.liquid_fraction.size(); ++i)
         {
             require(a.liquid_fraction[i] == 0.0 && a.liquid_mass[0][i] == 0.0, "Initial grid is not all atmosphere");
@@ -159,6 +160,7 @@ void checkBoundaryVelocities(const HoneyTap& scene, const fluid::FluidGrid::Stat
         for (int x = vent.opening.first; x < vent.opening.first + vent.opening.count; ++x)
             ceiling[x] = -float(vent.speed);
     }
+
     for (int x = 0; x < width; ++x)
     {
         require(state.v[x] == ceiling[x] && state.v[height * width + x] == 0.0,
@@ -246,6 +248,7 @@ void checkSourceAndRestore()
     require(
         scene.fluid.getLiquidMixture().components[0].dynamic_viscosity == project.config.settings.liquid_viscosities[0],
         "Configured honey viscosity missing");
+
     scene.beforeFluidFrame(scene.frame_time);
     checkBoundaryLayout(scene);
     const auto configured = scene.fluid.download();
@@ -254,6 +257,7 @@ void checkSourceAndRestore()
                 configured.gas_mass == initial.gas_mass && configured.pressure == initial.pressure,
         "Configuring the inlet replaced interior material or pressure");
     checkBoundaryVelocities(scene, configured);
+
     fluid::FluidCheckpoint pending, unchanged;
     scene.fluid.saveCheckpoint(pending);
     scene.beforeFluidFrame(scene.frame_time);
@@ -311,6 +315,7 @@ void checkSourceAndRestore()
     require(!scene.simulation_failed, "Live inlet controls failed");
     checkBoundaryLayout(scene);
     checkBoundaryVelocities(scene, scene.fluid.download());
+
     const auto settings = scene.captureSceneState();
     fluid::FluidCheckpoint saved, uninterrupted, resumed;
     scene.fluid.saveCheckpoint(saved);
@@ -320,6 +325,7 @@ void checkSourceAndRestore()
 
     require(!scene.simulation_failed, "Continuous live inlet failed");
     scene.fluid.saveCheckpoint(uninterrupted);
+
     std::cout << "Checking checkpoint continuation\n";
     scene.tap_width_percent = 25.0;
     scene.tap_speed = 0.0;
@@ -347,6 +353,7 @@ void checkSourceAndRestore()
     checkBoundaryVelocities(scene, closed);
 
     require(std::abs(honeyMass(closed) - before_close) < 1e-5 * before_close, "Zero speed still supplied honey");
+
     scene.tap_speed = 80.0;
     scene.restartSimulation();
 
@@ -418,12 +425,11 @@ void evolve(const fs::path& output, int frames, double speed = 20.0, double widt
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-    auto* window = SDL_CreateWindow("HoneyTap checks", 32, 32, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
 
+    auto* window = SDL_CreateWindow("HoneyTap checks", 32, 32, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
     require(window != nullptr, "GL window failed");
 
     auto context = SDL_GL_CreateContext(window);
-
     require(context != nullptr && gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress), "GL context failed");
 
     ImDebugLog log;
@@ -435,6 +441,7 @@ void evolve(const fs::path& output, int frames, double speed = 20.0, double widt
     project.startHeadless();
     auto& scene = *project.tap;
     scene.profile_stages = false;
+
     const int w = scene.grid_w;
     const int h = scene.grid_h;
     const double area = scene.cell_size * scene.cell_size;
@@ -495,6 +502,7 @@ void evolve(const fs::path& output, int frames, double speed = 20.0, double widt
             for (const double value : *field)
                 require(std::isfinite(value), "Nonfinite velocity/pressure");
         }
+
         for (int y = 0; y < h; ++y)
         {
             for (int x = 0; x < w; ++x)
@@ -564,6 +572,7 @@ void evolve(const fs::path& output, int frames, double speed = 20.0, double widt
     }
 
     require(final_bottom > 1.0, "Run did not reach floor accumulation; extend the behavior horizon");
+
     project.stopHeadless();
     SDL_GL_DestroyContext(context);
     SDL_DestroyWindow(window);

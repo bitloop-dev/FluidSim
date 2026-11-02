@@ -30,6 +30,9 @@ void FluidGridAdaptiveCPU::configureMaterials(
     if (liquid_mixture.hasViscosity() || gas_mixture.hasViscosity())
         throw std::invalid_argument("Viscosity requires uniform WebGPU");
 
+    if (liquid_mixture.hasElasticity() || gas_mixture.hasElasticity())
+        throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
+
     substances = std::move(catalogue);
     liquid = std::move(liquid_mixture);
     gas = std::move(gas_mixture);
@@ -56,6 +59,9 @@ const FluidGridAdaptive& FluidGridAdaptiveCPU::native() const
 
 void FluidGridAdaptiveCPU::upload(const State& state)
 {
+    if (!state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty())
+        throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
+
     // Start fully resolved. The existing selector may subsequently release quiet gas.
     auto initialized =
         std::make_unique<FluidGridAdaptive>(width, height, cell_size, substances, liquid, gas, AmrLayout{});

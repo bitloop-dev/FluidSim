@@ -275,6 +275,7 @@ void breakdownCase(fluid::webgpu::Compute& compute)
         upload(compute, coefficients[d], beta[d]);
     gpu.setCoefficients(coefficients);
     cpu.setCoefficients(beta);
+
     auto expected = initial;
     auto reference = cpu.solve(expected, rhs, 1.0e-3, 30);
     auto status = gpu.solve(pressure, forcing, 1.0e-3, 30);
@@ -364,11 +365,13 @@ void waveCase(fluid::webgpu::Compute& compute, bool mixed = false)
         upload(compute, coefficients[d], beta[d]);
     gpu.setCoefficients(coefficients);
     cpu.setCoefficients(beta);
+
     auto result = gpu.solve(pressure, forcing, 1.0e-3, 2000);
     auto values = download(compute, gpu, pressure);
     gpu.fluxes(flux, pressure);
     auto fx = download(compute, gpu, flux[0]);
     auto fy = download(compute, gpu, flux[1]);
+
     double divergence = 0.0;
     double minimum = 0.0;
     double maximum = 0.0;
@@ -394,6 +397,7 @@ void waveCase(fluid::webgpu::Compute& compute, bool mixed = false)
     std::cout << "wave512,mixed=" << mixed << ",iterations=" << result.iterations << ",residual=" << result.residual
               << ",converged=" << result.converged << ",divergence=" << divergence << ",pressure_min=" << minimum
               << ",pressure_max=" << maximum << std::endl;
+
     auto expected = cpu.makeField();
     auto reference = cpu.solve(expected, rhs, 1.0e-3, 2000);
     auto rounded = expected;
@@ -504,6 +508,7 @@ void runCase(fluid::webgpu::Compute& compute, int n, int kind, double contrast, 
         upload(compute, coefficients[d], beta[d]);
     cpu.setCoefficients(beta);
     gpu.setCoefficients(coefficients);
+
     cpu.apply(result, phi);
     gpu.apply(output, input);
     auto actual = download(compute, gpu, output);
@@ -619,6 +624,7 @@ void runCase(fluid::webgpu::Compute& compute, int n, int kind, double contrast, 
         require(status.converged, "GPU pressure solve did not meet its requested tolerance");
         if (!multigrid && n == 128 && kind == 6)
             require(status.iterations > 30, "Restart fixture did not exercise a GMRES restart");
+
         gpu.fluxes(gpuFlux, solved);
         auto fx = download(compute, gpu, gpuFlux[0]);
         auto fy = download(compute, gpu, gpuFlux[1]);
@@ -697,6 +703,7 @@ void runCase(fluid::webgpu::Compute& compute, int n, int kind, double contrast, 
 
     require(difference(gpu.topology(), download(compute, gpu, output), result, true) < 3.0e-6,
         "GPU coefficient refresh left stale operator state");
+
     cpu.precondition(result, rhs, false);
     gpu.precondition(output, forcing, false);
 

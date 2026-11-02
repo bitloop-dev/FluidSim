@@ -200,6 +200,28 @@ void FluidGridCPU::upload(const State& state)
     if (liquid_mixture.hasViscosity() || gas_mixture.hasViscosity())
         throw std::invalid_argument("Viscosity requires uniform WebGPU");
 
+    if (gas_mixture.hasElasticity() ||
+        (liquid_mixture.hasElasticity() &&
+            (liquid_mixture.components.size() != 1 || liquid_mixture.components.front().shear_modulus <= 0.0 ||
+                width < 2 || height < 2)))
+    {
+        throw std::invalid_argument("CPU elasticity requires one elastic condensed ingredient and a grid at least 2x2");
+    }
+
+    if (!liquid_mixture.hasElasticity() &&
+        (!state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty()))
+    {
+        throw std::invalid_argument("Elastic history requires an elastic material");
+    }
+
+    if (liquid_mixture.hasElasticity())
+    {
+        elasticity.emplace(width, height, cell_size, liquid_mixture.components.front().shear_modulus);
+        elasticity->upload(state);
+    }
+    else
+        elasticity.reset();
+
     const size_t cell_count = size_t(width) * height;
 
     auto assign = [](std::vector<double>& field, const std::vector<double>& values, size_t count)
@@ -252,6 +274,9 @@ void FluidGridCPU::upload(const State& state)
 
 void FluidGridCPU::commitEdits(detail::CellEditBatch& batch)
 {
+    if (elasticity && !batch.cells.empty())
+        throw std::invalid_argument("Elastic material replacement requires reinitializing its reference configuration");
+
     if (batch.velocity)
         throw std::invalid_argument("Material edit velocity requires uniform WebGPU");
 
@@ -294,7 +319,10 @@ void FluidGridCPU::invalidateCaches()
 
 FluidGridCPU::State FluidGridCPU::download() const
 {
-    return {liquid_fraction, u, v, pressure, liquid_mass, gas_mass};
+    State state{liquid_fraction, u, v, pressure, liquid_mass, gas_mass};
+    if (elasticity)
+        elasticity->download(state);
+    return state;
 }
 
 FluidGridCPU::ProjectionResult FluidGridCPU::step(
@@ -328,32 +356,67 @@ FluidGridCPU::ProjectionResult FluidGridCPU::step(
     ProjectionResult result;
     result.physical_steps = 0;
 
+    if (elasticity)
+    {
+        elasticity->rebuildStress(liquid_fraction);
+        if (timings)
+            timings->elasticity_ms += elapsed();
+    }
+
     for (int i = 0; i < count; ++i)
     {
-        // Each capillary subdivision advances transport, forces and projection together.
-        advect(step);
-        if (timings)
-            timings->transport_ms += elapsed();
+        double remaining = step;
+        do
+        {
+            double physical_step = remaining;
+            if (elasticity)
+            {
+                rebuildPressureCoefficients();
+                physical_step = std::min(physical_step, elasticity->stepLimit(inv_density_u, inv_density_v));
 
-        applyAcceleration(step);
-        if (tension)
-            applySurfaceTension(step);
+                if (!(physical_step > 0.0) || remaining - physical_step == remaining)
+                    throw std::runtime_error("Elastic stability limit cannot advance this timestep");
 
-        if (timings)
-            timings->forces_ms += elapsed();
+                if (timings)
+                    timings->elasticity_ms += elapsed();
+            }
 
-        const auto projection = project(step, max_iterations, divergence_tolerance);
+            // Each stability subdivision advances transport, forces and projection together.
+            advect(physical_step);
+            if (timings)
+                timings->transport_ms += elapsed();
 
-        if (timings)
-            timings->pressure_ms += elapsed();
+            if (elasticity)
+            {
+                elasticity->rebuildStress(liquid_fraction);
+                rebuildPressureCoefficients();
+                elasticity->applyForces(physical_step, u, v, inv_density_u, inv_density_v);
+                if (timings)
+                    timings->elasticity_ms += elapsed();
+            }
 
-        result.iterations += projection.iterations;
-        result.max_divergence = projection.max_divergence;
-        result.converged = projection.converged;
-        ++result.physical_steps;
+            applyAcceleration(physical_step);
+            if (tension)
+                applySurfaceTension(physical_step);
 
-        if (!result.converged)
-            break;
+            if (timings)
+                timings->forces_ms += elapsed();
+
+            const auto projection = project(physical_step, max_iterations, divergence_tolerance);
+
+            if (timings)
+                timings->pressure_ms += elapsed();
+
+            result.iterations += projection.iterations;
+            result.max_divergence = projection.max_divergence;
+            result.converged = projection.converged;
+            ++result.physical_steps;
+
+            if (!result.converged)
+                return result;
+
+            remaining -= physical_step;
+        } while (remaining > 0.0);
     }
 
     return result;
@@ -375,6 +438,9 @@ void FluidGridCPU::advect(double dt)
             {
                 const double outflow = std::max(horizontal[x + 1], 0.0) + std::max(-horizontal[x], 0.0) +
                                        std::max(vertical[x + width], 0.0) + std::max(-vertical[x], 0.0);
+                if (!std::isfinite(outflow))
+                    return std::numeric_limits<double>::infinity();
+
                 maximum = std::max(maximum, outflow);
             }
         }
@@ -385,6 +451,9 @@ void FluidGridCPU::advect(double dt)
         return std::max(a, b);
     }, width);
 
+    if (!std::isfinite(max_outflow))
+        throw std::runtime_error("Non-finite velocity prevents conservative material transport");
+
     // Limit transport so no cell exports more than half its volume per substep.
     const double max_step = max_outflow > 0.0 ? 0.5 * cell_size / max_outflow : dt;
 
@@ -393,14 +462,21 @@ void FluidGridCPU::advect(double dt)
     while (remaining > 0.0)
     {
         const double step = std::min(remaining, max_step);
+        if (!(step > 0.0) || remaining - step == remaining)
+            throw std::runtime_error("Material transport limit cannot advance this timestep");
+
         const double scale = step / cell_size;
 
         // keep the same correction weights throughout both directional passes
         freezeComponentCorrections();
+        if (elasticity)
+            elasticity->deform(step, liquid_fraction, u, v);
 
         // reconstruct the current interface before horizontal transport
         rebuildInterfaces();
         rebuildTransfersX(step);
+        if (elasticity)
+            elasticity->advect(step, true, u, liquid_fraction, liquid_transfer_u, split_weights);
         advectComponents(step, true);
         advectMomentumX(step, u);
 
@@ -431,6 +507,8 @@ void FluidGridCPU::advect(double dt)
         // horizontal transport changed the fractions, so reconstruct before vertical transport
         rebuildInterfaces();
         rebuildTransfersY(step);
+        if (elasticity)
+            elasticity->advect(step, false, v, liquid_fraction, liquid_transfer_v, split_weights);
         advectComponents(step, false);
         advectMomentumY(step, v);
 
@@ -1599,8 +1677,7 @@ double FluidGridCPU::applyPressureOperator(const std::vector<double>& input, std
 
 FluidGridCPU::ResidualStats FluidGridCPU::updatePressureAndResidual(double alpha)
 {
-    auto stats = reduceBatches(int(pressure.size()),
-        [&](int first, int last)
+    auto stats = reduceBatches(int(pressure.size()), [&](int first, int last)
     {
         double sums[4] = {};
         double maxima[4] = {};
@@ -1644,7 +1721,8 @@ FluidGridCPU::ResidualStats FluidGridCPU::rebuildPressureResidual()
 {
     applyPressureOperator(pressure, pressure_product);
 
-    auto stats = reduceBatches(int(pressure.size()), [&](int first, int last)
+    auto stats = reduceBatches(int(pressure.size()),
+        [&](int first, int last)
     {
         double sums[4] = {};
         double maxima[4] = {};

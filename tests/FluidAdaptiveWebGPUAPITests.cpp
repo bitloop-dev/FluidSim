@@ -49,6 +49,7 @@ struct Fixture
     {
         grid.configureMaterials(substances, liquid, gas);
         grid.setGravityY(0.0);
+
         const int w = grid.getWidth();
         const int h = grid.getHeight();
         const double area = grid.getCellSize() * grid.getCellSize();
@@ -151,6 +152,7 @@ void manualParity()
         FluidGridAdaptiveGPU raw(32, 32, 1.0, f.substances, f.liquid, f.gas, {});
         raw.upload(initial);
         compareNative(raw, backend.native());
+
         auto before = api.download();
         api.step(0.0, 2000, 1e-3);
 
@@ -167,6 +169,7 @@ void manualParity()
         }
 
         compareNative(raw, backend.native());
+
         std::vector<float> pixels(32 * 32 * 4);
         auto* storage = pixels.data();
         api.writeColorPixels(pixels);
@@ -174,8 +177,8 @@ void manualParity()
         require(pixels == raw.colorPixels() && storage == pixels.data(),
             "Common adaptive colour output differs or discards caller storage");
         compareNative(raw, backend.native());
-        auto raster = api.download();
 
+        auto raster = api.download();
         require(
             raster.u.size() == 33 * 32 && raster.v.size() == 32 * 33, "Adaptive common raster dimensions incorrect");
 
@@ -209,9 +212,11 @@ void manualParity()
 
         for (int k = 0; k < nc; ++k)
             rho += oldQ[at + k * patch.plane];
+
         auto flowingEdit = api.beginEdit();
         flowingEdit.setCell(7, 8, Phase::Gas, 1);
         flowingEdit.commit();
+
         const auto newQ = backend.native().commands().read(level.conserved);
         const double replacement = float(f.gas.components[1].density);
 
@@ -228,8 +233,8 @@ void manualParity()
             "Fine edit changed projected faces or pressure history");
 
         const auto failed = api.step(0.1, 0, 1e-12);
-
         require(!failed.converged && failed.iterations == 0, "Adaptive WebGPU ignored caller iteration cap");
+
         api.destroy();
         api.upload(initial);
 
@@ -290,6 +295,7 @@ void automaticParity(const std::filesystem::path& path)
     FluidGridAdaptiveGPU raw(96, 96, 1.0, f.substances, f.gas, {});
 
     raw.upload(initial);
+
     FluidCoarseningGPU selection;
     double time = 0.0;
     double next = 0.0;
@@ -348,6 +354,7 @@ void automaticParity(const std::filesystem::path& path)
                          1.0) < 1e-10,
             "Reconstructed common raster changed native ingredient mass");
     }
+
     for (size_t i = 0; i < 96 * 96; ++i)
     {
         for (int channel = 0; channel < 3; ++channel)
@@ -386,6 +393,7 @@ void editsAndModes()
     edit.setCell(4, 4, Phase::Gas, 0);
     edit.setCell(4, 4, Phase::Liquid, 2);
     edit.commit();
+
     const auto state = api.download();
     const int i = 4 * 96 + 4;
 
@@ -394,10 +402,10 @@ void editsAndModes()
         "Adaptive GPU finest-cell replacement or duplicate ordering failed");
 
     const auto after = backend.native().totals().ingredientMass;
-
     require(std::abs(after[0] - before[0] - 625.0) < 1e-6 && std::abs(after[1] - before[1] + 0.3125) < 1e-6 &&
                 std::abs(after[2] - before[2] + 0.3125) < 1e-6,
         "Adaptive GPU edit changed unselected material budget");
+
     edit.setCell(3, 3, Phase::Gas, 0);
     edit.setCell(-1, 3, Phase::Gas, 0);
     bool rejected = false;
@@ -411,8 +419,8 @@ void editsAndModes()
     }
 
     require(rejected && edit.size() == 2 && same(state, api.download()), "Adaptive GPU invalid batch was not atomic");
-    backend.setGravityY(100.0);
 
+    backend.setGravityY(100.0);
     require(api.step(0.02, 2000, 1e-3).converged && backend.native().totals().finite,
         "Edited liquid could not evolve under gravity");
 
@@ -434,6 +442,7 @@ void editsAndModes()
         auto frozen = grid.getAdaptiveSettings();
         frozen.automatic_refinement = false;
         grid.setAdaptiveSettings(frozen);
+
         auto old = common.download();
         grid.setDevice(FluidDevice::GPU);
         grid.setAdaptiveMode(mode);
@@ -441,8 +450,8 @@ void editsAndModes()
         require(same(old, common.download()), "Same GPU/MAX selection reset state");
 
         FluidGrid moved = std::move(grid);
-
         require(moved.step(0.02, 2000, 1e-3).converged, "Moved adaptive GPU wrapper lost policy dispatch");
+
         moved.destroy();
         moved.setAdaptiveMode(AdaptiveMode::DISABLED);
         gas.configure(moved, false);

@@ -8,6 +8,7 @@ namespace fluid::test
 template <class Grid> void uploadTestMaterials(Grid& grid, typename Grid::State state)
 {
     using Scalar = typename Grid::Scalar;
+
     if (grid.substances.size() == 0)
     {
         const auto water = grid.substances.add({"Water", {0.0f, 0.0f, 1.0f}});
@@ -15,6 +16,7 @@ template <class Grid> void uploadTestMaterials(Grid& grid, typename Grid::State 
         grid.liquid_mixture.components = {{water, 100.0}};
         grid.gas_mixture.components = {{air, 0.1}};
     }
+
     if (state.liquid_mass.empty() && state.gas_mass.empty())
     {
         const size_t count = state.liquid_fraction.size();

@@ -146,6 +146,7 @@ void projectionAndAPI()
                 "coarse zero-time step changed state");
             require(!coarse.project(0.01, 0, 1e-3).converged, "coarse zero iteration cap ignored");
             require(coarse.project(0.01, 1, 1e-6).iterations <= 1, "coarse exceeded its pressure iteration cap");
+
             coarse.upload(state);
             auto result = coarse.project(0.01, 2000, 1e-3);
             if (!result.converged)
@@ -243,6 +244,7 @@ void benchmark(int size, int history, bool paired)
         std::vector<int> cutoffs = paired ? std::vector<int>{0, 1024} : std::vector<int>{0, 16, 64, 256, 1024, 4096};
         if (repeat % 2)
             std::reverse(cutoffs.begin(), cutoffs.end());
+
         for (int cutoff : cutoffs)
         {
             FluidGridWebGL grid(size, size, 4);
@@ -252,6 +254,7 @@ void benchmark(int size, int history, bool paired)
 
             for (int tick = 0; tick < 5; ++tick)
                 require(grid.step(0.004, 2000).converged, "benchmark warmup failed");
+
             glFinish();
             const auto start = std::chrono::steady_clock::now();
             int iterations = 0;

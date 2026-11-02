@@ -41,6 +41,7 @@ FluidGridGPU::State filled(const FluidGridGPU& grid, Phase phase, BoundarySide s
     state.gas_mass.assign(5, std::vector<float>(n));
     auto& masses = phase == Phase::Liquid ? state.liquid_mass : state.gas_mass;
     masses[4].assign(n, float((phase == Phase::Liquid ? 14.0 : 0.1) * grid.cell_size * grid.cell_size));
+
     const float signed_speed = (int(side) % 2) ? -speed : speed;
     state.u.assign((grid.width + 1) * grid.height, int(side) < 2 ? signed_speed : 0.0f);
     state.v.assign(grid.width * (grid.height + 1), int(side) < 2 ? 0.0f : signed_speed);
@@ -58,6 +59,7 @@ void uniformThroughflow(BoundarySide side, Phase phase, int width, int height)
 
     for (int i = 0; i < 8; ++i)
         require(grid.step(0.02, -1, 1e-4).accepted(), "Uniform viscous throughflow projection failed");
+
     const auto state = grid.download();
     double error = 0.0;
 
@@ -79,6 +81,7 @@ void displacement(BoundarySide side, Phase phase, bool relaxed)
     grid.setPressureRecoveryTime(relaxed ? 0.1 : 0.0);
     grid.setBoundaryFlows(through(grid, side, phase, 2.0));
     grid.upload(filled(grid, phase == Phase::Liquid ? Phase::Gas : Phase::Liquid, side, 2.0f));
+
     const int cross_section = int(side) < 2 ? grid.height : grid.width;
     const int length = int(side) < 2 ? grid.width : grid.height;
     const double area = grid.cell_size * grid.cell_size;
@@ -122,6 +125,7 @@ void configurationAndResume()
     FluidGridGPU grid(16, 12, 1.0);
     materials(grid, 1000.0);
     grid.upload(filled(grid, Phase::Gas, BoundarySide::Top, 0.0f));
+
     const BoundaryFlows flows{{{{BoundarySide::Top, 6, 4}, Phase::Liquid, 4, 2.0}},
         {{{BoundarySide::Top, 0, 6}, 2.0 / 3.0}, {{BoundarySide::Top, 10, 6}, 2.0 / 3.0}}};
     grid.setBoundaryFlows(flows);
@@ -175,14 +179,15 @@ void configurationAndResume()
     edit.commit(bl::DVec2{50, 50});
 
     require(grid.download().v[7] == 2.0f && grid.getBoundaryFlows() == flows, "Cell edit changed prescribed inlet");
-    grid.setBoundaryFlows({});
 
+    grid.setBoundaryFlows({});
     require(grid.step(0.02, -1, 1e-3).accepted(), "Closing boundary failed");
 
     const auto closed = grid.download();
 
     for (int x = 0; x < grid.width; ++x)
         require(closed.v[x] == 0.0, "Cleared opening remains open");
+
     FluidGrid cpu(16, 12, 1.0);
     rejected = false;
     try
@@ -219,6 +224,7 @@ void mixedOutflow(BoundarySide side)
 
     for (int k = 0; k < 5; ++k)
         expected[k] = std::accumulate(state.liquid_mass[k].begin(), state.liquid_mass[k].end(), 0.0);
+
     const int count = int(side) < 2 ? grid.height : grid.width;
 
     for (int step = 0; step < 200; ++step)

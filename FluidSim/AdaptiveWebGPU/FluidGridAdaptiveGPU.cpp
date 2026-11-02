@@ -949,6 +949,12 @@ FluidGridAdaptiveGPU::~FluidGridAdaptiveGPU()
 
 void FluidGridAdaptiveGPU::upload(const State& state, double tolerance)
 {
+    if (materialMixture().hasElasticity() || gasMixture().hasElasticity() ||
+        !state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty())
+    {
+        throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
+    }
+
     auto& g = *impl;
     if (!g.liquidComponents && std::any_of(state.liquid_fraction.begin(), state.liquid_fraction.end(), [](double v)
     {

@@ -253,6 +253,7 @@ void zeroAndRotation(Compute& compute)
         error = std::max(error, std::abs(double(value.v[i] - old.v[i])));
 
     require(error < 3e-5, "Symmetric stress damped rigid rotation inside the viscous region");
+
     std::fill(value.u.begin(), value.u.end(), 0.0f);
     std::fill(value.v.begin(), value.v.end(), 0.0f);
     fixture.upload(value);
@@ -331,6 +332,7 @@ void iterationLimit(Compute& compute)
 
     require(iterations > 1 && residual(old, value, 0.02) < 1.8e-4,
         "Default viscosity solve did not continue to the original accuracy");
+
     fixture.upload(old);
     auto invalid = old.u;
     invalid[value.ui(5, 5)] = std::numeric_limits<float>::quiet_NaN();
@@ -423,10 +425,12 @@ void benchmark(Compute& compute)
         for (int repeat = 0; repeat < 13; ++repeat)
         {
             fixture.upload(value);
+
             const auto start = Clock::now();
             const int count = fixture.solver.solve(fixture.u, fixture.v, fixture.material, 0.01, 1.0);
             compute.read(fixture.u, 0, sizeof(float));
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+
             if (repeat > 0)
             {
                 total += ms;

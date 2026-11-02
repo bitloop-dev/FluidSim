@@ -17,6 +17,11 @@ template <typename Scalar> struct FluidGridState
 
     std::vector<std::vector<Scalar>> liquid_mass;
     std::vector<std::vector<Scalar>> gas_mass;
+
+    // Symmetric log(B), B = F F^T, carried by condensed material. All empty means relaxed.
+    std::vector<Scalar> elastic_log_xx;
+    std::vector<Scalar> elastic_log_xy;
+    std::vector<Scalar> elastic_log_yy;
 };
 
 template <typename To, typename From> FluidGridState<To> convertFluidState(const FluidGridState<From>& source)
@@ -34,6 +39,9 @@ template <typename To, typename From> FluidGridState<To> convertFluidState(const
     copy(result.u, source.u);
     copy(result.v, source.v);
     copy(result.pressure, source.pressure);
+    copy(result.elastic_log_xx, source.elastic_log_xx);
+    copy(result.elastic_log_xy, source.elastic_log_xy);
+    copy(result.elastic_log_yy, source.elastic_log_yy);
 
     result.liquid_mass.resize(source.liquid_mass.size());
     result.gas_mass.resize(source.gas_mass.size());
@@ -54,6 +62,7 @@ struct FluidStepTimings
     double pressure_ms = 0;
     double selection_ms = 0;
     double regrid_ms = 0;
+    double elasticity_ms = 0;
 };
 
 struct FluidProjectionResult
@@ -72,7 +81,10 @@ struct FluidProjectionResult
     double rms_volume_error = 0.0;
     int viscosity_iterations = 0; // Dispatched slots; convergence is observed in batches of four.
 
-    bool accepted() const { return converged || relaxed; }
+    // Requested divergence is exceeded only within local face-velocity rounding error.
+    bool precision_limited = false;
+
+    bool accepted() const { return converged || relaxed || precision_limited; }
 };
 
 }

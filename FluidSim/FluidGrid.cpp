@@ -39,6 +39,9 @@ void FluidGrid::selectBackend(FluidDevice value, AdaptiveMode mode)
     if (initialized)
         throw std::logic_error("Destroy the initialized grid before changing its device or adaptive mode");
 
+    if (hasElasticity() && mode != AdaptiveMode::DISABLED)
+        throw std::invalid_argument("Elasticity requires a uniform grid");
+
     if (hasViscosity() && (value != FluidDevice::GPU || mode != AdaptiveMode::DISABLED))
         throw std::invalid_argument("Set material viscosities to zero before leaving uniform WebGPU");
 
@@ -131,6 +134,12 @@ bool FluidGrid::requiresRenderThread() const
 
 void FluidGrid::configureMaterials(SubstanceCatalogue substances, FluidMixture liquid, FluidMixture gas)
 {
+    if ((liquid.hasElasticity() || gas.hasElasticity()) &&
+        adaptive_mode != AdaptiveMode::DISABLED)
+    {
+        throw std::invalid_argument("Elasticity requires a uniform grid");
+    }
+
     if ((liquid.hasViscosity() || gas.hasViscosity()) &&
         (device != FluidDevice::GPU || adaptive_mode != AdaptiveMode::DISABLED))
     {

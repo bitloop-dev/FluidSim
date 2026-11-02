@@ -90,6 +90,7 @@ void checkInitialState()
 
             require(std::abs(mass / component.density - expected_volume) < 1e-9, "Incorrect square volume");
         }
+
         for (int y = 0; y < size.y; ++y)
         {
             for (int x = 0; x < size.x; ++x)
@@ -107,6 +108,7 @@ void checkInitialState()
                 const double top = 0.9 * (size.y - side);
                 if (blue + red > 0.0)
                     require(y + 1 > top && y < top + side, "Squares changed their vertical placement");
+
                 const double gas =
                     state.gas_mass[0][i] / gas_components[0].density + state.gas_mass[1][i] / gas_components[1].density;
 
@@ -144,12 +146,11 @@ template <class Scenario> void evolve(const fs::path& output, int frames)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-    auto* window = SDL_CreateWindow("SplashCubes checks", 32, 32, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
 
+    auto* window = SDL_CreateWindow("SplashCubes checks", 32, 32, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
     require(window != nullptr, "GL window failed");
 
     auto context = SDL_GL_CreateContext(window);
-
     require(context != nullptr && gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress), "GL context failed");
 
     ImDebugLog log;
@@ -223,6 +224,7 @@ template <class Scenario> void evolve(const fs::path& output, int frames)
             for (const double value : *field)
                 require(std::isfinite(value), "Nonfinite velocity/pressure");
         }
+
         for (int y = 0; y < scene.grid_h; ++y)
         {
             for (int x = 0; x < scene.grid_w; ++x)
@@ -247,6 +249,7 @@ template <class Scenario> void evolve(const fs::path& output, int frames)
                 centre_y += f * (y + 0.5);
                 if (y == scene.grid_h - 1)
                     bottom += f;
+
                 const double u = 0.5 * (state.u[y * (scene.grid_w + 1) + x] + state.u[y * (scene.grid_w + 1) + x + 1]);
                 const double v = 0.5 * (state.v[y * scene.grid_w + x] + state.v[(y + 1) * scene.grid_w + x]);
                 max_speed = std::max(max_speed, std::hypot(u, v));
@@ -267,6 +270,7 @@ template <class Scenario> void evolve(const fs::path& output, int frames)
     }
 
     require(reached_floor && mixed > 1.0, "Run did not reach impact and mixing");
+
     project.stopHeadless();
     SDL_GL_DestroyContext(context);
     SDL_DestroyWindow(window);

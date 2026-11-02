@@ -32,6 +32,7 @@ FluidGridGPU::State disk(
         cx = w * 0.5 + 0.13;
     if (cy < 0)
         cy = h * 0.5 - 0.29;
+
     FluidGridGPU::State state;
     state.liquid_fraction.resize(size_t(w) * h);
 
@@ -117,6 +118,7 @@ template <class Grid> void flat()
 
         for (int i = 0; i < 8; ++i)
             require(grid.step(0.005, 2000, 1e-4).converged, "Flat capillary projection failed");
+
         const auto after = grid.download();
 
         require(after.liquid_fraction == before.liquid_fraction && maximumSpeed(after) == 0,
@@ -228,6 +230,7 @@ void geometryParity()
             compute.run(kernels.curvature, {&raw}, {{"liquid", &liquid}, {"height_field", &heights}}, settings);
             compute.run(kernels.complete, {&completed}, {{"liquid", &liquid}, {"raw_curvature", &raw}}, settings);
             const auto gpu = compute.read(completed);
+
             const std::vector<double> values(state.liquid_fraction.begin(), state.liquid_fraction.end());
             FluidSurfaceTensionCPU cpu(w, h);
 
@@ -249,6 +252,7 @@ void geometryParity()
                 for (int x = 0; x < w; ++x)
                     cpu.completeCurvature(x, y);
             }
+
             for (size_t i = 0; i < values.size(); ++i)
             {
                 require(cpu.curvature[i].valid == (gpu[2 * i + 1] != 0), "CPU/GPU curvature validity differs");
@@ -271,6 +275,7 @@ void subdivisionAndResume()
     const auto state = disk(32, 32, 6, false, -1, -1, 1.1);
     test::uploadTestMaterials(a, state);
     test::uploadTestMaterials(b, state);
+
     const double dt = 0.025;
     const int count = int(std::ceil(dt / a.capillaryStepLimit()));
     FluidStepTimings timings;
@@ -405,6 +410,7 @@ void cpuIntegration()
     }
 
     require(rejected && automatic.getSurfaceTension() == 0, "Invalid CPU tension changed the coefficient");
+
     automatic.setSurfaceTension(40000);
     const auto failed = automatic.step(0.025, 0, 1e-12);
 
@@ -470,6 +476,7 @@ template <class Grid> void deformationAndMotion()
 
     for (int i = 0; i < 80; ++i)
         require(ellipse.step(0.005, 2000, 0.001).converged, "Deforming droplet projection failed");
+
     const auto state = ellipse.download();
     const auto after = moments(state, 48);
     health(state, mass);
@@ -513,6 +520,7 @@ template <class Grid> void deformationAndMotion()
 
     for (int i = 0; i < 200; ++i)
         require(moving.step(0.005, 2000, 0.001).converged, "Moving droplet projection failed");
+
     const auto moved = moving.download();
     health(moved, moving_mass);
     const auto location = moments(moved, 96);

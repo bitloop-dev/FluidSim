@@ -31,6 +31,7 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
                 FluidGrid grid(64, 48, 0.5);
                 grid.setDevice(device);
                 grid.setAdaptiveMode(mode);
+
                 SubstanceCatalogue substances;
                 FluidMixture liquid;
                 FluidMixture gas;
@@ -39,6 +40,7 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
                     liquid.components.push_back({substances.add({"Liquid", {0.1f, 0.35f, 1.0f}}), 10.0 + k});
                 gas.components.push_back({substances.add({"Gas", {0.015f, 0.025f, 0.06f}}), 0.1});
                 grid.configureMaterials(substances, liquid, gas);
+
                 FluidGrid::State state;
                 state.liquid_fraction.assign(64 * 48, 0.37);
 
@@ -46,6 +48,7 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
                     state.liquid_mass.emplace_back(64 * 48, 0.37 * ingredient.density * 0.25 / count);
                 state.gas_mass.emplace_back(64 * 48, 0.63 * 0.1 * 0.25);
                 grid.upload(state);
+
                 const auto before = grid.download();
                 std::vector<float> opaque;
                 std::vector<float> coverage;
@@ -61,7 +64,6 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
                 }
 
                 const auto after = grid.download();
-
                 check(before.liquid_mass == after.liquid_mass && before.gas_mass == after.gas_mass &&
                           before.liquid_fraction == after.liquid_fraction && before.u == after.u &&
                           before.v == after.v && before.pressure == after.pressure,
@@ -74,12 +76,11 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-    auto* window = SDL_CreateWindow("Liquid appearance tests", 32, 32, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
 
+    auto* window = SDL_CreateWindow("Liquid appearance tests", 32, 32, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
     check(window != nullptr, "GL test window failed");
 
     auto context = SDL_GL_CreateContext(window);
-
     check(context != nullptr, "GL test context failed");
     check(gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress) != 0, "GL loader failed");
 
@@ -97,6 +98,7 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
         });
 
         check(surface.texture() != 0, "Actual scene GLSL failed to compile");
+
         bl::bytebuf result(size_t(w) * h * 4);
         glBindTexture(GL_TEXTURE_2D, surface.texture());
         glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, result.data());
@@ -110,7 +112,6 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
     auto save = [&](const char* name, int w, int h, const bl::bytebuf& rgba)
     {
         bl::bytebuf image;
-
         check(bl::webp_snapshot_encode_rgba(rgba.data(), w, h, 100, 6, true, 100, 100, image), "WebP encode failed");
 
         std::ofstream file(output / name, std::ios::binary);
@@ -118,6 +119,7 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
     };
 
     std::filesystem::create_directories(output);
+
     constexpr int w = 63;
     constexpr int h = 79;
     std::vector<float> pixels(size_t(w) * h * 4);
@@ -191,8 +193,8 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
         pixels[(39 * w + 31) * 4 + 3] = 1.0f - gas;
         glBindTexture(GL_TEXTURE_2D, display.proximityTexture(w, h, pixels, 4.0f));
         glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_FLOAT, proximity.data());
-        const float influence = proximity[39 * w + 32];
 
+        const float influence = proximity[39 * w + 32];
         check(influence > previous, "Tiny gas coverage disappeared or responded discontinuously");
         if (gas == 0.49f)
             below_half = influence;
@@ -213,6 +215,7 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
         pixels[(39 * w + 32) * 4 + 3] = 1.0f - 0.25f * t;
         glBindTexture(GL_TEXTURE_2D, display.proximityTexture(w, h, pixels, 4.0f));
         glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_FLOAT, proximity.data());
+
         const float peak = *std::max_element(proximity.begin(), proximity.end());
         minimum_peak = std::min(minimum_peak, peak);
         maximum_peak = std::max(maximum_peak, peak);
@@ -266,8 +269,8 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
         check(restored.scene.at("liquid_tint_depth") == scene.liquid_tint_depth &&
                   restored.scene.at("liquid_deep_brightness") == scene.liquid_deep_brightness,
             "Snapshot did not save appearance controls");
-        bl::bytebuf webp;
 
+        bl::bytebuf webp;
         check(bl::webp_snapshot_encode_rgba(
                   captured.frame.data.data(), snapshot.width, snapshot.height, 100, 6, true, 100, 100, webp),
             "Capture encode failed");
@@ -277,18 +280,20 @@ inline void liquidAppearance(const std::filesystem::path& output, const std::fil
         std::ofstream file(image, std::ios::binary);
         file.write(reinterpret_cast<const char*>(webp.data()), std::streamsize(webp.size()));
         file.close();
+
         scene.resumeFromImage(image);
         bl::CaptureFrame recaptured;
-
         check(scene.captureFrame(bl::CapturePreset{}, recaptured) && recaptured.frame.data == captured.frame.data &&
                   recaptured.frame.payload == captured.frame.payload,
             "Saved shaded snapshot did not round-trip exactly");
+
         project.stopHeadless();
         std::cout
             << "PASS supplied XMP moment, shaded capture pixels, clip restoration and exact image/state round-trip\n";
     }
 
     check(glGetError() == GL_NO_ERROR, "Appearance produced an OpenGL error");
+
     display.destroy();
     surface.destroy();
     SDL_GL_DestroyContext(context);

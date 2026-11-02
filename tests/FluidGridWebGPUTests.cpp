@@ -31,7 +31,9 @@ struct PressureMultigridGPUTestAccess
         solver.use_shared_smoothing = false;
         solver.use_paired_smoothing = false;
         solver.tile_level = -1;
+
         const auto& result = solver.apply(rhs, stats);
+
         solver.tile_level = shared_level;
         solver.use_shared_smoothing = shared;
         solver.use_paired_smoothing = paired;
@@ -120,6 +122,7 @@ void fusedFractionMatchesSeparatePass()
             parameters.value = {2.0f, 0.01f, 0, 0};
             parameters.vectors[0] = {1, 0, 1, 0};
             parameters.vectors[1] = {0, 1, 0, 1};
+
             if (direction == 0)
             {
                 compute.run(
@@ -415,6 +418,7 @@ void multigridPreservesPCGContract()
         require(std::abs(a_mb - b_ma) < 5e-4 * std::max(1.0, std::sqrt(energy_a * energy_b)),
             "GPU multigrid is not symmetric within float accuracy");
         require(w * h == 1 ? energy_a == 0 : energy_a > 0 && energy_b > 0, "GPU multigrid is not positive");
+
         std::fill(a.begin(), a.end(), 7.0f);
         const auto constant = apply(a);
         double constant_error = 0.0;
@@ -485,6 +489,7 @@ void rectangularSharedMultigridMatchesGeneric()
                 runner.write(stats, reduction);
                 const auto shared = runner.read(solver.apply(rhs, stats));
                 const auto generic = runner.read(PressureMultigridGPUTestAccess::applyGeneric(solver, rhs, stats));
+
                 if (refresh == 0 && field == 0)
                 {
                     const float converged[] = {reduction[0], 0.5f, 0, 0};
@@ -555,6 +560,7 @@ void largeMixedPressureConvergesWithinDefaultBudget()
     const auto result = grid.project(1.0 / 120);
 
     require(result.converged, "512x512 GPU multigrid exhausted the default pressure budget");
+
     uploadTestMaterials(grid, state);
     grid.applyGravity(1.0 / 120);
     const auto limited = grid.project(1.0 / 120, 1, 1e-6);
@@ -634,6 +640,7 @@ void commonStateAndColorReadback()
     checkColor(0);
 
     require(grid.step(1.0 / 120, 2000, 1e-3).converged, "WebGPU common physics call failed");
+
     grid.destroy();
     grid.upload({});
     checkColor(0);

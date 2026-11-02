@@ -57,6 +57,7 @@ struct Fixture
         grid.configureMaterials(substances, liquid, gas);
         grid.setOrigin({-2.0, 7.0});
         grid.setGravityY(100.0);
+
         const int w = grid.getWidth();
         const int h = grid.getHeight();
         const double area = grid.getCellSize() * grid.getCellSize();
@@ -112,16 +113,18 @@ void selection()
         "GPU selection/thread requirement incorrect");
     require(grid.getOrigin().x == 3.0 && grid.getGravityY() == 12.0 && grid.getLiquidMixture().components.size() == 2,
         "Device selection discarded common configuration");
-    grid.setAdaptiveMode(AdaptiveMode::MAX_4);
 
+    grid.setAdaptiveMode(AdaptiveMode::MAX_4);
     require(grid.getDevice() == FluidDevice::GPU && grid.getAdaptiveMode() == AdaptiveMode::MAX_4,
         "GPU adaptive selection failed");
+
     grid.setDevice(FluidDevice::CPU);
     grid.setAdaptiveMode(AdaptiveMode::MAX_4);
     grid.setDevice(FluidDevice::GPU);
 
     require(grid.getDevice() == FluidDevice::GPU && grid.getAdaptiveMode() == AdaptiveMode::MAX_4,
         "Reverse-order GPU adaptive selection failed");
+
     grid.setAdaptiveMode(AdaptiveMode::DISABLED);
     grid.setDevice(FluidDevice::GPU);
     f.configure(grid);
@@ -229,12 +232,14 @@ void commonParity()
 
     require(!failure.converged && failure.iterations == rawFailure.iterations && same(api.download(), expected()),
         "Common API hid native iteration-cap failure");
+
     api.destroy();
     api.upload(initial);
     native.destroy();
     f.configureNative(native, initial);
 
     require(same(api.download(), expected()), "GPU destroy/upload reset changed native initialization");
+
     api.configureMaterials({}, {}, {});
     api.upload({});
     api.writeColorPixels(pixels);
@@ -263,7 +268,9 @@ void evolvingParity()
             const auto a = api.step(0.01, 2000, 1e-3);
             const auto b = native.step(0.01, 2000, 1e-3);
 
-            require(a.converged && b.converged && a.iterations == b.iterations && a.max_divergence == b.max_divergence,
+            require(a.accepted() && b.accepted() && a.converged == b.converged &&
+                        a.precision_limited == b.precision_limited && a.iterations == b.iterations &&
+                        a.max_divergence == b.max_divergence,
                 "Evolving common/native projection differs");
         }
 
@@ -397,10 +404,12 @@ void editMomentum()
     }
 
     require(rejected && same(injected, grid.download()), "Invalid edit velocity mutated state");
+
     edit.clear();
     grid.step(0.0, 2000, 0.01);
 
     require(same(injected, grid.download()), "Zero step changed pending edit state");
+
     rejected = false;
     try
     {
@@ -423,6 +432,7 @@ void editMomentum()
 
     require(!failed.accepted() && failed.physical_steps == 0 && same(injected, grid.download()),
         "Failed initial pressure correction transported material");
+
     grid.loadCheckpoint(pending);
     FluidGridGPU resumed(w, h, dx);
     resumed.loadCheckpoint(pending);
@@ -648,6 +658,7 @@ void checkpointParity()
                 invalid.metadata["elements"][0]["atomic_mass"] = -1.0;
                 break;
             }
+
             rejected = false;
             try
             {
@@ -772,6 +783,7 @@ void workerImageToRender()
 
     require(
         observed == pixels && glGetError() == GL_NO_ERROR, "Rendered colour handoff differs from worker-derived image");
+
     display.destroy();
     SDL_GL_DestroyContext(context);
     SDL_DestroyWindow(window);

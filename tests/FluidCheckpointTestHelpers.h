@@ -31,5 +31,6 @@ inline void makeLegacyCheckpoint(fluid::FluidCheckpoint& checkpoint, int version
     }
     if (version < 2)
         meta.erase("surface_tension");
+
     meta["version"] = version;
 }

@@ -52,6 +52,7 @@ public:
     }
 
     bool hasViscosity() const { return getLiquidMixture().hasViscosity() || getGasMixture().hasViscosity(); }
+    bool hasElasticity() const { return getLiquidMixture().hasElasticity() || getGasMixture().hasElasticity(); }
 
     // Replaces the complete boundary configuration; an empty set closes all faces.
     // Material edits do not create, move or change these openings.

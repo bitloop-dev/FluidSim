@@ -150,6 +150,7 @@ void configurationAndSelection()
     const auto before = api.download();
     grid.setDevice(FluidDevice::CPU);
     grid.setAdaptiveMode(AdaptiveMode::DISABLED);
+
     bool rejected = false;
     try
     {
@@ -190,7 +191,6 @@ void steppingMatchesDirectCPU()
     FluidGridBase& direct = cpu;
     FluidGridBase& api = facade;
     const auto initial = configure(direct);
-
     configure(api);
 
     require(sameState(direct.download(), api.download()), "Common upload differs from CPU upload");
@@ -220,6 +220,7 @@ void steppingMatchesDirectCPU()
     sameResult(expected, actual);
 
     require(!actual.converged && sameState(direct.download(), api.download()), "Wrapper hid projection failure");
+
     direct.destroy();
     api.destroy();
     direct.upload(initial);
@@ -238,6 +239,7 @@ void editingAndColorsUseCommonAPI()
     configure(direct);
     configure(api);
     sameResult(direct.step(0.004, 2000, 1e-8), api.step(0.004, 2000, 1e-8));
+
     auto expected_edit = direct.beginEdit();
     auto edit = api.beginEdit();
     const auto before = api.download();
@@ -291,6 +293,7 @@ void editingAndColorsUseCommonAPI()
     sameResult(direct.step(0.004, 2000, 1e-8), api.step(0.004, 2000, 1e-8));
 
     require(sameState(direct.download(), api.download()), "Common edit changed pressure/cache history");
+
     api.configureMaterials({}, {}, {});
     api.upload({});
     api.writeColorPixels(pixels);

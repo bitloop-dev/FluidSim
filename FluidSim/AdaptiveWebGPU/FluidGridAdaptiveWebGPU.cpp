@@ -26,6 +26,9 @@ void FluidGridAdaptiveWebGPU::configureMaterials(
     if (liquid_mixture.hasViscosity() || gas_mixture.hasViscosity())
         throw std::invalid_argument("Viscosity requires uniform WebGPU");
 
+    if (liquid_mixture.hasElasticity() || gas_mixture.hasElasticity())
+        throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
+
     destroy();
     substances = std::move(catalogue);
     liquid = std::move(liquid_mixture);
@@ -53,6 +56,9 @@ void FluidGridAdaptiveWebGPU::setAdaptiveSettings(const FluidAdaptiveSettings& v
 
 void FluidGridAdaptiveWebGPU::upload(const State& state)
 {
+    if (!state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty())
+        throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
+
     auto initialized =
         std::make_unique<FluidGridAdaptiveGPU>(width, height, cell_size, substances, liquid, gas, AmrLayout{});
     initialized->upload(state); // Preserve the native 1e-4 initialization projection policy.

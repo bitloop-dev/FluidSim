@@ -61,6 +61,7 @@ struct Fixture
 
                 for (int k = 0; k < int(liquid.components.size()); ++k)
                     s.liquid_mass[k][i] = float(f * h * h * liquid.components[k].density / liquid.components.size());
+
                 std::vector<double> weights(gas.components.size());
                 double sum = 0.0;
 
@@ -271,6 +272,7 @@ void projectionCases()
                             materialError = std::max(materialError, std::abs(values[i + k * patch.plane] - q(x, y, k)) /
                                                                         gpu.materialMixture().components[k].density);
                         }
+
                         for (int d = 0; d < 2; ++d)
                         {
                             velocityError = std::max(
@@ -296,6 +298,7 @@ void projectionCases()
 
             for (const auto& l : gpu.levels())
                 before.push_back(gpu.commands().read(l->conserved));
+
             gpu.step(0.0, 1e-4);
 
             for (int lev = 0; lev < int(before.size()); ++lev)
@@ -328,11 +331,11 @@ void regridCases()
             require(cpu.regrid(layout), "Changed CPU layout not recognized");
 
             const auto start = std::chrono::steady_clock::now();
-
             require(gpu.regrid(layout), "Changed GPU layout not recognized");
             gpu.synchronize();
             const double regridMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
             const double error = compare(gpu, cpu);
             const auto after = gpu.totals();
 
@@ -392,6 +395,7 @@ void subcyclingAndTraces()
 
     for (int tick = 0; tick < 24; ++tick)
         gpu.transport(0.15);
+
     const auto after = gpu.totals();
     std::cout << "minority min_density=" << after.minMassDensity << " volume=" << after.maxVolumeError << '\n';
     const double traceRoundoff = 64.0 * std::numeric_limits<float>::epsilon() * 1.5e-13;
@@ -457,9 +461,9 @@ void reconstructionCases()
         auto state = f.state(n, 1.0, 0.0);
 
         std::fill(state.liquid_fraction.begin(), state.liquid_fraction.end(), 0.0);
-
         for (auto& lane : state.liquid_mass)
             std::fill(lane.begin(), lane.end(), 0.0);
+
         for (int y = 0; y < n; ++y)
         {
             for (int x = 0; x < n; ++x)
@@ -495,6 +499,7 @@ void reconstructionCases()
                             rho += values[i + k * patch.plane];
                             reference += out(x, y, k);
                         }
+
                         for (int d = 0; d < 2; ++d)
                         {
                             const double v =
@@ -572,6 +577,7 @@ void reconstructionCases()
                         double rho = 0.0;
                         for (int k = 0; k < 4; ++k)
                             rho += values[i + k * patch.plane];
+
                         for (int d = 0; d < 2; ++d)
                         {
                             require(std::abs(values[i + (4 + d) * patch.plane] / rho - (d ? -0.3 : 0.7)) < 2e-6,

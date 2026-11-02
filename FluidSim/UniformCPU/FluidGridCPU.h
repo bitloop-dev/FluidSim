@@ -4,6 +4,7 @@
 #include "SubstanceCatalogue.h"
 #include "FluidMixture.h"
 #include "FluidSurfaceTensionCPU.h"
+#include "ElasticityCPU.h"
 
 #include <bitloop/core/types.h>
 #include <optional>
@@ -76,6 +77,12 @@ struct FluidGridCPU final : FluidGridBase
 
     void configureMaterials(SubstanceCatalogue catalogue, FluidMixture liquid, FluidMixture gas) override
     {
+        if (gas.hasElasticity() || (liquid.hasElasticity() && (liquid.components.size() != 1 ||
+                                                                  liquid.components.front().shear_modulus < 0.0)))
+        {
+            throw std::invalid_argument("CPU elasticity requires one condensed ingredient with positive shear modulus");
+        }
+
         substances = std::move(catalogue);
         liquid_mixture = std::move(liquid);
         gas_mixture = std::move(gas);
@@ -142,6 +149,7 @@ private:
     std::optional<FluidField> acceleration;
     double surface_tension = 0.0;
     std::optional<FluidSurfaceTensionCPU> capillary;
+    std::optional<ElasticityCPU> elasticity;
 
     void applySurfaceTension(double dt);
 

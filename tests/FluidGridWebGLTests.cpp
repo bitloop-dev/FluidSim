@@ -260,6 +260,7 @@ void multigridPreservesPCGContract(int cpu_cells = 0)
         require(std::abs(a_mb - b_ma) < 5e-4 * std::max(1.0, std::sqrt(energy_a * energy_b)),
             "GPU multigrid is not symmetric within float accuracy");
         require(w * h == 1 ? energy_a == 0 : energy_a > 0 && energy_b > 0, "GPU multigrid is not positive");
+
         std::fill(a.begin(), a.end(), 7.0f);
         const auto constant = apply(a);
         double constant_error = 0.0;
@@ -284,6 +285,7 @@ void largeMixedPressureConvergesWithinDefaultBudget()
     const auto result = grid.project(1.0 / 120);
 
     require(result.converged, "512x512 GPU multigrid exhausted the default pressure budget");
+
     uploadTestMaterials(grid, state);
     grid.applyGravity(1.0 / 120);
     const auto limited = grid.project(1.0 / 120, 1, 1e-6);
@@ -377,6 +379,7 @@ template <typename Grid> void commonInterfaceAndDisplay(int cpu_cells = 1024)
     checkTexture(0.0f);
 
     require(grid.step(1.0 / 120, 2000, 1e-3).converged, "common physics call failed");
+
     grid.destroy();
     grid.upload({});
     checkTexture(0.0f);
@@ -400,6 +403,7 @@ template <typename Grid> void commonInterfaceAndDisplay(int cpu_cells = 1024)
     grid.gas_mixture.components.clear();
     grid.upload({});
     checkTexture(0.0f);
+
     display.destroy();
     grid.destroy();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -424,6 +428,7 @@ void graphicsStateIsPreserved(int w = 8, int h = 8, int cpu_cells = 1024)
     glEnable(GL_SCISSOR_TEST);
     glScissor(0, 0, 0, 0);
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
     {
         FluidGridWebGL gpu(w, h, 1);
         gpu.cpu_pressure_cells = cpu_cells;
@@ -440,39 +445,40 @@ void graphicsStateIsPreserved(int w = 8, int h = 8, int cpu_cells = 1024)
 
         GLint value, viewport[4];
         GLboolean mask[4];
+
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &value);
-
         require(GLuint(value) == framebuffer, "draw framebuffer was not restored");
+
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &value);
-
         require(GLuint(value) == framebuffer, "read framebuffer was not restored");
+
         glGetIntegerv(GL_ACTIVE_TEXTURE, &value);
-
         require(value == GL_TEXTURE3, "active texture was not restored");
+
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &value);
-
         require(GLuint(value) == texture, "texture binding was not restored");
+
         glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &value);
-
         require(GLuint(value) == buffers[0], "pack buffer was not restored");
+
         glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &value);
-
         require(GLuint(value) == buffers[1], "unpack buffer was not restored");
+
         glGetIntegerv(GL_UNPACK_ROW_LENGTH, &value);
-
         require(value == 19, "unpack layout was not restored");
+
         glGetIntegerv(GL_PACK_ROW_LENGTH, &value);
-
         require(value == 23, "pack layout was not restored");
-        glGetIntegerv(GL_VIEWPORT, viewport);
 
+        glGetIntegerv(GL_VIEWPORT, viewport);
         require(viewport[0] == 7 && viewport[1] == 9 && viewport[2] == 11 && viewport[3] == 13,
             "viewport was not restored");
-        glGetBooleanv(GL_COLOR_WRITEMASK, mask);
 
+        glGetBooleanv(GL_COLOR_WRITEMASK, mask);
         require(!mask[0] && !mask[1] && !mask[2] && !mask[3], "color mask was not restored");
         require(glIsEnabled(GL_BLEND) && glIsEnabled(GL_SCISSOR_TEST), "drawing capabilities were not restored");
     }
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
@@ -959,6 +965,7 @@ void componentsMatchCPU()
                   << " velocity_error=" << velocity_error << '\n';
 
         require(mass_error < 2e-4 && velocity_error < 0.01, "GPU components differ from CPU reference");
+
         fluid::FluidGridDisplay cpu_display, gpu_display;
         const auto gpu_texture = gpu_display.texture(gpu);
         const auto cpu_texture = cpu_display.texture(cpu);
@@ -974,6 +981,7 @@ void componentsMatchCPU()
 
         for (size_t i = 0; i < a.size(); ++i)
             require(std::abs(a[i] - b[i]) < 5e-4, "GPU catalogue colors differ from CPU");
+
         glDeleteFramebuffers(1, &framebuffer);
         cpu_display.destroy();
     }
@@ -1088,6 +1096,7 @@ void editBenchmark()
             edit.commit();
             glFinish();
             const auto finished = std::chrono::steady_clock::now();
+
             if (repeat >= 5)
             {
                 staging.push_back(std::chrono::duration<double, std::micro>(queued - start).count());

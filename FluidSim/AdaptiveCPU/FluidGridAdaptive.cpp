@@ -349,6 +349,12 @@ void FluidGridAdaptive::fillGhosts()
 
 void FluidGridAdaptive::upload(const State& state, double tolerance)
 {
+    if (liquidPhase.hasElasticity() || gasPhase.hasElasticity() ||
+        !state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty())
+    {
+        throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
+    }
+
     // A gas-only instance must not silently discard the other phase's mass.
     if (!liquidComponents && std::any_of(state.liquid_fraction.begin(), state.liquid_fraction.end(), [](double value)
     {

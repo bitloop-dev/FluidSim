@@ -1,4 +1,5 @@
 #include "scenarios/CrashingWave.h"
+#include "scenarios/ElasticTest.h"
 #include <array>
 #include <iostream>
 
@@ -17,7 +18,8 @@ void require(bool condition, const char* message)
 bool sameState(const FluidGrid::State& a, const FluidGrid::State& b)
 {
     return a.liquid_fraction == b.liquid_fraction && a.liquid_mass == b.liquid_mass && a.gas_mass == b.gas_mass &&
-           a.u == b.u && a.v == b.v && a.pressure == b.pressure;
+           a.u == b.u && a.v == b.v && a.pressure == b.pressure && a.elastic_log_xx == b.elastic_log_xx &&
+           a.elastic_log_xy == b.elastic_log_xy && a.elastic_log_yy == b.elastic_log_yy;
 }
 
 struct WaveProject : BasicProject
@@ -116,6 +118,7 @@ void checkIndependentWaves()
     }
 
     require(unsupported && recovery.pressure_recovery_frames == 0, "CPU silently accepted pressure recovery");
+
     recovery.fluid_device = fluid::FluidDevice::GPU;
     recovery.restartSimulation();
     const auto initial = recovery.fluid.download();
@@ -153,15 +156,14 @@ void checkIndependentWaves()
 
     const auto scene_state = recovery.captureSceneState();
     fluid::FluidCheckpoint saved;
-
     require(recovery.fluid.saveCheckpoint(saved), "Recovery scene checkpoint unsupported");
-    recovery.setPressureRecoveryFrames(0);
 
+    recovery.setPressureRecoveryFrames(0);
     require(recovery.simulation_time == 0.0 && sameState(initial, recovery.fluid.download()) &&
                 recovery.fluid.getPressureRecoveryTime() == 0.0,
         "Returning to accurate mode retained compressed state");
-    recovery.restoreSceneState(scene_state, saved, recovery.grid_w, recovery.grid_h, recovery.cell_size);
 
+    recovery.restoreSceneState(scene_state, saved, recovery.grid_w, recovery.grid_h, recovery.cell_size);
     require(recovery.pressure_recovery_frames == 10 && recovery.simulation_time == elapsed &&
                 sameState(live, recovery.fluid.download()),
         "Scene restore lost recovery mode or state");
@@ -259,23 +261,24 @@ void checkExtensions()
     ExtensionProject project;
     project.configureHeadless(0, &log, {800, 600}, &capture);
     project.startHeadless();
+
     auto& scene = *project.source;
     auto& base = static_cast<SceneBase&>(scene);
     base._initGUI();
     auto* ui = dynamic_cast<ExtensionScene::UI*>(scene.ui);
 
     require(ui != nullptr, "Framework constructed the base UI instead of the concrete scenario UI");
+
     ui->edit();
-
     require(scene.marker == 1 && scene.projection_tolerance == 0.1, "UI bypassed shadow buffering");
+
     base.updateLiveBuffers();
-
     require(scene.marker == 7 && scene.projection_tolerance == 0.25, "Inherited/derived UI edits were not applied");
+
     ui->schedule();
-
     require(scene.marker == 7, "Scheduled action ran on the UI owner");
-    project.processHeadlessFrame(0.02);
 
+    project.processHeadlessFrame(0.02);
     require(scene.marker == 9 && scene.frames == 1, "Concrete scheduled action/frame hook did not run");
 
     PlatformManager platform(nullptr); // Supplies UI scale without opening a window.
@@ -293,7 +296,6 @@ void checkExtensions()
     ImGui::DestroyContext();
 
     CaptureFrame image;
-
     require(scene.captureFrame(CapturePreset{}, image) && image.frame.data == bytebuf({12, 34, 56, 255}),
         "Shared capture did not use scenario image rendering");
 
@@ -302,6 +304,7 @@ void checkExtensions()
     scene.restoreSceneState(snapshot.scene, snapshot.checkpoint, snapshot.width, snapshot.height, snapshot.cell_size);
 
     require(scene.marker == 9, "Shared restore did not restore scenario state");
+
     base._destroyGUI();
     project.stopHeadless();
     std::cout << "PASS concrete buffered UI, shared sidebar, scheduled action, frame hook and custom capture/state\n";
@@ -317,9 +320,11 @@ void checkViscosityControls()
     WaveProject project;
     project.configureHeadless(0, &log, {800, 600}, &capture);
     project.startHeadless();
+
     auto& scene = *project.waves[0];
     scene.fluid_device = fluid::FluidDevice::GPU;
     scene.restartSimulation();
+
     const auto initial = scene.fluid.download();
     scene.setComponentViscosity(fluid::Phase::Liquid, 1, 1000.0);
 
@@ -341,8 +346,8 @@ void checkViscosityControls()
 
     require(scene.liquid_viscosities[1] == 1000.0 && scene.liquid_viscosity_names[1] == "Glycerol",
         "Restored viscosity controls disagree with engine materials");
-    scene.restartSimulation();
 
+    scene.restartSimulation();
     require(scene.liquid_viscosities[1] == 1000.0, "Restart lost live viscosity");
 
     FluidSim::FluidSceneSettings preset{.grid_w = 32, .grid_h = 24, .gravity_y = 10.0};
@@ -351,20 +356,77 @@ void checkViscosityControls()
     expanded.gas_viscosities = {0.0, 0.0};
 
     require(expanded == preset, "Expanded zero viscosities no longer identify the default preset");
-    expanded.liquid_viscosities[1] = 100.0;
 
+    expanded.liquid_viscosities[1] = 100.0;
     require(!(expanded == preset), "Viscosity change did not identify custom settings");
     scene.applyPreset(expanded);
 
     require(scene.liquid_viscosities[1] == 100.0 && scene.simulation_time == 0.0,
         "Preset did not apply viscosity and restart");
+
     preset.fluid_device = fluid::FluidDevice::CPU;
     scene.applyPreset(preset);
 
     require(!scene.fluid.hasViscosity() && scene.fluid_device == fluid::FluidDevice::CPU,
         "Inviscid preset could not leave a viscous backend");
+
     project.stopHeadless();
     std::cout << "PASS viscosity live controls, restart, checkpoint and preset behavior\n";
+}
+}
+
+namespace
+{
+struct ElasticProject : BasicProject
+{
+    SceneHandle<FluidSim::ElasticTest> source;
+
+    void projectPrepare(Layout&) override
+    {
+        FluidSim::ElasticTest::Config config;
+        config.settings.grid_w = 32;
+        config.settings.grid_h = 32;
+        source = create<FluidSim::ElasticTest>(config);
+    }
+};
+
+void checkElasticScene()
+{
+    ImDebugLog log;
+    CaptureContext capture;
+    ElasticProject project;
+    project.configureHeadless(0, &log, {800, 600}, &capture);
+    project.startHeadless();
+    auto& scene = *project.source;
+    require(scene.fluid.getDevice() == fluid::FluidDevice::GPU && scene.elastic_material,
+        "ElasticTest did not select uniform WebGPU");
+    const auto initial = scene.fluid.download();
+    project.processHeadlessFrame(0.02);
+    const auto live = scene.fluid.download();
+    bool rejected = false;
+    try
+    {
+        scene.setPressureRecoveryFrames(1);
+    }
+    catch (const std::invalid_argument&)
+    {
+        rejected = true;
+    }
+    require(rejected && sameState(live, scene.fluid.download()), "Rejected elastic recovery discarded live history");
+
+    const auto scene_state = scene.captureSceneState();
+    fluid::FluidCheckpoint checkpoint;
+    require(scene.fluid.saveCheckpoint(checkpoint), "Elastic scene checkpoint unsupported");
+    project.processHeadlessFrame(0.02);
+    const auto continued = scene.fluid.download();
+    scene.restoreSceneState(scene_state, checkpoint, scene.grid_w, scene.grid_h, scene.cell_size);
+    project.processHeadlessFrame(0.02);
+    require(!scene.simulation_failed && sameState(continued, scene.fluid.download()),
+        "Elastic scene checkpoint changed continuation");
+    scene.restartSimulation();
+    require(sameState(initial, scene.fluid.download()), "Elastic scene restart lost reference configuration");
+    project.stopHeadless();
+    std::cout << "PASS GPU ElasticTest recovery rejection, checkpoint continuation and restart\n";
 }
 }
 
@@ -375,6 +437,7 @@ int main()
         checkIndependentWaves();
         checkExtensions();
         checkViscosityControls();
+        checkElasticScene();
         return 0;
     }
     catch (const std::exception& error)

@@ -111,6 +111,7 @@ template <class Derived> struct FluidScene : bl::Scene<Derived>
     std::vector<double> gas_viscosities;
     std::vector<std::string> liquid_viscosity_names;
     std::vector<std::string> gas_viscosity_names;
+    bool elastic_material = false; // Buffered capability for backend controls.
 
     bool simulation_failed = false;
     double simulation_time = 0.0;
@@ -169,6 +170,8 @@ void main()
         int substeps = 0;
         int transport_steps = 0;
         int pressure_iterations = 0;
+        int precision_limited_updates = 0;
+        double max_divergence = 0.0;
         int viscosity_iterations = 0;
         bool detailed = false;
         bool adaptive = false;

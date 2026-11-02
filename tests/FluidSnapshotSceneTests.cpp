@@ -117,12 +117,14 @@ void run(const fs::path& root)
     saved.scene["liquid_deep_brightness"] = 0.72f;
     saved.scene["mouse_attraction"] = true;
     saved.scene["mouse_target"] = {6.0, 4.0};
+
     FluidGrid native_grid(saved.width, saved.height, saved.cell_size);
     native_grid.setDevice(FluidDevice::GPU);
     native_grid.setSurfaceTension(10000);
     native_grid.configureMaterials(
         scene.fluid.getSubstances(), scene.fluid.getLiquidMixture(), scene.fluid.getGasMixture());
     native_grid.upload({});
+
     const std::array<float, 4> parameters[] = {{6.0f, 4.0f, 500.0f, 20.0f}};
     const auto context = native_grid.getWebGPUContext();
     FluidField acceleration({saved.width, saved.height, saved.cell_size, {}, 2}, context);
@@ -151,12 +153,11 @@ void run(const fs::path& root)
         "Snapshot lost the scene's field generator settings");
 
     FluidCheckpoint restored;
-
     require(scene.fluid.saveCheckpoint(restored) && restored.metadata == saved.checkpoint.metadata &&
                 restored.data == saved.checkpoint.data,
         "Dropped image changed native state");
-    scene.updateAccelerationField();
 
+    scene.updateAccelerationField();
     require(scene.mouse_field && scene.fluid.saveCheckpoint(restored) && restored.data == saved.checkpoint.data,
         "Restored mouse producer did not rebuild equivalent values on its new context");
 
@@ -172,8 +173,8 @@ void run(const fs::path& root)
                 scene.fluid.getSubstances()[scene.water_substance].composition.empty() &&
                 scene.fluid.saveCheckpoint(restored) && restored.data == saved.checkpoint.data,
         "Legacy scene/native snapshot changed physical state or invented chemistry");
-    drop(project, image);
 
+    drop(project, image);
     require(scene.snapshot_error.empty() && scene.fluid.saveCheckpoint(restored) &&
                 restored.metadata == saved.checkpoint.metadata,
         "Chemical snapshot did not restore after a legacy image");
@@ -228,6 +229,7 @@ void run(const fs::path& root)
     scene.restartSimulation();
 
     require(scene.surface_tension == 10000 && scene.fluid.getSurfaceTension() == 10000, "Restart lost surface tension");
+
     scene.mouse_attraction = false;
     scene.updateAccelerationField();
     FluidCheckpoint cleared;
@@ -235,6 +237,7 @@ void run(const fs::path& root)
 
     require(!cleared.metadata.at("acceleration_field").get<bool>(),
         "Disabling the restored mouse controller left its acceleration field active");
+
     scene.mouse_field_generator.reset();
     scene.mouse_field.reset();
     scene.fluid.destroy();
@@ -253,10 +256,12 @@ void run(const fs::path& root)
     scene.updateAccelerationField();
 
     require(scene.mouse_field->read() != samples, "CPU mouse field ignored a changed target");
+
     scene.mouse_attraction = false;
     scene.updateAccelerationField();
 
     require(!scene.mouse_field_active, "CPU mouse controller did not disable");
+
     scene.grid_w = 48;
     scene.grid_h = 32;
     scene.gravity_y = -25.0;
@@ -267,18 +272,21 @@ void run(const fs::path& root)
                 scene.world_w == 24.0 && scene.world_h == 16.0 && scene.fluid.getAdaptiveMode() == AdaptiveMode::MAX_4 &&
                 scene.fluid.getGravityY() == -25.0 && !scene.mouse_field && !scene.mouse_field_generator,
         "Resolution/adaptive restart lost geometry/settings or retained an old field");
+
     scene.fluid_device = FluidDevice::GPU;
     scene.restartSimulation();
 
     require(!scene.simulation_failed && scene.fluid.getDevice() == FluidDevice::GPU &&
                 scene.fluid.getAdaptiveMode() == AdaptiveMode::MAX_4,
         "Device restart did not select adaptive WebGPU");
+
     scene.adaptive_mode = AdaptiveMode::DISABLED;
     scene.restartSimulation();
 
     require(!scene.simulation_failed && scene.fluid.getAdaptiveMode() == AdaptiveMode::DISABLED &&
                 scene.frame_time == 0.035 && scene.fluid.getLiquidMixture().components.size() == 2,
         "Uniform restart lost frame time or material configuration");
+
     project.stopHeadless();
     std::cout << "PASS file-drop resume, saved geometry/backend/clocks/quality, atomic rejection and recovery\n";
 }
