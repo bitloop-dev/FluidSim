@@ -9,7 +9,7 @@ namespace fluid
 // host-side state uses each engine's native precision; empty fields initialize to zero
 template <typename Scalar> struct FluidGridState
 {
-    // Total liquid volume fraction, including every liquid ingredient.
+    // Total condensed volume fraction, including elastic and ordinary liquid ingredients.
     std::vector<Scalar> liquid_fraction;
     std::vector<Scalar> u;
     std::vector<Scalar> v;
@@ -22,6 +22,9 @@ template <typename Scalar> struct FluidGridState
     std::vector<Scalar> elastic_log_xx;
     std::vector<Scalar> elastic_log_xy;
     std::vector<Scalar> elastic_log_yy;
+
+    // Independent elastic occupancy when ordinary liquid is also present; otherwise empty.
+    std::vector<Scalar> elastic_fraction;
 };
 
 template <typename To, typename From> FluidGridState<To> convertFluidState(const FluidGridState<From>& source)
@@ -42,6 +45,7 @@ template <typename To, typename From> FluidGridState<To> convertFluidState(const
     copy(result.elastic_log_xx, source.elastic_log_xx);
     copy(result.elastic_log_xy, source.elastic_log_xy);
     copy(result.elastic_log_yy, source.elastic_log_yy);
+    copy(result.elastic_fraction, source.elastic_fraction);
 
     result.liquid_mass.resize(source.liquid_mass.size());
     result.gas_mass.resize(source.gas_mass.size());

@@ -1,6 +1,7 @@
 #pragma once
 #include "SubstanceCatalogue.h"
 #include <vector>
+#include <cstddef>
 
 namespace fluid
 {
@@ -38,6 +39,17 @@ struct FluidMixture
         }
 
         return false;
+    }
+
+    size_t elasticComponentIndex() const
+    {
+        for (size_t i = 0; i < components.size(); ++i)
+        {
+            if (components[i].shear_modulus != 0.0)
+                return i;
+        }
+
+        return components.size();
     }
 
     bool hasViscosity() const

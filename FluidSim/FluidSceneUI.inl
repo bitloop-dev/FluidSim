@@ -5,10 +5,10 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 {
     bl_pull(grid_w, grid_h, frame_time, gravity_y, pressure_recovery_frames, projection_tolerance, surface_tension);
     bl_pull(liquid_viscosities, gas_viscosities);
-    bl_pull(implicit_elasticity);
+    bl_pull(implicit_elasticity, elastic_stiffness);
     bl_pull_temp(fluid_device, adaptive_mode);
     bl_view(cell_size, steps_per_second, projection_max_iterations);
-    bl_view(elastic_material);
+    bl_view(elastic_material, elastic_with_liquid, material_setup);
 
     const bool viscous = std::ranges::any_of(liquid_viscosities,
                              [](double value)
@@ -37,6 +37,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
             .gravity_y = gravity_y,
             .surface_tension = surface_tension,
             .implicit_elasticity = implicit_elasticity,
+            .elastic_stiffness = elastic_stiffness,
             .liquid_viscosities = liquid_viscosities,
             .gas_viscosities = gas_viscosities,
             .gas_proximity_scale = proximity_percent};
@@ -44,7 +45,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
         const char* preset_name = "Custom";
         for (const auto& preset : Derived::presets)
         {
-            if (current_settings == preset.settings)
+            if (current_settings == preset.settings && material_setup == preset.material_setup)
                 preset_name = preset.name;
         }
 
@@ -53,7 +54,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
         {
             for (const auto& preset : Derived::presets)
             {
-                const bool selected = current_settings == preset.settings;
+                const bool selected = current_settings == preset.settings && material_setup == preset.material_setup;
                 if (ImGui::Selectable(preset.name, selected))
                     chosen_preset = &preset;
                 if (selected)
@@ -72,9 +73,9 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
         if (chosen_preset)
         {
-            bl_schedule([settings = chosen_preset->settings](Derived& scene)
+            bl_schedule([preset = *chosen_preset](Derived& scene)
             {
-                scene.applyPreset(settings);
+                scene.applyPreset(preset);
             });
 
             // Do not commit a deactivated old control after the preset has been queued.
@@ -122,7 +123,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     // CPU / WebGPU combo box.
     int device = int(fluid_device);
-    ImGui::BeginDisabled(pressure_recovery_frames != 0 || viscous || implicit_elasticity);
+    ImGui::BeginDisabled(pressure_recovery_frames != 0 || viscous || implicit_elasticity || elastic_with_liquid);
     if (ImGui::Combo("Device", &device, "CPU\0WebGPU\0"))
     {
         bl_schedule([device](Derived& scene)
@@ -134,7 +135,9 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
     {
-        if (pressure_recovery_frames != 0 || viscous || implicit_elasticity)
+        if (elastic_with_liquid)
+            ImGui::SetTooltip("Elastic material with ordinary liquid requires uniform WebGPU.");
+        else if (pressure_recovery_frames != 0 || viscous || implicit_elasticity)
         {
             ImGui::SetTooltip(
                 "Set Pressure recovery frames and viscosities to 0, and disable implicit elasticity before changing the device.");
@@ -244,7 +247,7 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     ImGui::EndDisabled();
 
-    ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED || implicit_elasticity);
+    ImGui::BeginDisabled(adaptive_mode != fluid::AdaptiveMode::DISABLED || implicit_elasticity || elastic_with_liquid);
     const double old_tension = surface_tension;
     ImGui::InputDouble("Surface Tension", &surface_tension, 0.0, 0.0, "%.6g");
     if (ImGui::IsItemActivated())
@@ -266,13 +269,38 @@ template <class Derived> void FluidScene<Derived>::UI::sidebar()
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
     {
-        ImGui::SetTooltip(
-            "Liquid-gas surface tension in scene units; zero disables it.\nUniform CPU and WebGPU. Stronger tension "
-            "may require extra physics steps.\nDisable implicit elasticity before changing this coefficient.\n"
-            "Press Enter or leave the field to apply.");
+        if (elastic_with_liquid)
+            ImGui::SetTooltip("Elastic material with ordinary liquid currently requires zero surface tension.");
+        else
+        {
+            ImGui::SetTooltip(
+                "Liquid-gas surface tension in scene units; zero disables it.\nUniform CPU and WebGPU. Stronger tension "
+                "may require extra physics steps.\nDisable implicit elasticity before changing this coefficient.\n"
+                "Press Enter or leave the field to apply.");
+        }
     }
 
     ImGui::EndDisabled();
+
+    if (elastic_material)
+    {
+        ImGui::SliderDouble("Stiffness", &elastic_stiffness, 1.0, 1000000.0, "%.0f",
+            ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+        if (ImGui::IsItemDeactivatedAfterEdit() && std::isfinite(elastic_stiffness))
+        {
+            bl_schedule([value = elastic_stiffness](Derived& scene)
+            {
+                scene.setElasticStiffness(value);
+            });
+        }
+
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Elastic material shear stiffness in scene units.\n"
+                              "Applies on release without restarting or resetting deformation.\n"
+                              "Works with explicit and implicit elasticity. Ctrl-click to enter a value.");
+        }
+    }
 
     ImGui::BeginDisabled(!elastic_material || fluid_device != fluid::FluidDevice::GPU ||
                          adaptive_mode != fluid::AdaptiveMode::DISABLED || surface_tension != 0.0 ||

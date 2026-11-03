@@ -170,6 +170,11 @@ void FluidGrid::setComponentViscosity(Phase phase, size_t component, double coef
     backend->setComponentViscosity(phase, component, coefficient);
 }
 
+void FluidGrid::setElasticStiffness(double coefficient)
+{
+    backend->setElasticStiffness(coefficient);
+}
+
 bool FluidGrid::getImplicitElasticity() const
 {
     return backend->getImplicitElasticity();

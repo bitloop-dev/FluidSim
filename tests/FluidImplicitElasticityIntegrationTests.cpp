@@ -73,6 +73,49 @@ FluidGridGPU::State initialState(int width, int height)
     return state;
 }
 
+void stiffnessChanges(const fluid::FluidWebGPUContext& context)
+{
+    FluidGridGPU grid(16, 14, 1.0);
+    FluidGridGPU restored(16, 14, 1.0);
+    configure(grid, context);
+    restored.setWebGPUContext(context);
+    grid.upload(initialState(16, 14));
+
+    for (bool implicit : {false, true, false})
+    {
+        grid.setImplicitElasticity(implicit);
+        require(grid.step(.002, 2000, 1e-5).accepted(), "Stiffness warmup failed");
+        for (double coefficient : {1.0, 1000000.0, 50000.0})
+        {
+            const auto before = grid.download();
+            grid.setElasticStiffness(coefficient);
+            require(same(before, grid.download()), "Stiffness edit reset physical state/history");
+            fluid::FluidCheckpoint checkpoint;
+            grid.saveCheckpoint(checkpoint);
+            restored.loadCheckpoint(checkpoint);
+            require(restored.liquid_mixture.components.front().shear_modulus == coefficient,
+                "Checkpoint lost edited stiffness");
+
+            // A freshly restored solver must agree with the live solver's invalidated coefficient caches.
+            for (int step = 0; step < 3; ++step)
+            {
+                const auto reference_result = restored.step(.002, 2000, 1e-5);
+                require(grid.step(.002, 2000, 1e-5).accepted() && reference_result.accepted() &&
+                            same(grid.download(), restored.download()),
+                    "Live stiffness differs from a fresh solver at the same material state");
+            }
+        }
+    }
+
+    rejects([&]
+    {
+        grid.setElasticStiffness(0);
+    }, "Zero stiffness discarded elastic history");
+    require(
+        grid.liquid_mixture.components.front().shear_modulus == 50000.0, "Rejected stiffness edit changed material");
+    std::cout << "PASS live stiffness, cached explicit/implicit switches and checkpoint continuation\n";
+}
+
 void integration(const fluid::FluidWebGPUContext& context)
 {
     constexpr int width = 24;
@@ -242,6 +285,7 @@ int main()
     try
     {
         fluid::FluidWebGPUContext context;
+        stiffnessChanges(context);
         integration(context);
         commonApi(context);
         return 0;

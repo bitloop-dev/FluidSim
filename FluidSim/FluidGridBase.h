@@ -52,7 +52,14 @@ public:
     }
 
     bool hasViscosity() const { return getLiquidMixture().hasViscosity() || getGasMixture().hasViscosity(); }
+
     bool hasElasticity() const { return getLiquidMixture().hasElasticity() || getGasMixture().hasElasticity(); }
+
+    // Change the positive shear modulus of the existing single elastic ingredient, preserving history.
+    virtual void setElasticStiffness(double)
+    {
+        throw std::invalid_argument("Elastic stiffness requires a uniform elastic material");
+    }
 
     // Uniform WebGPU can update elastic history and pressure in one coupled solve.
     virtual bool getImplicitElasticity() const { return false; }

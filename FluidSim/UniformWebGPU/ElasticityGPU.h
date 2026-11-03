@@ -12,11 +12,19 @@ public:
     ElasticityGPU(Compute& compute, int width, int height, float cell_size, float shear_modulus);
     void upload(const FluidGridState<float>& state);
 
+    void setShearModulus(float value)
+    {
+        parameters.value[3] = value;
+        stress_valid = false;
+        statistics_valid = false;
+    }
+
     // Convert the packed displacement restored from a version-9 checkpoint.
     void importReference(const Field& fraction);
     void download(FluidGridState<float>& state);
     void deform(double dt, const Field& fraction, const Field& u, const Field& v);
-    void advect(double dt, bool horizontal, const Field& velocity, const Field& fraction, const Field& transfers);
+    void advect(double dt, bool horizontal, const Field& velocity, const Field& fraction, const Field& transfers,
+        const Field* split_weights = nullptr);
     void rebuildStress(const Field& fraction);
     double stepLimit(const Field& density);
     void applyForces(double dt, Field& u, Field& v, Field& next_u, Field& next_v, const Field& density);

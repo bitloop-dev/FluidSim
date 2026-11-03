@@ -194,16 +194,17 @@ ImplicitElasticityGPU::ImplicitElasticityGPU(Compute& compute, int width, int he
         )wgsl",
         geometry);
 
+    // Use the mass Schur operator; the local stiffness response is added after its multigrid inverse.
     compute.build(weights, "implicit elastic Schur coefficients", 1, {"diagonal"},
         R"wgsl(
             fn execute()
             {
                 let p = cell();
                 let d = cellSize() * cellSize();
-                write0(p, vec4f(select(0.0, d / diagonal(p).x, p.x > 0),
-                    select(0.0, d / diagonal(p + vec2i(1, 0)).x, p.x + 1 < gridSize().x),
-                    select(0.0, d / diagonal(p).y, p.y > 0),
-                    select(0.0, d / diagonal(p + vec2i(0, 1)).y, p.y + 1 < gridSize().y)));
+                write0(p, vec4f(select(0.0, d / diagonal(p).z, p.x > 0),
+                    select(0.0, d / diagonal(p + vec2i(1, 0)).z, p.x + 1 < gridSize().x),
+                    select(0.0, d / diagonal(p).w, p.y > 0),
+                    select(0.0, d / diagonal(p + vec2i(0, 1)).w, p.y + 1 < gridSize().y)));
             }
         )wgsl");
 
@@ -333,18 +334,193 @@ ImplicitElasticityGPU::ImplicitElasticityGPU(Compute& compute, int width, int he
                 write0(cell(), vec4f(source(cell()).z));
             }
         )wgsl");
-    compute.build(precondition, "implicit elastic block preconditioner", 1,
-        {"source", "diagonal", "correction", "statistics"},
+
+    // The smooth constant-coefficient limit suggests dt^2 k / (2 dx^2). Center on both sides for symmetry.
+    compute.build(pressure_response, "implicit elastic pressure response", 1,
+        {"source", "correction", "material", "statistics"},
         R"wgsl(
             fn execute()
             {
                 let p = cell();
-                let mean = statistics(vec2i(0)).x / f32(gridSize().x * gridSize().y);
-                let velocity = source(p).xy / diagonal(p).xy;
-                write0(p, vec4f(mask(p, vec3f(velocity, correction(p).x - mean)), 0));
+                let count = f32(gridSize().x * gridSize().y);
+                let centered = fma(source(p).z, count, -statistics(vec2i(0)).x) / count;
+                let elastic = 0.5 * timeStep() * timeStep() * material(p).z / (cellSize() * cellSize());
+                write0(p, vec4f(correction(p).x + elastic * centered));
+            }
+        )wgsl");
+
+    // Three half-weight sweeps give D^-1/2 [0.125 (T - 3I)^2 + 0.375 I] D^-1/2, T = D^-1/2 A D^-1/2.
+    // This fixed polynomial is SPD. A 16x16 shared patch supplies two exact stencils for an 8x8 output tile.
+    compute.build(precondition, "implicit elastic block preconditioner", 1,
+        {"source", "diagonal", "correction", "statistics", "material", "corners"},
+        R"wgsl(
+            var<workgroup> velocity: array<vec2f, 256>;
+            var<workgroup> intermediate: array<vec2f, 256>;
+            var<workgroup> forcing: array<vec2f, 256>;
+            var<workgroup> diagonal_mass: array<vec4f, 256>;
+            var<workgroup> tangent: array<vec2f, 256>;
+            var<workgroup> coverage: array<f32, 256>;
+            var<workgroup> elastic_tile: atomic<u32>;
+
+            fn index(p: vec2i) -> u32
+            {
+                return u32(p.y * 16 + p.x);
+            }
+
+            fn velocityAt(p: vec2i, sweep: i32) -> vec2f
+            {
+                if (sweep == 0)
+                {
+                    return velocity[index(p)];
+                }
+                return intermediate[index(p)];
+            }
+
+            fn normalAt(p: vec2i, sweep: i32) -> f32
+            {
+                let m = tangent[index(p)];
+                if (m.x == 0.0)
+                {
+                    return 0.0;
+                }
+                let u = velocityAt(p + vec2i(1, 0), sweep).x - velocityAt(p, sweep).x;
+                let v = velocityAt(p + vec2i(0, 1), sweep).y - velocityAt(p, sweep).y;
+                return m.x * (0.5 * (u - v) / cellSize());
+            }
+
+            fn materialShear(p: vec2i, sweep: i32) -> f32
+            {
+                let m = tangent[index(p)];
+                if (m.y <= 0.0)
+                {
+                    return 0.0;
+                }
+                var strain = 0.0;
+                for (var y = 0; y < 2; y++)
+                {
+                    for (var x = 0; x < 2; x++)
+                    {
+                        let c = p + vec2i(x, y);
+                        let u = velocityAt(c, sweep).x - velocityAt(c - vec2i(0, 1), sweep).x;
+                        let v = velocityAt(c, sweep).y - velocityAt(c - vec2i(1, 0), sweep).y;
+                        strain += coverage[index(c)] * (u + v) / (8.0 * m.y * cellSize());
+                    }
+                }
+                return m.x * strain;
+            }
+
+            fn shearAt(p: vec2i, sweep: i32) -> f32
+            {
+                let h = coverage[index(p)];
+                if (h <= 0.0)
+                {
+                    return 0.0;
+                }
+                var shear = 0.0;
+                for (var y = -1; y <= 0; y++)
+                {
+                    for (var x = -1; x <= 0; x++)
+                    {
+                        let c = p + vec2i(x, y);
+                        shear += h * materialShear(c, sweep) / (4.0 * tangent[index(c)].y);
+                    }
+                }
+                return shear;
+            }
+
+            fn faceMask(p: vec2i) -> vec2<bool>
+            {
+                let horizontal = p.x > 0 && p.x < gridSize().x && p.y >= 0 && p.y < gridSize().y;
+                let vertical = p.y > 0 && p.y < gridSize().y && p.x >= 0 && p.x < gridSize().x;
+                return vec2<bool>(horizontal, vertical);
+            }
+
+            fn execute()
+            {
+                let p = cell();
+                let local = p % vec2i(8);
+                let lane = u32(local.y * 8 + local.x);
+                let origin = p - local - vec2i(4);
+                if (lane == 0u)
+                {
+                    atomicStore(&elastic_tile, 0u);
+                }
+                workgroupBarrier();
+                let d = diagonal(p);
+
+                // The output tile's tangent support is its 10x10 neighbourhood.
+                // Test structural support: tiny stiffness can round away in mass + stiffness.
+                for (var i = lane; i < 100u; i += 64u)
+                {
+                    let q = origin + vec2i(3) + vec2i(i32(i % 10u), i32(i / 10u));
+                    if (validCell(q) && material(q).z > 0.0)
+                    {
+                        atomicStore(&elastic_tile, 1u);
+                    }
+                }
+                workgroupBarrier();
+
+                if (atomicLoad(&elastic_tile) != 0u)
+                {
+                    for (var i = lane; i < 256u; i += 64u)
+                    {
+                        let q = origin + vec2i(i32(i % 16u), i32(i / 16u));
+                        let diagonal_value = diagonal(q);
+                        let r = select(vec2f(0), source(q).xy, faceMask(q));
+                        forcing[i] = r;
+                        diagonal_mass[i] = diagonal_value;
+                        velocity[i] = 0.5 * r / diagonal_value.xy;
+                        tangent[i] = select(vec2f(0), material(q).zw, validCell(q));
+                        let interior = q.x > 0 && q.y > 0 && q.x < gridSize().x && q.y < gridSize().y;
+                        coverage[i] = select(0.0, corners(q).x, interior);
+                    }
+                }
+                workgroupBarrier();
+
+                // Each exact velocity stencil reaches two samples away. Shrink the halo after each sweep.
+                for (var sweep = 0; sweep < 2; sweep++)
+                {
+                    let margin = 2 + 2 * sweep;
+                    for (var i = lane; i < 256u; i += 64u)
+                    {
+                        let q = vec2i(i32(i % 16u), i32(i / 16u));
+                        if (atomicLoad(&elastic_tile) != 0u && all(q >= vec2i(margin)) && all(q < vec2i(16 - margin)))
+                        {
+                            let value = velocityAt(q, sweep);
+                            let normal = normalAt(q, sweep);
+                            let shear = shearAt(q, sweep);
+                            let force = cellSize() * vec2f(
+                                (normal - normalAt(q - vec2i(1, 0), sweep)) + (shearAt(q + vec2i(0, 1), sweep) - shear),
+                                (normalAt(q - vec2i(0, 1), sweep) - normal) + (shearAt(q + vec2i(1, 0), sweep) - shear));
+                            let weights = diagonal_mass[i];
+                            let applied = weights.zw * value - timeStep() * timeStep() * force;
+                            let next = select(vec2f(0), value + 0.5 * (forcing[i] - applied) / weights.xy, faceMask(origin + q));
+                            if (sweep == 0)
+                            {
+                                intermediate[i] = next;
+                            }
+                            else
+                            {
+                                velocity[i] = next;
+                            }
+                        }
+                    }
+                    workgroupBarrier();
+                }
+
+                if (all(p < gridSize() + vec2i(1)))
+                {
+                    var result = 0.875 * source(p).xy / d.xy;
+                    if (atomicLoad(&elastic_tile) != 0u)
+                    {
+                        result = velocity[index(local + vec2i(4))];
+                    }
+                    let mean = statistics(vec2i(0)).x / f32(gridSize().x * gridSize().y);
+                    write0(p, vec4f(mask(p, vec3f(result, correction(p).x - mean)), 0));
+                }
             }
         )wgsl",
-        geometry);
+        geometry, true, {8, 8});
 
     compute.build(normalize, "implicit elastic Lanczos vector", 1, {"source", "control"},
         R"wgsl(
@@ -611,9 +787,13 @@ void ImplicitElasticityGPU::preconditionResidual()
     compute.run(pressure_extract, {&pressure_rhs}, {{"source", &r2}}, parameters);
     reduction.reduce(pressure_rhs, stats, 0);
     const auto& correction = multigrid.apply(pressure_rhs, stats);
-    reduction.reduce(correction, stats, 0);
+    compute.run(pressure_response, {&pressure_rhs},
+        {{"source", &r2}, {"correction", &correction}, {"material", &material}, {"statistics", &stats}}, parameters);
+    reduction.reduce(pressure_rhs, stats, 0);
     compute.run(precondition, {&z},
-        {{"source", &r2}, {"diagonal", &diagonal}, {"correction", &correction}, {"statistics", &stats}}, parameters);
+        {{"source", &r2}, {"diagonal", &diagonal}, {"correction", &pressure_rhs}, {"statistics", &stats},
+            {"material", &material}, {"corners", &corners}},
+        parameters);
 }
 
 void ImplicitElasticityGPU::reduce(const Field& a, const Field& b, Field& output, int mode)

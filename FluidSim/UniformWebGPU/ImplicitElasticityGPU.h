@@ -21,6 +21,9 @@ public:
     };
 
     ImplicitElasticityGPU(Compute& compute, int width, int height, float cell_size, float modulus);
+
+    void setShearModulus(float value) { parameters.value[3] = value; }
+
     Result solve(double dt, double tolerance, int max_iterations, ElasticityGPU& elasticity, const Field& fraction,
         const Field& density, Field& u, Field& v, Field& pressure);
 
@@ -65,6 +68,7 @@ private:
     Kernel matrix;
     Kernel initial;
     Kernel pressure_extract;
+    Kernel pressure_response;
     Kernel precondition;
     Kernel normalize;
     Kernel recurrence;

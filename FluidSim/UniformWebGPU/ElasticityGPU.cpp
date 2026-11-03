@@ -206,7 +206,7 @@ ElasticityGPU::ElasticityGPU(Compute& compute, int width, int height, float cell
         }
     )wgsl";
 
-    compute.build(transport_x, "elastic material history X", 3, {"history", "fraction", "velocity", "transfers"},
+    compute.build(transport_x, "elastic material history X", 3, {"history", "fraction", "velocity", "transfers", "weights"},
         R"wgsl(
             fn execute()
             {
@@ -214,12 +214,16 @@ ElasticityGPU::ElasticityGPU(Compute& compute, int width, int height, float cell
                 let axis = vec2i(1, 0);
                 let f = fraction(p).x;
                 let source = history(p).xyz;
-                let left = transfers(p).x;
-                let right = transfers(p + axis).x;
+                let left = transfers(p)[u32(params.level.x)];
+                let right = transfers(p + axis)[u32(params.level.x)];
                 let in_left = max(left, 0.0);
                 let in_right = max(-right, 0.0);
                 let outflow = max(-left, 0.0) + max(right, 0.0);
-                let c = select(0.0, 1.0, f > 0.5);
+                var c = select(0.0, 1.0, f > 0.5);
+                if (params.level.x != 0.0)
+                {
+                    c = weights(p).z;
+                }
                 let dilation = (velocity(p + axis).x - velocity(p).x) * timeStep() / cellSize();
 
                 // Separate original and incoming material until the paired WY sources cancel.
@@ -244,8 +248,8 @@ ElasticityGPU::ElasticityGPU(Compute& compute, int width, int height, float cell
             {
                 let p = cell();
                 let axis = vec2i(0, 1);
-                let left = transfers(p).x;
-                let right = transfers(p + axis).x;
+                let left = transfers(p)[u32(params.level.x)];
+                let right = transfers(p + axis)[u32(params.level.x)];
                 let in_left = max(left, 0.0);
                 let in_right = max(-right, 0.0);
                 let outflow = max(-left, 0.0) + max(right, 0.0);
@@ -254,7 +258,7 @@ ElasticityGPU::ElasticityGPU(Compute& compute, int width, int height, float cell
                 let earlier = incoming(p);
                 let dilation = (velocity(p + axis).x - velocity(p).x) * timeStep() / cellSize();
 
-                // Under the half-cell outflow bound these are nonnegative material volumes.
+                // Under the winning-phase outflow bound these are nonnegative material volumes.
                 // Roundoff at exhausted donors must not produce unbounded intensive strain.
                 let original = max(0.0, remaining * earlier.w + source.w * dilation);
                 let previous_inflow = remaining * (1.0 - earlier.w);
@@ -454,7 +458,8 @@ void ElasticityGPU::upload(const FluidGridState<float>& state)
         throw std::invalid_argument("Elastic strain dimensions do not match the grid");
     }
 
-    if (!state.liquid_fraction.empty() && state.liquid_fraction.size() != count)
+    const auto& occupancy = state.elastic_fraction.empty() ? state.liquid_fraction : state.elastic_fraction;
+    if (!occupancy.empty() && occupancy.size() != count)
         throw std::invalid_argument("Elastic fraction dimensions do not match the grid");
 
     std::vector<float> packed(3 * count, 0);
@@ -463,7 +468,7 @@ void ElasticityGPU::upload(const FluidGridState<float>& state)
         for (int x = 0; x < width; ++x)
         {
             const int i = y * width + x;
-            const double fraction = state.liquid_fraction.empty() ? 0 : state.liquid_fraction[i];
+            const double fraction = occupancy.empty() ? 0 : occupancy[i];
             if (fraction <= 0)
                 continue;
 
@@ -644,6 +649,7 @@ void ElasticityGPU::importReference(const Field& fraction)
 
 void ElasticityGPU::download(FluidGridState<float>& state)
 {
+    const auto& occupancy = state.elastic_fraction.empty() ? state.liquid_fraction : state.elastic_fraction;
     const auto packed = compute.read(history);
     const size_t count = packed.size() / 3;
     state.elastic_log_xx.resize(count);
@@ -651,7 +657,7 @@ void ElasticityGPU::download(FluidGridState<float>& state)
     state.elastic_log_yy.resize(count);
     for (size_t i = 0; i < count; ++i)
     {
-        const float inverse = state.liquid_fraction[i] > 0 ? 1.0f : 0.0f;
+        const float inverse = occupancy[i] > 0 ? 1.0f : 0.0f;
         state.elastic_log_xx[i] = (packed[3 * i + 2] + packed[3 * i]) * inverse;
         state.elastic_log_xy[i] = packed[3 * i + 1] * inverse;
         state.elastic_log_yy[i] = (packed[3 * i + 2] - packed[3 * i]) * inverse;
@@ -669,14 +675,17 @@ void ElasticityGPU::deform(double dt, const Field& fraction, const Field& u, con
 }
 
 void ElasticityGPU::advect(
-    double dt, bool horizontal, const Field& velocity, const Field& fraction, const Field& transfers)
+    double dt, bool horizontal, const Field& velocity, const Field& fraction, const Field& transfers,
+    const Field* split_weights)
 {
     parameters.grid[2] = horizontal ? 0 : 1;
+    parameters.level[0] = split_weights ? 3.0f : 0.0f;
     parameters.value[1] = float(dt);
     if (horizontal)
     {
         compute.run(transport_x, {&next_history, &correction, &incoming},
-            {{"history", &history}, {"fraction", &fraction}, {"velocity", &velocity}, {"transfers", &transfers}},
+            {{"history", &history}, {"fraction", &fraction}, {"velocity", &velocity}, {"transfers", &transfers},
+                {"weights", split_weights ? split_weights : &fraction}},
             parameters);
     }
     else

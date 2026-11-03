@@ -11,6 +11,19 @@
 namespace fluid
 {
 
+void FluidGridCPU::setElasticStiffness(double coefficient)
+{
+    if (!std::isfinite(coefficient) || coefficient <= 0.0)
+        throw std::invalid_argument("Elastic stiffness must be finite and positive");
+
+    if (liquid_mixture.components.size() != 1 || !liquid_mixture.hasElasticity() || gas_mixture.hasElasticity())
+        throw std::invalid_argument("Elastic stiffness requires one existing elastic condensed ingredient");
+
+    liquid_mixture.components.front().shear_modulus = coefficient;
+    if (elasticity)
+        elasticity->shear_modulus = coefficient;
+}
+
 FluidCellView FluidGridCPU::cellView() const
 {
     return {width, height, cell_size, gas_mixture, substances, {liquid_fraction, liquid_mass, gas_mass, u, v, pressure},
@@ -197,6 +210,9 @@ FluidGridCPU::FluidGridCPU(int w, int h, double cell_size)
 
 void FluidGridCPU::upload(const State& state)
 {
+    if (!state.elastic_fraction.empty())
+        throw std::invalid_argument("Independent elastic/liquid occupancy requires uniform WebGPU");
+
     if (liquid_mixture.hasViscosity() || gas_mixture.hasViscosity())
         throw std::invalid_argument("Viscosity requires uniform WebGPU");
 

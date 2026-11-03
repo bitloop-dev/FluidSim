@@ -94,6 +94,8 @@ struct FluidGridCPU final : FluidGridBase
 
     const FluidMixture& getGasMixture() const override { return gas_mixture; }
 
+    void setElasticStiffness(double coefficient) override;
+
     double getGravityY() const override { return gravity_y; }
 
     void setGravityY(double acceleration) override { gravity_y = acceleration; }

@@ -937,7 +937,8 @@ void FluidGridWebGL::Impl::sumGroups(Program& program, Texture& result, Texture&
 void FluidGridWebGL::upload(const State& state)
 {
     if (liquid_mixture.hasElasticity() || gas_mixture.hasElasticity() ||
-        !state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty())
+        !state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty() ||
+        !state.elastic_fraction.empty())
     {
         throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
     }

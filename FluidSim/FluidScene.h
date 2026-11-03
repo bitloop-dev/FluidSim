@@ -34,6 +34,7 @@ struct FluidSceneSettings
     double gravity_y = 0.0;
     double surface_tension = 0.0;
     bool implicit_elasticity = false;
+    double elastic_stiffness = 0.0; // Zero keeps the scenario's existing material coefficient.
 
     // Mixture component order; omitted entries have zero viscosity.
     std::vector<double> liquid_viscosities;
@@ -48,7 +49,7 @@ struct FluidSceneSettings
         {
             return std::tie(s.grid_w, s.grid_h, s.cell_size, s.fluid_device, s.adaptive_mode, s.frame_time,
                 s.steps_per_second, s.projection_max_iterations, s.projection_tolerance, s.pressure_recovery_frames,
-                s.gravity_y, s.surface_tension, s.implicit_elasticity);
+                s.gravity_y, s.surface_tension, s.implicit_elasticity, s.elastic_stiffness);
         };
 
         auto same = [](const std::vector<double>& a, const std::vector<double>& b)
@@ -74,8 +75,20 @@ struct FluidSceneSettings
 
 struct FluidScenePreset
 {
+    struct Materials
+    {
+        fluid::SubstanceCatalogue substances;
+        fluid::FluidMixture liquid;
+        fluid::FluidMixture gas;
+    };
+
+    using MaterialSetup = Materials (*)();
+
     const char* name;
     FluidSceneSettings settings;
+
+    // Optional scenario-owned catalogue/mixture builder; ordinary settings-only presets keep current materials.
+    MaterialSetup material_setup = nullptr;
 };
 
 // Keep the concrete type visible to Bitloop's buffered UI.
@@ -109,11 +122,14 @@ template <class Derived> struct FluidScene : bl::Scene<Derived>
     double gravity_y; // Positive Y points down.
     double surface_tension;
     bool implicit_elasticity;
+    double elastic_stiffness;
     std::vector<double> liquid_viscosities;
     std::vector<double> gas_viscosities;
     std::vector<std::string> liquid_viscosity_names;
     std::vector<std::string> gas_viscosity_names;
     bool elastic_material = false; // Buffered capability for backend controls.
+    bool elastic_with_liquid = false;
+    FluidScenePreset::MaterialSetup material_setup = nullptr;
 
     bool simulation_failed = false;
     double simulation_time = 0.0;
@@ -222,8 +238,10 @@ void main()
 
     void restartSimulation();
     void applyPreset(const FluidSceneSettings& settings);
+    void applyPreset(const FluidScenePreset& preset);
     void setSurfaceTension(double coefficient);
     void setImplicitElasticity(bool enabled);
+    void setElasticStiffness(double coefficient);
     void setPressureRecoveryFrames(int frames);
     void setComponentViscosity(fluid::Phase phase, size_t component, double coefficient);
     void refreshViscosityControls();

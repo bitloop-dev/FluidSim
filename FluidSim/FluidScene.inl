@@ -21,6 +21,7 @@ FluidScene<Derived>::FluidScene(const FluidSceneSettings& settings, const Config
       gravity_y(settings.gravity_y),
       surface_tension(settings.surface_tension),
       implicit_elasticity(settings.implicit_elasticity),
+      elastic_stiffness(settings.elastic_stiffness),
       liquid_viscosities(settings.liquid_viscosities),
       gas_viscosities(settings.gas_viscosities),
       checkpoint_brotli_quality(config.checkpoint_brotli_quality),
@@ -100,6 +101,8 @@ template <class Derived> void FluidScene<Derived>::restartSimulation()
 
             apply(fluid::Phase::Liquid, liquid_viscosities, fluid.getLiquidMixture().components.size());
             apply(fluid::Phase::Gas, gas_viscosities, fluid.getGasMixture().components.size());
+            if (elastic_stiffness > 0.0)
+                fluid.setElasticStiffness(elastic_stiffness);
             refreshViscosityControls();
 
             fluid.upload(initialFluidState());
@@ -117,6 +120,13 @@ template <class Derived> void FluidScene<Derived>::restartSimulation()
 
 template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneSettings& settings)
 {
+    applyPreset(FluidScenePreset{"Custom", settings});
+}
+
+template <class Derived> void FluidScene<Derived>::applyPreset(const FluidScenePreset& preset)
+{
+    const auto& settings = preset.settings;
+
     // Prepare all backend settings together, including accurate/relaxed mode,
     // before restarting. Applying them one UI control at a time can restart twice.
     auto next_adaptive_settings = adaptive_settings;
@@ -126,8 +136,9 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
     replacement.setDevice(settings.fluid_device);
     replacement.setAdaptiveMode(settings.adaptive_mode);
 
-    auto liquid = fluid.getLiquidMixture();
-    auto gas = fluid.getGasMixture();
+    auto materials = preset.material_setup ? preset.material_setup()
+                                           : FluidScenePreset::Materials{fluid.getSubstances(),
+                                                 fluid.getLiquidMixture(), fluid.getGasMixture()};
     auto apply = [](fluid::FluidMixture& mixture, const std::vector<double>& values)
     {
         if (values.size() > mixture.components.size())
@@ -137,10 +148,13 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
             mixture.components[i].dynamic_viscosity = i < values.size() ? values[i] : 0.0;
     };
 
-    apply(liquid, settings.liquid_viscosities);
-    apply(gas, settings.gas_viscosities);
+    apply(materials.liquid, settings.liquid_viscosities);
+    apply(materials.gas, settings.gas_viscosities);
 
-    replacement.configureMaterials(fluid.getSubstances(), std::move(liquid), std::move(gas));
+    replacement.configureMaterials(
+        std::move(materials.substances), std::move(materials.liquid), std::move(materials.gas));
+    if (settings.elastic_stiffness > 0.0)
+        replacement.setElasticStiffness(settings.elastic_stiffness);
     replacement.setOrigin(fluid.getOrigin());
     replacement.setGravityY(settings.gravity_y);
     replacement.setSurfaceTension(settings.surface_tension);
@@ -177,8 +191,11 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
     gravity_y = settings.gravity_y;
     surface_tension = settings.surface_tension;
     implicit_elasticity = settings.implicit_elasticity;
+    elastic_stiffness = settings.elastic_stiffness;
     liquid_viscosities = settings.liquid_viscosities;
     gas_viscosities = settings.gas_viscosities;
+    if (preset.material_setup)
+        material_setup = preset.material_setup;
 
     liquid_tint_depth = float(settings.gas_proximity_scale * 0.01 * std::hypot(double(grid_w), double(grid_h)));
 
@@ -197,6 +214,10 @@ template <class Derived> void FluidScene<Derived>::applyPreset(const FluidSceneS
 template <class Derived> void FluidScene<Derived>::refreshViscosityControls()
 {
     elastic_material = fluid.hasElasticity();
+    const auto& liquid = fluid.getLiquidMixture();
+    elastic_with_liquid = elastic_material && liquid.components.size() > 1;
+    elastic_stiffness = elastic_material ? liquid.components[liquid.elasticComponentIndex()].shear_modulus : 0.0;
+
     auto refresh = [&](const fluid::FluidMixture& mixture, std::vector<double>& values, std::vector<std::string>& names)
     {
         values.clear();
@@ -232,6 +253,16 @@ template <class Derived> void FluidScene<Derived>::setSurfaceTension(double coef
     });
 
     surface_tension = coefficient;
+}
+
+template <class Derived> void FluidScene<Derived>::setElasticStiffness(double coefficient)
+{
+    withFluidContext([&]
+    {
+        fluid.setElasticStiffness(coefficient);
+    });
+
+    elastic_stiffness = coefficient;
 }
 
 template <class Derived> void FluidScene<Derived>::setImplicitElasticity(bool enabled)

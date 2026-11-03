@@ -406,6 +406,38 @@ double shearWave(int size)
     return max_error;
 }
 
+void stiffnessChanges()
+{
+    FluidGridCPU grid(24, 24, 1.0);
+    FluidGridCPU reference(24, 24, 1.0);
+    configure(grid, 100.0);
+    grid.upload(block(24, 1.0, 1.05));
+    require(grid.step(.002, 1000, 1e-8).converged, "CPU stiffness warmup failed");
+
+    for (double coefficient : {1.0, 1000000.0, 50000.0})
+    {
+        const auto state = grid.download();
+        grid.setElasticStiffness(coefficient);
+        require(grid.download().elastic_log_xx == state.elastic_log_xx, "CPU stiffness edit discarded deformation");
+        configure(reference, coefficient);
+        reference.upload(state);
+        require(grid.step(.002, 1000, 1e-8).converged && reference.step(.002, 1000, 1e-8).converged,
+            "CPU stiffness continuation failed");
+        double error = 0;
+        double scale = 1;
+        for (const auto& pair : {std::pair{&grid.u, &reference.u}, std::pair{&grid.v, &reference.v}})
+        {
+            for (size_t i = 0; i < pair.first->size(); ++i)
+            {
+                error = std::max(error, std::abs((*pair.first)[i] - (*pair.second)[i]));
+                scale = std::max(scale, std::abs((*pair.second)[i]));
+            }
+        }
+        std::cout << "CPU stiffness=" << coefficient << " relative error=" << error / scale << '\n';
+        require(error < 1e-8 * scale, "Live CPU stiffness differs from a freshly configured material");
+    }
+}
+
 void capabilitiesAndDisabledState()
 {
     FluidGridCPU first(24, 24, 1.0);
@@ -657,6 +689,7 @@ int main(int argc, char** argv)
             const double fine_wave = shearWave(40);
             require(fine_wave < 0.6 * coarse_wave, "elastic wave did not converge with grid refinement");
             capabilitiesAndDisabledState();
+            stiffnessChanges();
             invalidStateAndStiffSubsteps();
             restAndReplay();
             oscillation(32, 6.0, 0.01);

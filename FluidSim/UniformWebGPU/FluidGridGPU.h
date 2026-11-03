@@ -49,6 +49,7 @@ public:
     bool hasViscosity() const { return liquid_mixture.hasViscosity() || gas_mixture.hasViscosity(); }
 
     void setComponentViscosity(Phase phase, size_t component, double coefficient);
+    void setElasticStiffness(double coefficient);
 
     bool getImplicitElasticity() const { return implicit_elasticity; }
 

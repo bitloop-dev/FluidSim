@@ -42,7 +42,7 @@ Keep material identity, local state/history and derived properties conceptually 
 
 ## Proposed mechanical progression
 
-The current implementation step is **one shape-retaining elastic solid on the existing grid**. Its CPU experiment and optimized WebGPU port exist; improve and validate its history accuracy before proceeding. Temperature, chemistry and rigid-body extraction are not prerequisites. Bring contact and stiff inclusions forward before detailed thermal or chemical work.
+The current experiment is **one shape-retaining elastic material on the existing grid**. Its CPU implementation and optimized WebGPU port exist. Uniform WebGPU now supports ordinary liquid alongside that elastic material and simulated gas; the pool experiment tests their mechanical coupling. Long-term history accuracy remains an open requirement. Temperature, chemistry and rigid-body extraction are not prerequisites. Bring contact and stiff inclusions forward before detailed thermal or chemical work.
 
 | Step | Small experiment | Evidence needed before extending it |
 | --- | --- | --- |
@@ -56,7 +56,7 @@ Each row is a direction, not one bundled change. Contact, self-contact, relaxati
 
 The original reference map was replaced after gravity impact exposed incompatible geometry/history transport. CPU and WebGPU now transport local logarithmic deformation through the existing solid-volume fluxes, with an objective, stress-work-compatible kinematic update and elastic-wave subdivision. This stores no initial outline or target position. It retains the finite-strain Neo-Hookean response and fully simulated gas.
 
-The gravity=1 soft-block case now passes floor impact and repeated rebound through 60s, with timestep and resolution comparisons. Numerical history mixing still dissipates energy, so this accepts that impact case without closing the first milestone's long-term shape-memory requirement. Improve transport accuracy before adding another material feature. See [implementation and limits](DEVELOPMENT.md#uniform-cpu-and-webgpu-elasticity-experiment) and [validation evidence](.codex/runs/run0167_20261102_material_history/README.md).
+The gravity=1 soft-block case now passes floor impact and repeated rebound through 60s, with timestep and resolution comparisons. Numerical history mixing still dissipates energy, so this accepts that impact case without closing the first milestone's long-term shape-memory requirement. The approved pool extension adds an independent elastic/liquid interface; it does not close the history-accuracy or contact milestones. Improve transport accuracy before accepting long-lived organisms. See [implementation and limits](DEVELOPMENT.md#uniform-cpu-and-webgpu-elasticity-experiment) and [validation evidence](.codex/runs/run0167_20261102_material_history/README.md).
 
 ## Difficulties to expose early
 

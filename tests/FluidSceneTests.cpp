@@ -19,7 +19,8 @@ bool sameState(const FluidGrid::State& a, const FluidGrid::State& b)
 {
     return a.liquid_fraction == b.liquid_fraction && a.liquid_mass == b.liquid_mass && a.gas_mass == b.gas_mass &&
            a.u == b.u && a.v == b.v && a.pressure == b.pressure && a.elastic_log_xx == b.elastic_log_xx &&
-           a.elastic_log_xy == b.elastic_log_xy && a.elastic_log_yy == b.elastic_log_yy;
+           a.elastic_log_xy == b.elastic_log_xy && a.elastic_log_yy == b.elastic_log_yy &&
+           a.elastic_fraction == b.elastic_fraction;
 }
 
 struct WaveProject : BasicProject
@@ -403,6 +404,12 @@ void checkElasticScene()
     const auto initial = scene.fluid.download();
     project.processHeadlessFrame(0.02);
     const auto live = scene.fluid.download();
+    const double live_time = scene.simulation_time;
+    scene.setElasticStiffness(12000.0);
+    require(scene.elastic_stiffness == 12000.0 &&
+                scene.fluid.getLiquidMixture().components[0].shear_modulus == 12000.0 &&
+                scene.simulation_time == live_time && sameState(live, scene.fluid.download()),
+        "Stiffness control restarted the scene or lost deformation");
     bool rejected = false;
     try
     {
@@ -420,11 +427,13 @@ void checkElasticScene()
     project.processHeadlessFrame(0.02);
     const auto continued = scene.fluid.download();
     scene.restoreSceneState(scene_state, checkpoint, scene.grid_w, scene.grid_h, scene.cell_size);
+    require(scene.elastic_stiffness == 12000.0, "Snapshot did not restore stiffness control");
     project.processHeadlessFrame(0.02);
     require(!scene.simulation_failed && sameState(continued, scene.fluid.download()),
         "Elastic scene checkpoint changed continuation");
     scene.restartSimulation();
     require(sameState(initial, scene.fluid.download()), "Elastic scene restart lost reference configuration");
+    require(scene.elastic_stiffness == 12000.0, "Restart lost edited stiffness");
 
     require(
         !scene.implicit_elasticity && !scene.fluid.getImplicitElasticity(), "Elastic scene default is not explicit");
@@ -458,7 +467,11 @@ void checkElasticScene()
     auto implicit_preset = preset;
     implicit_preset.implicit_elasticity = true;
     require(!(implicit_preset == preset), "Implicit toggle did not mark preset Custom");
+    auto stiffness_preset = preset;
+    stiffness_preset.elastic_stiffness = 12000.0;
+    require(!(stiffness_preset == preset), "Stiffness slider did not mark preset Custom");
     scene.applyPreset(preset);
+    require(scene.elastic_stiffness == 50000.0, "Preset did not restore stiffness");
     require(!scene.implicit_elasticity && !scene.fluid.getImplicitElasticity() &&
                 sameState(initial, scene.fluid.download()),
         "Explicit preset failed to restore default mode");
@@ -471,6 +484,182 @@ void checkElasticScene()
     project.stopHeadless();
     std::cout << "PASS GPU ElasticTest modes, recovery rejection, checkpoint continuation, presets and restart\n";
 }
+
+void checkElasticPoolScene()
+{
+    using FluidSim::ElasticTest;
+
+    ImDebugLog log;
+    CaptureContext capture;
+    ElasticProject project;
+    project.configureHeadless(0, &log, {800, 600}, &capture);
+    project.startHeadless();
+    auto& scene = *project.source;
+    const auto old_scene = scene.captureSceneState();
+    fluid::FluidCheckpoint old_checkpoint;
+    require(scene.fluid.saveCheckpoint(old_checkpoint), "Original elastic checkpoint unsupported");
+    const auto old_initial = scene.fluid.download();
+
+    const auto& pool = ElasticTest::presets.back();
+    require(pool.settings == ElasticTest::presets[1].settings &&
+                pool.material_setup != ElasticTest::presets[1].material_setup,
+        "Pool and High Gravity presets no longer distinguish material setup from settings");
+    scene.applyPreset(pool);
+    require(!scene.simulation_failed && scene.grid_w == 720 && scene.grid_h == 480 && scene.elastic_with_liquid &&
+                scene.material_setup == pool.material_setup,
+        "Pool preset did not configure the requested grid and materials");
+
+    const auto initial = scene.fluid.download();
+    const auto& liquid = scene.fluid.getLiquidMixture().components;
+    require(liquid.size() == 2 && liquid[0].shear_modulus == 50000.0 && liquid[1].shear_modulus == 0.0 &&
+                liquid[0].dynamic_viscosity == 1000.0 && liquid[1].dynamic_viscosity == 0.0 &&
+                liquid[0].substance != liquid[1].substance && initial.elastic_fraction.size() == 720 * 480,
+        "Pool is not distinct zero-stiffness water with independent elastic occupancy");
+
+    double water_volume = 0.0;
+    double elastic_volume = 0.0;
+    for (int y = 0; y < 480; ++y)
+    {
+        for (int x = 0; x < 720; ++x)
+        {
+            const size_t i = size_t(y) * 720 + x;
+            const double water = initial.liquid_mass[1][i] / liquid[1].density;
+            require(water == (y >= 360 ? 1.0 : 0.0), "Pool does not occupy exactly the bottom 120 rows");
+            require(std::abs(initial.liquid_fraction[i] - initial.elastic_fraction[i] - water) < 1e-6,
+                "Pool condensed occupancy does not partition into water and elastic material");
+            require(std::abs(initial.liquid_mass[0][i] / liquid[0].density - initial.elastic_fraction[i]) < 1e-6,
+                "Block mass does not match elastic occupancy");
+            if (water > 0.0)
+            {
+                require(initial.elastic_fraction[i] == 0.0 && initial.elastic_log_xx[i] == 0.0 &&
+                            initial.elastic_log_xy[i] == 0.0 && initial.elastic_log_yy[i] == 0.0 &&
+                            initial.gas_mass[0][i] == 0.0,
+                    "Initial pool contains elastic history or atmosphere");
+            }
+
+            water_volume += water;
+            elastic_volume += initial.elastic_fraction[i];
+        }
+    }
+    require(
+        water_volume == 86400.0 && std::abs(elastic_volume - 144.0 * 144.0) < 0.001, "Pool or block volume changed");
+    const size_t water_pixel = (size_t(400) * 720 + 360) * 4;
+    const size_t block_pixel = (size_t(240) * 720 + 360) * 4;
+    require(scene.display_pixels[water_pixel + 2] > scene.display_pixels[water_pixel + 1] &&
+                scene.display_pixels[block_pixel + 1] > scene.display_pixels[block_pixel + 2],
+        "Water and elastic block do not render with distinct material colours");
+
+    // The smaller geometry keeps continuation/restart checks cheap; behavior horizons live in the engine gates.
+    auto small_pool = pool;
+    small_pool.settings.grid_w = 48;
+    small_pool.settings.grid_h = 32;
+    scene.applyPreset(small_pool);
+    const auto small_initial = scene.fluid.download();
+    project.processHeadlessFrame(0.02);
+    require(!scene.simulation_failed, "Small pool scene failed its first frame");
+    const auto live = scene.fluid.download();
+    scene.setElasticStiffness(12000.0);
+    require(
+        sameState(live, scene.fluid.download()) && scene.fluid.getLiquidMixture().components[1].shear_modulus == 0.0,
+        "Pool stiffness edit changed state or stiffened water");
+
+    fluid::FluidSnapshot saved;
+    saved.width = scene.grid_w;
+    saved.height = scene.grid_h;
+    saved.cell_size = scene.cell_size;
+    saved.scene = scene.captureSceneState();
+    require(scene.fluid.saveCheckpoint(saved.checkpoint) && saved.checkpoint.metadata.at("version") == 12,
+        "Pool did not save the independent-occupancy checkpoint");
+    const auto snapshot = fluid::decodeFluidSnapshot(fluid::encodeFluidSnapshot(saved));
+    project.processHeadlessFrame(0.02);
+    const auto continued = scene.fluid.download();
+    scene.restoreSceneState(snapshot.scene, snapshot.checkpoint, snapshot.width, snapshot.height, snapshot.cell_size);
+    require(
+        scene.elastic_with_liquid && scene.material_setup == pool.material_setup && scene.elastic_stiffness == 12000.0,
+        "Restored pool lost material setup or live controls");
+    project.processHeadlessFrame(0.02);
+    require(
+        !scene.simulation_failed && sameState(continued, scene.fluid.download()), "Pool snapshot changed continuation");
+
+    bool rejected = false;
+    auto broken = snapshot.scene;
+    broken["scenario_state"]["water_substance"] = broken["scenario_state"]["substances"][0];
+    try
+    {
+        scene.restoreSceneState(broken, snapshot.checkpoint, snapshot.width, snapshot.height, snapshot.cell_size);
+    }
+    catch (const std::runtime_error&)
+    {
+        rejected = true;
+    }
+    require(rejected && sameState(continued, scene.fluid.download()), "Invalid pool snapshot changed the active state");
+
+    scene.restartSimulation();
+    require(sameState(small_initial, scene.fluid.download()), "Restored pool did not restart its initial geometry");
+    rejected = false;
+    try
+    {
+        scene.setSurfaceTension(1.0);
+    }
+    catch (const std::invalid_argument&)
+    {
+        rejected = true;
+    }
+    require(rejected && scene.surface_tension == 0.0 && sameState(small_initial, scene.fluid.download()),
+        "Unsupported pool surface tension changed active state");
+
+    auto cpu = small_pool;
+    cpu.settings.fluid_device = fluid::FluidDevice::CPU;
+    cpu.settings.liquid_viscosities = {0.0, 0.0};
+    rejected = false;
+    try
+    {
+        scene.applyPreset(cpu);
+    }
+    catch (const std::invalid_argument&)
+    {
+        rejected = true;
+    }
+    require(
+        rejected && scene.fluid_device == fluid::FluidDevice::GPU && sameState(small_initial, scene.fluid.download()),
+        "Unsupported pool CPU preset changed active state");
+
+    // Ingredient order is not an elasticity API contract.
+    auto reordered = scene.fluid.getLiquidMixture();
+    std::swap(reordered.components[0], reordered.components[1]);
+    scene.fluid.destroy();
+    scene.fluid.configureMaterials(scene.fluid.getSubstances(), reordered, scene.fluid.getGasMixture());
+    std::swap(scene.liquid_viscosities[0], scene.liquid_viscosities[1]);
+    scene.restartSimulation();
+    require(!scene.simulation_failed && scene.elastic_stiffness == 12000.0,
+        "Stiffness display assumed the first ingredient is elastic");
+    scene.setElasticStiffness(15000.0);
+    require(scene.fluid.getLiquidMixture().components[0].shear_modulus == 0.0 &&
+                scene.fluid.getLiquidMixture().components[1].shear_modulus == 15000.0,
+        "Reordered scene stiffness edit changed the water ingredient");
+
+    // Old scene JSON has no water field and retains its original single-material path.
+    scene.restoreSceneState(old_scene, old_checkpoint, 32, 32, 1.0);
+    scene.restartSimulation();
+    require(!scene.elastic_with_liquid && scene.material_setup == ElasticTest::blockMaterials &&
+                sameState(old_initial, scene.fluid.download()),
+        "Old elastic snapshot inherited the pool on restart");
+    scene.applyPreset(small_pool);
+    for (size_t index = 0; index < 2; ++index)
+    {
+        auto block = ElasticTest::presets[index];
+        block.settings.grid_w = 32;
+        block.settings.grid_h = 32;
+        scene.applyPreset(block);
+        require(!scene.elastic_with_liquid && scene.fluid.getLiquidMixture().components.size() == 1 &&
+                    scene.fluid.download().elastic_fraction.empty(),
+            "Original block preset retained pool materials or selected the new transport path");
+    }
+
+    project.stopHeadless();
+    std::cout
+        << "PASS 120-row pool geometry, colours, live stiffness, snapshot continuation, old-file restart and preset transitions\n";
+}
 }
 
 int main()
@@ -481,6 +670,7 @@ int main()
         checkExtensions();
         checkViscosityControls();
         checkElasticScene();
+        checkElasticPoolScene();
         return 0;
     }
     catch (const std::exception& error)

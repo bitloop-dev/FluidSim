@@ -209,6 +209,106 @@ struct ImplicitElasticityGPUTestAccess
         std::cout << "operator symmetry=" << std::abs(left - right) / scale << '\n';
         if (std::abs(left - right) > 2e-7 * scale)
             throw std::runtime_error("implicit saddle operator is not symmetric");
+
+        compute.write(solver.r2, a);
+        solver.preconditionResidual();
+        const auto pa = compute.read(solver.z);
+        compute.write(solver.r2, b);
+        solver.preconditionResidual();
+        const auto pb = compute.read(solver.z);
+        const double pre_left = std::inner_product(a.begin(), a.end(), pb.begin(), 0.0);
+        const double pre_right = std::inner_product(b.begin(), b.end(), pa.begin(), 0.0);
+        const double energy = std::inner_product(a.begin(), a.end(), pa.begin(), 0.0);
+        double pre_scale = 0;
+        for (size_t i = 0; i < a.size(); ++i)
+            pre_scale += std::abs(double(a[i]) * pb[i]) + std::abs(double(b[i]) * pa[i]);
+        std::cout << "preconditioner symmetry=" << std::abs(pre_left - pre_right) / pre_scale << " energy=" << energy
+                  << '\n';
+        if (std::abs(pre_left - pre_right) > 2e-6 * pre_scale || !(energy > 0))
+            throw std::runtime_error("implicit preconditioner lost symmetry or positivity");
+
+        // Compare the fused tile/halo calculation with three independently staged sweeps of the actual operator.
+        const auto diagonal = compute.read(solver.diagonal);
+        std::vector<float> reference(a.size());
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            if (i % 3 != 2)
+                reference[i] = .5f * a[i] / diagonal[(i / 3) * 4 + i % 3];
+        }
+        for (int sweep = 0; sweep < 2; ++sweep)
+        {
+            compute.write(solver.w1, reference);
+            solver.apply(solver.w1, solver.product);
+            const auto applied = compute.read(solver.product);
+            for (size_t i = 0; i < a.size(); ++i)
+            {
+                if (i % 3 != 2)
+                    reference[i] += .5f * (a[i] - applied[i]) / diagonal[(i / 3) * 4 + i % 3];
+            }
+        }
+        double error_squared = 0;
+        double reference_squared = 0;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            if (i % 3 != 2)
+            {
+                error_squared += std::pow(double(pa[i]) - reference[i], 2);
+                reference_squared += double(reference[i]) * reference[i];
+            }
+        }
+        std::cout << "preconditioner polynomial error=" << std::sqrt(error_squared / reference_squared) << '\n';
+        if (error_squared > 4e-12 * reference_squared)
+            throw std::runtime_error("fused preconditioner differs from staged velocity operator");
+
+        std::vector<float> sum(a.size());
+        for (size_t i = 0; i < sum.size(); ++i)
+            sum[i] = a[i] + b[i];
+        compute.write(solver.r2, sum);
+        solver.preconditionResidual();
+        const auto combined = compute.read(solver.z);
+        error_squared = 0;
+        reference_squared = 0;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            const double expected = double(pa[i]) + pb[i];
+            error_squared += std::pow(double(combined[i]) - expected, 2);
+            reference_squared += expected * expected;
+        }
+        if (error_squared > 16e-12 * reference_squared)
+            throw std::runtime_error("implicit preconditioner is not linear");
+        compute.write(solver.r2, a);
+        solver.preconditionResidual();
+        if (compute.read(solver.z) != pa)
+            throw std::runtime_error("implicit preconditioner depends on previous workspace contents");
+
+        std::vector<float> constant(a.size());
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+                constant[3 * (y * (width + 1) + x) + 2] = 7;
+        }
+        compute.write(solver.r2, constant);
+        solver.preconditionResidual();
+        for (float value : compute.read(solver.z))
+        {
+            if (std::abs(value) > 1e-6)
+                throw std::runtime_error("implicit preconditioner retained constant pressure gauge");
+        }
+    }
+
+    static void tangentContrast(ImplicitElasticityGPU& solver, const Field& density)
+    {
+        auto& compute = solver.compute;
+        auto material = compute.read(solver.material);
+        const int width = solver.parameters.grid[0];
+        const int height = solver.parameters.grid[1];
+        material[4 * ((height / 2) * width + width / 2) + 2] *= 10000;
+        compute.write(solver.material, material);
+        compute.run(solver.build_diagonal, {&solver.diagonal},
+            {{"material", &solver.material}, {"corners", &solver.corners}, {"density", &density}}, solver.parameters);
+        compute.run(solver.weights, {&solver.coefficients}, {{"diagonal", &solver.diagonal}}, solver.parameters);
+        solver.multigrid.rebuild(solver.coefficients);
+        symmetry(solver);
     }
 };
 }
@@ -303,7 +403,7 @@ double wave(Compute& compute, double dt)
     return 0;
 }
 
-void block(Compute& compute, int width, int height)
+void block(Compute& compute, int width, int height, bool filled = false)
 {
     constexpr double modulus = 20000;
     Field fraction = compute.field(width, height);
@@ -327,7 +427,8 @@ void block(Compute& compute, int width, int height)
         for (int x = 0; x < width; ++x)
         {
             const auto i = y * width + x;
-            const float f = float(overlap(x, side * 1.15, width * .5) * overlap(y, side / 1.15, height * .5));
+            const float f =
+                filled ? 1 : float(overlap(x, side * 1.15, width * .5) * overlap(y, side / 1.15, height * .5));
             state.liquid_fraction[i] = f;
             rho[i] = .01f + 9.99f * f;
         }
@@ -346,6 +447,8 @@ void block(Compute& compute, int width, int height)
     if (width == 9)
         ImplicitElasticityGPUTestAccess::denseReference(solver);
     ImplicitElasticityGPUTestAccess::symmetry(solver);
+    if (filled)
+        ImplicitElasticityGPUTestAccess::tangentContrast(solver, density);
 }
 }
 
@@ -361,6 +464,8 @@ int main()
         require(fine < .65 * coarse, "implicit wave did not improve with timestep refinement");
         wave(compute, 0.1);
         block(compute, 9, 7);
+        block(compute, 3, 17, true);
+        block(compute, 17, 11, true);
         block(compute, 63, 51);
         block(compute, 512, 400);
         std::cout << "PASS implicit elasticity\n";

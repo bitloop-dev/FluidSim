@@ -56,7 +56,8 @@ void FluidGridAdaptiveWebGPU::setAdaptiveSettings(const FluidAdaptiveSettings& v
 
 void FluidGridAdaptiveWebGPU::upload(const State& state)
 {
-    if (!state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty())
+    if (!state.elastic_log_xx.empty() || !state.elastic_log_xy.empty() || !state.elastic_log_yy.empty() ||
+        !state.elastic_fraction.empty())
         throw std::invalid_argument("Elasticity requires uniform CPU or WebGPU");
 
     auto initialized =
