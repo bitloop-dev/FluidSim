@@ -28,7 +28,7 @@ FluidScenePreset::Materials ElasticTest::poolMaterials()
     const auto water = materials.substances.add({"Water", {0.1f, 0.4f, 1.0f}});
 
     // Water shares the condensed density scale, but carries no elastic stress or history.
-    materials.liquid.components.push_back({water, 10.0});
+    materials.liquid.components.push_back({water, 100.0});
     return materials;
 }
 

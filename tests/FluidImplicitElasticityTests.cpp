@@ -10,6 +10,84 @@ namespace fluid::webgpu
 {
 struct ImplicitElasticityGPUTestAccess
 {
+    static void tiles(Compute& compute, int width, int height)
+    {
+        ImplicitElasticityGPU solver(compute, width, height, 1, 50000);
+        solver.parameters.value[1] = .013f;
+        Field fraction = compute.field(width, height);
+        Field density = compute.field(width, height);
+        Field u = compute.field(width + 1, height);
+        Field v = compute.field(width, height + 1);
+        std::vector<float> source(size_t(width + 1) * (height + 1) * 3);
+        for (size_t i = 0; i < source.size(); ++i)
+            source[i] = float(std::sin(double(i) * .37));
+        const std::vector<float> zero(source.size());
+        compute.write(density, std::vector<float>(size_t(width) * height, 10));
+
+        // Reuse scratch through disjoint movement, full coverage, disappearance and tiny remnants.
+        for (int pattern = 0; pattern < 5; ++pattern)
+        {
+            compute.write(solver.solution, pattern == 3 ? zero : source);
+            std::vector<float> f(size_t(width) * height);
+            std::vector<float> m(f.size() * 4);
+            for (int y = 0; y < height; ++y)
+            {
+                for (int x = 0; x < width; ++x)
+                {
+                    const int i = y * width + x;
+                    if (pattern == 0 && x < 17 && y < 19)
+                        f[i] = .4f;
+                    if (pattern == 1 && x >= width - 19 && y >= height - 18)
+                        f[i] = .6f;
+                    if (pattern == 2)
+                        f[i] = 1;
+                    if (pattern == 4 && (x % 29 < 2 && y % 23 < 2))
+                        f[i] = 1e-20f;
+                    m[4 * i] = .3f * f[i];
+                    m[4 * i + 1] = -.2f * f[i];
+                    m[4 * i + 2] = 100000 * f[i];
+                    m[4 * i + 3] = f[i];
+                }
+            }
+            compute.write(fraction, f);
+            compute.write(solver.material, m);
+            compute.run(solver.corner, {&solver.corners}, {{"fraction", &fraction}}, solver.parameters);
+            compute.run(solver.build_diagonal, {&solver.diagonal},
+                {{"material", &solver.material}, {"corners", &solver.corners}, {"density", &density}},
+                solver.parameters);
+            solver.rebuildTiles(fraction);
+            const auto flags = compute.read(solver.tile_flags);
+            std::vector<float> expected(flags.size());
+            for (int y = 0; y < height; ++y)
+            {
+                for (int x = 0; x < width; ++x)
+                {
+                    if (f[y * width + x] > 0)
+                        expected[(y / 8) * solver.tile_flags.width + x / 8] = 1;
+                }
+            }
+            if (flags != expected)
+                throw std::runtime_error("Elastic tile mask differs from material support");
+
+            // Exercise both coefficient modes and the globally evaluated consumers.
+            solver.use_tiles = true;
+            solver.apply(solver.solution, solver.product);
+            const auto tiled_product = compute.read(solver.product);
+            solver.trueResidual(solver.next_r, u, v);
+            const auto tiled_residual = compute.read(solver.next_r);
+            const auto tiled_rounding = compute.read(solver.rounding);
+            solver.use_tiles = false;
+            solver.apply(solver.solution, solver.product);
+            const auto dense_product = compute.read(solver.product);
+            solver.trueResidual(solver.next_r, u, v);
+            const auto dense_residual = compute.read(solver.next_r);
+            const auto dense_rounding = compute.read(solver.rounding);
+            if (tiled_product != dense_product || tiled_residual != dense_residual || tiled_rounding != dense_rounding)
+                throw std::runtime_error("Tiled elastic operator/residual differs from dense execution");
+        }
+        std::cout << "tiles " << width << 'x' << height << " dense operator/residual equivalence passed\n";
+    }
+
     static void denseReference(ImplicitElasticityGPU& solver)
     {
         auto& compute = solver.compute;
@@ -457,6 +535,8 @@ int main()
     try
     {
         Compute compute;
+        ImplicitElasticityGPUTestAccess::tiles(compute, 37, 29);
+        ImplicitElasticityGPUTestAccess::tiles(compute, 259, 137);
         ImplicitElasticityGPUTestAccess::kinematics(compute, 0, .3);
         ImplicitElasticityGPUTestAccess::kinematics(compute, .2, 0);
         const double coarse = wave(compute, 0.01);

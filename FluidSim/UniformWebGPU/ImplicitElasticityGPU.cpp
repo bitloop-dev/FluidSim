@@ -33,6 +33,60 @@ ImplicitElasticityGPU::ImplicitElasticityGPU(Compute& compute, int width, int he
     control = compute.field(3, 1, 4);
     next_control = compute.field(3, 1, 4);
     next_history = cell(3);
+    tile_flags = compute.field((width + 8) / 8, (height + 8) / 8);
+
+    // Clear scratch once per frozen geometry, including tiles vacated since the previous solve.
+    compute.build(mark_tiles, "implicit elastic tile support", 3, {"fraction"},
+        R"wgsl(
+            var<workgroup> active_count: atomic<u32>;
+
+            fn execute()
+            {
+                let p = cell();
+                let local = p % 8;
+                if (all(local == vec2i(0)))
+                {
+                    atomicStore(&active_count, 0u);
+                }
+                workgroupBarrier();
+
+                if (all(p < gridSize()))
+                {
+                    if (fraction(p).x > 0.0)
+                    {
+                        atomicStore(&active_count, 1u);
+                    }
+                    // Preserve the true-residual allowance even on devices retaining subnormal values.
+                    let zero_ulp = bitcast<f32>(1u);
+                    let uncertainty = (timeStep() * zero_ulp + zero_ulp) + zero_ulp;
+                    write1(p, vec4f(0, 0, uncertainty, uncertainty));
+                }
+                if (all(p <= gridSize()))
+                {
+                    // Match the gather pass's ulp(0) allowance in inactive corners.
+                    write2(p, vec4f(0, bitcast<f32>(1u), 0, 0));
+                }
+                workgroupBarrier();
+
+                if (all(local == vec2i(0)))
+                {
+                    write0(p / 8, vec4f(f32(atomicLoad(&active_count))));
+                }
+            }
+        )wgsl",
+        {}, true);
+
+    const std::string tile_support = R"wgsl(
+        fn elasticCell() -> vec2i
+        {
+            let p = cell();
+            if (tiles(p / 8).x <= 0.0)
+            {
+                return gridSize() + 1;
+            }
+            return p;
+        }
+    )wgsl";
 
     compute.build(clear, "implicit elastic recurrence reset", 4, {},
         R"wgsl(
@@ -208,88 +262,126 @@ ImplicitElasticityGPU::ImplicitElasticityGPU(Compute& compute, int width, int he
             }
         )wgsl");
 
-    compute.build(strain, "implicit elastic tangent strain", 1, {"source", "material", "corners"},
-        R"wgsl(
-            fn execute()
+    const std::string strain_body = R"wgsl(
+        fn strainAt(p: vec2i)
+        {
+            let m = material(p);
+            var e = vec2f(0);
+            var uncertainty = vec2f(0);
+            if (m.w > 0.0)
             {
-                let p = cell();
-                let m = material(p);
-                var e = vec2f(0);
-                var uncertainty = vec2f(0);
-                if (m.w > 0.0)
-                {
-                    let ux = source(p + vec2i(1, 0)).x - source(p).x;
-                    let vy = source(p + vec2i(0, 1)).y - source(p).y;
-                    e.x = 0.5 * (ux - vy) / cellSize();
-                    if (mode() == 1)
-                    {
-                        uncertainty.x = 0.5 * (ulp(source(p + vec2i(1, 0)).x) + ulp(source(p).x) +
-                            ulp(source(p + vec2i(0, 1)).y) + ulp(source(p).y) + ulp(ux) + ulp(vy) +
-                            ulp(ux - vy)) / cellSize() + ulp(e.x);
-                    }
-                    for (var y = 0; y < 2; y++)
-                    {
-                        for (var x = 0; x < 2; x++)
-                        {
-                            let c = p + vec2i(x, y);
-                            let uy = source(c).x - source(c - vec2i(0, 1)).x;
-                            let vx = source(c).y - source(c - vec2i(1, 0)).y;
-                            let weighted = corners(c).x * (uy + vx);
-                            let divisor = 8.0 * m.w * cellSize();
-                            let term = weighted / divisor;
-                            e.y += term;
-                            if (mode() == 1)
-                            {
-                                uncertainty.y += corners(c).x * (ulp(source(c).x) + ulp(source(c - vec2i(0, 1)).x) +
-                                    ulp(source(c).y) + ulp(source(c - vec2i(1, 0)).y) + ulp(uy) + ulp(vx) +
-                                    ulp(uy + vx)) / divisor + ulp(weighted) / divisor + ulp(term) + ulp(e.y);
-                            }
-                        }
-                    }
-                }
-                var q = m.z * e;
+                let ux = source(p + vec2i(1, 0)).x - source(p).x;
+                let vy = source(p + vec2i(0, 1)).y - source(p).y;
+                e.x = 0.5 * (ux - vy) / cellSize();
                 if (mode() == 1)
                 {
-                    let increment = timeStep() * q;
-                    uncertainty = timeStep() * (m.z * uncertainty + vec2f(ulp(q.x), ulp(q.y))) +
-                        vec2f(ulp(increment.x), ulp(increment.y));
-                    q = m.xy + increment;
-                    uncertainty += vec2f(ulp(q.x), ulp(q.y));
+                    uncertainty.x = 0.5 * (ulp(source(p + vec2i(1, 0)).x) + ulp(source(p).x) +
+                        ulp(source(p + vec2i(0, 1)).y) + ulp(source(p).y) + ulp(ux) + ulp(vy) +
+                        ulp(ux - vy)) / cellSize() + ulp(e.x);
                 }
-                write0(p, vec4f(q, uncertainty));
-            }
-        )wgsl",
-        geometry);
-
-    compute.build(gather, "implicit elastic corner stress", 1, {"source", "material", "corners"},
-        R"wgsl(
-            fn execute()
-            {
-                let p = cell();
-                let h = corners(p).x;
-                var shear = 0.0;
-                var uncertainty = 0.0;
-                if (h > 0.0)
+                for (var y = 0; y < 2; y++)
                 {
-                    for (var y = -1; y <= 0; y++)
+                    for (var x = 0; x < 2; x++)
                     {
-                        for (var x = -1; x <= 0; x++)
+                        let c = p + vec2i(x, y);
+                        let uy = source(c).x - source(c - vec2i(0, 1)).x;
+                        let vx = source(c).y - source(c - vec2i(1, 0)).y;
+                        let weighted = corners(c).x * (uy + vx);
+                        let divisor = 8.0 * m.w * cellSize();
+                        let term = weighted / divisor;
+                        e.y += term;
+                        if (mode() == 1)
                         {
-                            let c = p + vec2i(x, y);
-                            let term = h * source(c).y / (4.0 * material(c).w);
-                            shear += term;
-                            if (mode() == 1)
-                            {
-                                uncertainty += (h * source(c).w + ulp(h * source(c).y)) /
-                                    (4.0 * material(c).w) + ulp(term) + ulp(shear);
-                            }
+                            uncertainty.y += corners(c).x * (ulp(source(c).x) + ulp(source(c - vec2i(0, 1)).x) +
+                                ulp(source(c).y) + ulp(source(c - vec2i(1, 0)).y) + ulp(uy) + ulp(vx) +
+                                ulp(uy + vx)) / divisor + ulp(weighted) / divisor + ulp(term) + ulp(e.y);
                         }
                     }
                 }
-                write0(p, vec4f(shear, uncertainty + ulp(shear), 0, 0));
             }
-        )wgsl",
+            var q = m.z * e;
+            if (mode() == 1)
+            {
+                let increment = timeStep() * q;
+                uncertainty = timeStep() * (m.z * uncertainty + vec2f(ulp(q.x), ulp(q.y))) +
+                    vec2f(ulp(increment.x), ulp(increment.y));
+                q = m.xy + increment;
+                uncertainty += vec2f(ulp(q.x), ulp(q.y));
+            }
+            write0(p, vec4f(q, uncertainty));
+        }
+    )wgsl";
+    compute.build(strain, "implicit elastic tangent strain", 1, {"source", "material", "corners"},
+        strain_body +
+            R"wgsl(
+                fn execute()
+                {
+                    strainAt(cell());
+                }
+            )wgsl",
         geometry);
+    compute.build(tiled_strain, "implicit elastic tiled strain", 1, {"source", "material", "corners", "tiles"},
+        strain_body +
+            R"wgsl(
+                fn execute()
+                {
+                    let p = elasticCell();
+                    if (all(p < gridSize()))
+                    {
+                        strainAt(p);
+                    }
+                }
+            )wgsl",
+        geometry + tile_support, true);
+
+    const std::string gather_body = R"wgsl(
+        fn gatherAt(p: vec2i)
+        {
+            let h = corners(p).x;
+            var shear = 0.0;
+            var uncertainty = 0.0;
+            if (h > 0.0)
+            {
+                for (var y = -1; y <= 0; y++)
+                {
+                    for (var x = -1; x <= 0; x++)
+                    {
+                        let c = p + vec2i(x, y);
+                        let term = h * source(c).y / (4.0 * material(c).w);
+                        shear += term;
+                        if (mode() == 1)
+                        {
+                            uncertainty += (h * source(c).w + ulp(h * source(c).y)) /
+                                (4.0 * material(c).w) + ulp(term) + ulp(shear);
+                        }
+                    }
+                }
+            }
+            write0(p, vec4f(shear, uncertainty + ulp(shear), 0, 0));
+        }
+    )wgsl";
+    compute.build(gather, "implicit elastic corner stress", 1, {"source", "material", "corners"},
+        gather_body +
+            R"wgsl(
+                fn execute()
+                {
+                    gatherAt(cell());
+                }
+            )wgsl",
+        geometry);
+    compute.build(tiled_gather, "implicit elastic tiled corner stress", 1, {"source", "material", "corners", "tiles"},
+        gather_body +
+            R"wgsl(
+                fn execute()
+                {
+                    let p = elasticCell();
+                    if (all(p <= gridSize()))
+                    {
+                        gatherAt(p);
+                    }
+                }
+            )wgsl",
+        geometry + tile_support, true);
 
     const std::string force = R"wgsl(
         fn forceAt(p: vec2i) -> vec2f
@@ -760,12 +852,42 @@ ImplicitElasticityGPU::ImplicitElasticityGPU(Compute& compute, int width, int he
         geometry);
 }
 
+void ImplicitElasticityGPU::rebuildTiles(const Field& fraction)
+{
+    compute.run(mark_tiles, {&tile_flags, &stress, &corner_stress}, {{"fraction", &fraction}}, parameters,
+        {unsigned(corners.width), unsigned(corners.height), 1});
+}
+
+void ImplicitElasticityGPU::buildStress(const Field& source, bool gather_corners)
+{
+    if (use_tiles)
+    {
+        compute.run(tiled_strain, {&stress},
+            {{"source", &source}, {"material", &material}, {"corners", &corners}, {"tiles", &tile_flags}}, parameters);
+        if (gather_corners)
+        {
+            // Positive corner coverage requires four positive cells, including the corner's own cell.
+            compute.run(tiled_gather, {&corner_stress},
+                {{"source", &stress}, {"material", &material}, {"corners", &corners}, {"tiles", &tile_flags}},
+                parameters);
+        }
+    }
+    else
+    {
+        compute.run(
+            strain, {&stress}, {{"source", &source}, {"material", &material}, {"corners", &corners}}, parameters);
+        if (gather_corners)
+        {
+            compute.run(gather, {&corner_stress}, {{"source", &stress}, {"material", &material}, {"corners", &corners}},
+                parameters);
+        }
+    }
+}
+
 void ImplicitElasticityGPU::apply(const Field& source, Field& destination)
 {
     parameters.grid[2] = 0;
-    compute.run(strain, {&stress}, {{"source", &source}, {"material", &material}, {"corners", &corners}}, parameters);
-    compute.run(
-        gather, {&corner_stress}, {{"source", &stress}, {"material", &material}, {"corners", &corners}}, parameters);
+    buildStress(source);
     compute.run(matrix, {&destination},
         {{"source", &source}, {"stress", &stress}, {"shear", &corner_stress}, {"diagonal", &diagonal}}, parameters);
 }
@@ -773,9 +895,7 @@ void ImplicitElasticityGPU::apply(const Field& source, Field& destination)
 void ImplicitElasticityGPU::trueResidual(Field& destination, const Field& u, const Field& v)
 {
     parameters.grid[2] = 1;
-    compute.run(strain, {&stress}, {{"source", &solution}, {"material", &material}, {"corners", &corners}}, parameters);
-    compute.run(
-        gather, {&corner_stress}, {{"source", &stress}, {"material", &material}, {"corners", &corners}}, parameters);
+    buildStress(solution);
     compute.run(residual, {&destination, &rounding},
         {{"source", &solution}, {"u", &u}, {"v", &v}, {"stress", &stress}, {"shear", &corner_stress},
             {"diagonal", &diagonal}},
@@ -819,6 +939,8 @@ ImplicitElasticityGPU::Result ImplicitElasticityGPU::solve(double dt, double tol
     compute.run(prepare, {&material},
         {{"history", &elasticity.history}, {"fraction", &fraction}, {"corners", &corners}, {"u", &u}, {"v", &v}},
         parameters);
+    if (use_tiles)
+        rebuildTiles(fraction);
     compute.run(build_diagonal, {&diagonal}, {{"material", &material}, {"corners", &corners}, {"density", &density}},
         parameters);
     compute.run(weights, {&coefficients}, {{"diagonal", &diagonal}}, parameters);
@@ -926,8 +1048,7 @@ ImplicitElasticityGPU::Result ImplicitElasticityGPU::solve(double dt, double tol
     if (result.converged || result.precision_limited)
     {
         parameters.grid[2] = 0;
-        compute.run(
-            strain, {&stress}, {{"source", &solution}, {"material", &material}, {"corners", &corners}}, parameters);
+        buildStress(solution, false);
         compute.run(commit, {&u, &v, &next_history, &pressure},
             {{"solution", &solution}, {"material", &material}, {"stress", &stress}, {"history", &elasticity.history}},
             parameters, {unsigned(solution.width), unsigned(solution.height), 1});

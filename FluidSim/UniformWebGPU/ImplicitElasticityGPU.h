@@ -59,12 +59,16 @@ private:
     Field control;
     Field next_control;
     Field next_history;
+    Field tile_flags;
     Kernel prepare;
     Kernel corner;
     Kernel build_diagonal;
     Kernel weights;
     Kernel strain;
     Kernel gather;
+    Kernel mark_tiles;
+    Kernel tiled_strain;
+    Kernel tiled_gather;
     Kernel matrix;
     Kernel initial;
     Kernel pressure_extract;
@@ -78,6 +82,12 @@ private:
     Kernel residual;
     Kernel commit;
     Kernel clear;
+
+    // The dense path is also the reference for selective-dispatch regression tests.
+    bool use_tiles = true;
+
+    void rebuildTiles(const Field& fraction);
+    void buildStress(const Field& source, bool gather_corners = true);
 
     void apply(const Field& source, Field& destination);
     void trueResidual(Field& destination, const Field& u, const Field& v);
