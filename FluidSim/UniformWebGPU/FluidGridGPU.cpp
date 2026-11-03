@@ -110,6 +110,7 @@ struct FluidGridGPU::Impl : UniformKernels
     int previous_solve_iterations = 7;
     float cached_outflow = 0;
     bool velocity_stats_valid = false;
+    double divergence_above_roundoff = 0;
     int transport_steps = 0;
     size_t next_pressure_work_warning = 2000;
     double next_transport_work_warning = 256.0;
@@ -258,18 +259,18 @@ struct FluidGridGPU::Impl : UniformKernels
         runner.run(program, outputs, inputs, params);
     }
 
-    void reduceStatistics(Field& result)
+    void reduceStatistics(Field& result, int mode = 0)
     {
         // The first level already holds packed statistics. Keep the original 4x4 reduction order.
         const Field* source = &reduction_levels.front();
         for (size_t i = 1; i < reduction_levels.size(); ++i)
         {
             const Field& level = reduction_levels[i];
-            run(reduce_statistics, {&level}, {{"source", source}});
+            run(reduce_statistics, {&level}, {{"source", source}}, 0, mode);
             source = &level;
         }
 
-        run(reduce_statistics, {&result}, {{"source", source}});
+        run(reduce_statistics, {&result}, {{"source", source}}, 0, mode);
     }
 
     std::array<float, 4> readScalar(const Field& field)
@@ -1124,7 +1125,7 @@ FluidGridGPU::ProjectionResult FluidGridGPU::step(
         if (timings)
             timings->pressure_ms += elapsed();
 
-        if (!result.converged)
+        if (!result.accepted())
             return result;
 
         gpu->velocity_projection_pending = false;
@@ -1163,6 +1164,7 @@ FluidGridGPU::ProjectionResult FluidGridGPU::step(
         result.iterations += projection.iterations;
         result.max_divergence = projection.max_divergence;
         result.converged = projection.converged;
+        result.precision_limited = projection.precision_limited;
         result.relaxed = projection.relaxed;
         result.max_volume_error = std::max(result.max_volume_error, projection.max_volume_error);
         result.rms_volume_error = std::max(result.rms_volume_error, projection.rms_volume_error);
@@ -1212,7 +1214,7 @@ FluidGridGPU::ProjectionResult FluidGridGPU::project(double dt, int max_iteratio
                             ? gpu->projectRecovery(dt, max_iterations, divergence_tolerance, false)
                             : gpu->project(dt, max_iterations, divergence_tolerance);
 
-    if (result.converged)
+    if (result.accepted())
         gpu->velocity_projection_pending = false;
 
     gpu->runner.flush();
@@ -1409,6 +1411,8 @@ FluidGridGPU::ProjectionResult FluidGridGPU::Impl::project(
     v.swap(next_v);
 
     ProjectionResult result;
+    double best_divergence = std::numeric_limits<double>::infinity();
+    int stalled_refinements = 0;
 
     for (;;)
     {
@@ -1440,9 +1444,23 @@ FluidGridGPU::ProjectionResult FluidGridGPU::Impl::project(
         // measure actual divergence; refine from zero if float recurrence drift left too much error
         result.max_divergence = maxDivergence();
         result.converged = result.max_divergence <= divergence_tolerance;
+        result.precision_limited =
+            !result.converged && velocity_stats_valid && divergence_above_roundoff <= divergence_tolerance;
 
-        if (result.converged || iterations == 0 || (max_iterations >= 0 && result.iterations >= max_iterations))
+        if (result.accepted() || iterations == 0 || (max_iterations >= 0 && result.iterations >= max_iterations))
             break;
+
+        if (result.max_divergence < 0.99 * best_divergence)
+        {
+            best_divergence = result.max_divergence;
+            stalled_refinements = 0;
+        }
+        else if (++stalled_refinements == 4)
+        {
+            // Re-solving a correction that cannot change the stored velocity must not stall a frame.
+            // Error above the local rounding bound remains a failed projection.
+            break;
+        }
 
         if (max_iterations < 0 && size_t(result.iterations) >= next_pressure_work_warning)
         {
@@ -1466,11 +1484,12 @@ double FluidGridGPU::Impl::maxDivergence()
     else
     {
         run(velocity_stats, {&reduction_levels.front()}, {{"u", &u}, {"v", &v}});
-        reduceStatistics(residual_stats);
+        reduceStatistics(residual_stats, 1);
     }
 
     const auto result = readScalar(residual_stats);
     cached_outflow = result[2];
+    divergence_above_roundoff = result[0];
     velocity_stats_valid = result[3] == 0;
 
     return velocity_stats_valid ? result[1] : std::numeric_limits<double>::infinity();
@@ -1509,9 +1528,13 @@ FluidGridGPU::ProjectionResult FluidGridGPU::Impl::projectRecovery(
     {
         // Establish gravity/capillary support once; subsequent corrections are deliberately incomplete.
         auto result = project(dt, max_iterations, divergence_tolerance, with_capillarity);
-        r.seeded = result.converged;
+        r.seeded = result.accepted();
         if (!recoveryHealth(result))
+        {
             result.converged = false;
+            result.precision_limited = false;
+            r.seeded = false;
+        }
 
         return result;
     }

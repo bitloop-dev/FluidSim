@@ -85,7 +85,8 @@ public:
     void destroy();
 
     // Optional completed-work stage timings add GPU synchronization.
-    // Negative pressure budget runs to convergence; nonnegative budgets retain bounded-call semantics.
+    // Negative budgets run to convergence/local float precision, stopping on stalled refinement.
+    // Nonnegative budgets additionally bound the total iteration count.
     ProjectionResult step(
         double dt, int max_iterations = 200, double divergence_tolerance = 1e-3, FluidStepTimings* timings = nullptr);
 

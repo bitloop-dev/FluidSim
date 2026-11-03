@@ -1,5 +1,6 @@
 #include "UniformCPU/FluidGridCPU.h"
 #include "UniformWebGPU/FluidGridGPU.h"
+#include "UniformWebGPU/FluidGridWebGPU.h"
 #include "UniformWebGPU/FluidUniformWebGPUKernels.h"
 #include "FluidTestSetup.h"
 #include "FluidGridEditTests.h"
@@ -301,6 +302,110 @@ void projectionMatchesCPU()
             require(error < 0.005, "GPU pressure correction differs from the CPU reference");
         }
     }
+}
+
+void pressureStopsAtLocalFloatPrecision()
+{
+    constexpr int n = 32;
+    constexpr double tolerance = 1e-9;
+    FluidGridGPU grid(n, n, 1);
+    const auto water = grid.substances.add({"Water", {0.0f, 0.0f, 1.0f}});
+    const auto air = grid.substances.add({"Air", {0.0f, 0.0f, 0.0f}});
+    grid.liquid_mixture.components = {{water, 10.0}};
+    grid.gas_mixture.components = {{air, 0.1}};
+    grid.gravity_y = 0;
+
+    FluidGridGPU::State state;
+    state.liquid_fraction.assign(n * n, 1.0f);
+    state.liquid_mass.assign(1, std::vector<float>(n * n, 10.0f));
+    state.gas_mass.assign(1, std::vector<float>(n * n, 0.0f));
+    state.u.resize((n + 1) * n);
+    state.v.resize(n * (n + 1));
+    const double k = std::acos(-1.0) / n;
+    for (int y = 0; y < n; ++y)
+    {
+        for (int x = 1; x < n; ++x)
+            state.u[y * (n + 1) + x] = float(3000 * std::sin(k * x) * std::cos(k * (y + 0.5)));
+    }
+    for (int y = 1; y < n; ++y)
+    {
+        for (int x = 0; x < n; ++x)
+            state.v[y * n + x] = float(-3000 * std::cos(k * (x + 0.5)) * std::sin(k * y));
+    }
+
+    // Check each cell independently in double precision, using its own stored face velocities.
+    auto checkRounding = [&](const FluidGridGPU::State& projected, double requested_tolerance)
+    {
+        auto ulp = [](float value)
+        {
+            const float magnitude = std::abs(value);
+            return double(std::nextafter(magnitude, std::numeric_limits<float>::infinity())) - magnitude;
+        };
+
+        for (int y = 0; y < n; ++y)
+        {
+            for (int x = 0; x < n; ++x)
+            {
+                const float left = projected.u[y * (n + 1) + x];
+                const float right = projected.u[y * (n + 1) + x + 1];
+                const float top = projected.v[y * n + x];
+                const float bottom = projected.v[(y + 1) * n + x];
+                const double div = (double(right) - left) + (double(bottom) - top);
+                require(std::abs(div) <= requested_tolerance + ulp(left) + ulp(right) + ulp(top) + ulp(bottom),
+                    "Pressure accepted divergence beyond local rounding precision");
+            }
+        }
+    };
+
+    for (int budget : {100, -1})
+    {
+        grid.upload(state);
+        const auto result = grid.project(0.01, budget, tolerance);
+        require(result.accepted() && result.precision_limited && !result.converged && result.iterations < 100 &&
+                    result.max_divergence > tolerance,
+            "Pressure did not stop honestly at float velocity precision");
+        checkRounding(grid.download(), tolerance);
+        std::cout << "pressure precision budget=" << budget << " iterations=" << result.iterations
+                  << " divergence=" << result.max_divergence << '\n';
+    }
+
+    // Recovery must seed once from an accepted float-limited projection.
+    grid.setPressureRecoveryTime(0.1);
+    grid.upload(state);
+    const auto seeded = grid.project(0.01, -1, tolerance);
+    require(seeded.accepted() && seeded.precision_limited && !seeded.relaxed,
+        "Pressure recovery rejected its precision-limited seed");
+    require(grid.project(0.01, 0, tolerance).relaxed, "Pressure recovery repeated its initial projection");
+    grid.destroy();
+    grid.setPressureRecoveryTime(0);
+
+    // The common API must preserve the status through a complete transport/pressure step.
+    fluid::FluidGridWebGPU api(n, n, 1);
+    api.configureMaterials(grid.substances, grid.liquid_mixture, grid.gas_mixture);
+    api.setGravityY(0);
+    api.upload(fluid::convertFluidState<double>(state));
+    grid.upload(state);
+    constexpr double step_tolerance = 1e-5;
+    const auto native = grid.step(1e-5, -1, step_tolerance);
+    const auto common = api.step(1e-5, -1, step_tolerance);
+    require(native.accepted() && native.precision_limited && !native.converged && common.accepted() &&
+                common.precision_limited == native.precision_limited && common.converged == native.converged &&
+                common.iterations == native.iterations && common.max_divergence == native.max_divergence,
+        "Common WebGPU step lost pressure precision status");
+    checkRounding(grid.download(), step_tolerance);
+
+    // Fast remote cells must not excuse an unresolved residual in a slow cell.
+    state.u.assign(state.u.size(), 0);
+    state.v.assign(state.v.size(), 0);
+    state.u[10 * (n + 1) + 10] = 1;
+    state.u[24 * (n + 1) + 25] = 1048576;
+    state.u[25 * (n + 1) + 25] = -1048576;
+    state.v[25 * n + 24] = -1048576;
+    state.v[25 * n + 25] = 1048576;
+    grid.upload(state);
+    const auto failed = grid.project(0.01, 0, tolerance);
+    require(!failed.accepted() && !failed.precision_limited && failed.iterations == 0,
+        "Roundoff allowance hid unresolved physical divergence");
 }
 
 void zeroTimeAndFailedProjectionAreHandled()
@@ -1495,7 +1600,15 @@ int main(int argc, char** argv)
         {
             projectionMatchesCPU();
             largeMixedPressureConvergesWithinDefaultBudget();
+            pressureStopsAtLocalFloatPrecision();
             std::cout << "PASS WebGPU projection\n";
+            return 0;
+        }
+
+        if (argc == 2 && std::string(argv[1]) == "--precision")
+        {
+            pressureStopsAtLocalFloatPrecision();
+            std::cout << "PASS WebGPU pressure precision\n";
             return 0;
         }
 
@@ -1533,6 +1646,7 @@ int main(int argc, char** argv)
         fluid::test::bulkMaterialEditsPreserveEveryCell<FluidGridGPU>();
         fluid::test::repeatedMaterialEditsPreservePhaseVolumes<FluidGridGPU>();
         projectionMatchesCPU();
+        pressureStopsAtLocalFloatPrecision();
         unresolvedFragmentsFollowFlow();
         tinyFractionsRemainFinite();
         transportMatchesCPU();

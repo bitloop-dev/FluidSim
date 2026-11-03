@@ -263,7 +263,9 @@ void evolvingParity()
             const auto a = api.step(0.01, 2000, 1e-3);
             const auto b = native.step(0.01, 2000, 1e-3);
 
-            require(a.converged && b.converged && a.iterations == b.iterations && a.max_divergence == b.max_divergence,
+            require(a.accepted() && b.accepted() && a.converged == b.converged &&
+                        a.precision_limited == b.precision_limited && a.iterations == b.iterations &&
+                        a.max_divergence == b.max_divergence,
                 "Evolving common/native projection differs");
         }
 

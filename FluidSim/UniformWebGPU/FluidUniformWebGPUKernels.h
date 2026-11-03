@@ -165,6 +165,13 @@ struct UniformKernels
 
         compute.build(velocity_stats, "fluid divergence and CFL", 1, {"u", "v"},
             R"wgsl(
+                fn velocityUlp(value: f32) -> f32
+                {
+                    // Float face storage sets a local absolute accuracy floor as speed increases.
+                    let exponent = bitcast<u32>(abs(value)) & 0x7f800000u;
+                    return bitcast<f32>(exponent) * 1.1920928955078125e-7;
+                }
+
                 fn execute()
                 {
                     let base = cell() * 4;
@@ -184,7 +191,7 @@ struct UniformKernels
                             let right = u(p + vec2i(1, 0)).x;
                             let up = v(p).x;
                             let down = v(p + vec2i(0, 1)).x;
-                            let div = (right - left + down - up) / cellSize();
+                            let div = ((right - left) + (down - up)) / cellSize();
                             let outflow = max(right, 0.0) + max(-left, 0.0) + max(down, 0.0) + max(-up, 0.0);
 
                             if (!finite(div) || !finite(outflow))
@@ -193,7 +200,9 @@ struct UniformKernels
                                 continue;
                             }
 
-                            result.x += div;
+                            // One ulp per face covers storage and divergence arithmetic rounding.
+                            let rounding = (velocityUlp(left) + velocityUlp(right) + velocityUlp(up) + velocityUlp(down)) / cellSize();
+                            result.x = max(result.x, max(0.0, abs(div) - rounding));
                             result.y = max(result.y, abs(div));
                             result.z = max(result.z, outflow);
                         }
@@ -272,7 +281,7 @@ struct UniformKernels
                                 value = vec4f(0, 0, 0, 1);
                             }
 
-                            result.x += value.x;
+                            result.x = select(result.x + value.x, max(result.x, value.x), mode() == 1);
                             result.y = max(result.y, value.y);
                             result.w = max(result.w, value.w);
                             result.z = max(result.z, value.z);

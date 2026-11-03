@@ -72,7 +72,10 @@ struct FluidProjectionResult
     double rms_volume_error = 0.0;
     int viscosity_iterations = 0; // Dispatched slots; convergence is observed in batches of four.
 
-    bool accepted() const { return converged || relaxed; }
+    // Pressure accepted within a local allowance for float velocity rounding.
+    bool precision_limited = false;
+
+    bool accepted() const { return converged || relaxed || precision_limited; }
 };
 
 }
