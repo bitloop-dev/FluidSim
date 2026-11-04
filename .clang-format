@@ -4,8 +4,8 @@ ColumnLimit: 120
 BreakBeforeBraces: Allman
 NamespaceIndentation: None
 AccessModifierOffset: -4
-AllowShortFunctionsOnASingleLine: InlineOnly
-AllowShortBlocksOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortLambdasOnASingleLine: None

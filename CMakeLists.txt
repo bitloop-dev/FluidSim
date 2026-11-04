@@ -28,6 +28,7 @@ list(REMOVE_ITEM SIM_SOURCES
 list(FILTER SIM_SOURCES EXCLUDE REGEX "/(UniformCPU|UniformWebGPU|AdaptiveCPU|AdaptiveWebGPU|Shared|LegacyWebGL)/.*\\.cpp$")
 
 bitloop_new_project(FluidSim ${SIM_SOURCES})
+bitloop_add_dependency(FluidSim  subprojects/ElasticEngine)
 
 bitloop_finalize()
 
