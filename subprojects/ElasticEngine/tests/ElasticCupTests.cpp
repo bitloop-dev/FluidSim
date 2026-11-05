@@ -149,6 +149,8 @@ void cupDrop(double stiffness, int ticks, double minimum_node_distance = 8.0,
     double maximum_ms = 0.0;
     std::size_t maximum_contacts = 0;
     double minimum_spacing = 10.0;
+    double final_window_spacing = 10.0;
+    double final_window_ms = 0.0;
     std::size_t previous_bonds = engine.getBonds().size();
     for (int tick = 1; tick <= ticks; ++tick)
     {
@@ -166,6 +168,8 @@ void cupDrop(double stiffness, int ticks, double minimum_node_distance = 8.0,
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         total_ms += ms;
         maximum_ms = std::max(maximum_ms, ms);
+        if (tick > ticks - std::min(ticks, 100))
+            final_window_ms += ms;
         maximum_contacts = std::max(maximum_contacts, engine.getCollisionStats().contacts);
         for (NodeId id = 0; id < initial.size(); ++id)
         {
@@ -230,10 +234,15 @@ void cupDrop(double stiffness, int ticks, double minimum_node_distance = 8.0,
                         {
                             double spacing = (node.position - engine.getNode(other).position).mag();
                             minimum_spacing = std::min(minimum_spacing, spacing);
+                            if (tick > ticks - std::min(ticks, 100))
+                                final_window_spacing = std::min(final_window_spacing, spacing);
 
-                            // Residual <= distance / 4000; 20% recovery bounds accumulated overlap at 5 residuals.
-                            require(spacing >= minimum_node_distance * (1.0 - 0.00125) - 1e-7,
-                                "Node overlap exceeded the recovery allowance");
+                            // Soft contacts have a load-dependent spacing error; keep cup compression below 2%.
+                            if (spacing < minimum_node_distance * 0.98 - 1e-7)
+                            {
+                                std::cerr << "spacing failure tick=" << tick << " spacing=" << spacing << '\n';
+                                require(false, "Soft node overlap exceeded 2% of clearance");
+                            }
                         }
                     }
                 }
@@ -244,6 +253,17 @@ void cupDrop(double stiffness, int ticks, double minimum_node_distance = 8.0,
         {
             DVec2 ab = engine.getNode(face[1]).position - engine.getNode(face[0]).position;
             DVec2 ac = engine.getNode(face[2]).position - engine.getNode(face[0]).position;
+            if (ab.x * ac.y - ab.y * ac.x >= 0.0)
+            {
+                std::cerr << "inverted tick=" << tick << " face=" << face[0] << ',' << face[1] << ',' << face[2]
+                          << " area=" << ab.x * ac.y - ab.y * ac.x << '\n';
+                for (auto id : face)
+                {
+                    const auto& node = engine.getNode(id);
+                    std::cerr << id << " position=" << node.position.x << ',' << node.position.y
+                              << " velocity=" << node.velocity.x << ',' << node.velocity.y << '\n';
+                }
+            }
             require(ab.x * ac.y - ab.y * ac.x < 0.0, "Cup lattice triangle inverted");
         }
         if ((stiffness < 1.0 && tick % 32 == 0) || tick == 256 || tick == 512 || tick == 1024 || tick == ticks)
@@ -265,6 +285,8 @@ void cupDrop(double stiffness, int ticks, double minimum_node_distance = 8.0,
                       << " mean_ms=" << total_ms / tick << " peak_ms=" << maximum_ms << std::endl;
         }
     }
+    std::cout << "cup final_window=" << std::min(ticks, 100) << " minimum_spacing=" << final_window_spacing
+              << " mean_ms=" << final_window_ms / std::min(ticks, 100) << std::endl;
 }
 
 }
@@ -303,7 +325,7 @@ void runCupTests(bool extreme)
     {
         try
         {
-            cupDrop(stiffness, stiffness < 1.0 ? 512 : 2048);
+            cupDrop(stiffness, 2048);
         }
         catch (const std::exception& error)
         {

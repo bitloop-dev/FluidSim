@@ -27,7 +27,8 @@ void ElasticEngine::advance(double dt, DVec2 acceleration)
     for (double rate : damping_weights)
         maximum_rate = std::max(maximum_rate, rate);
 
-    int substeps = std::max(1, static_cast<int>(std::ceil(dt * std::sqrt(maximum_rate))));
+    // Share one schedule between explicit springs and contact Soft Step.
+    int substeps = std::max(1, static_cast<int>(std::ceil(dt * std::max(16.0, std::sqrt(maximum_rate)))));
     double step_dt = dt / substeps;
     for (int step = 0; step < substeps; ++step)
         this->step(step_dt, acceleration);
@@ -74,7 +75,16 @@ void ElasticEngine::step(double dt, DVec2 acceleration)
             node.position += dt * node.velocity;
     }
 
+    collisions.relax(nodes);
     applySprings(dt);
+
+    for (auto& node : nodes)
+    {
+        if (!node.active)
+            continue;
+
+        node.position = node.position.rounded();
+    }
 }
 
 void ElasticEngine::applySprings(double dt)

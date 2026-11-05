@@ -115,13 +115,19 @@ void overlapRecovery()
         auto a = engine.addNode({0.0, 0.0}, drift);
         auto b = engine.addNode({7.98, 0.0}, drift);
         engine.step(dt);
-        require(std::abs((engine.getNode(b).position - engine.getNode(a).position).mag() - 7.984) < 1e-9,
-            "Overlap recovery did not correct 20% of the spacing error");
+        // Critical damping, omega * dt = pi / 2: implicit spring displacement for an isolated pair.
+        double frequency_step = 0.5 * std::acos(-1.0);
+        double recovered = 0.02 * frequency_step * frequency_step / ((1.0 + frequency_step) * (1.0 + frequency_step));
+        require(std::abs((engine.getNode(b).position - engine.getNode(a).position).mag() - 7.98 - recovered) < 1e-9,
+            "Soft contact disagrees with the isolated damped spring response");
+        require(
+            (engine.getNode(a).velocity - drift).mag() < 1e-10 && (engine.getNode(b).velocity - drift).mag() < 1e-10,
+            "Relaxation retained overlap recovery energy");
         require((engine.getNode(a).velocity + engine.getNode(b).velocity - 2.0 * drift).mag() < 1e-10,
             "Overlap recovery changed total momentum");
 
         // Damping away recovery motion exposes whether small spacing errors accumulate or settle.
-        double previous = 7.984;
+        double previous = 7.98 + recovered;
         for (int step = 0; step < 64; ++step)
         {
             engine.getNode(a).velocity = drift;
@@ -170,6 +176,53 @@ void recoveryRespectsMembranes()
             "Membrane contact prevented spacing recovery");
     }
 }
+
+void restingContactHistory()
+{
+    Engine engine;
+    engine.setMinimumNodeDistance(8.0);
+    auto a = engine.addNode({-40.0, 0.0}, {}, true);
+    auto b = engine.addNode({40.0, 0.0}, {}, true);
+    engine.addBoundary(a, b);
+    for (int i = 0; i < 32; ++i)
+        engine.addNode({0.0, 0.001 + 8.0 * i});
+
+    // Resting support must survive changing substep durations without stale impulse strength.
+    for (int step = 0; step < 4096; ++step)
+    {
+        engine.step(step % 2 == 0 ? 0.0625 : 0.125, {0.0, -0.02});
+        require(engine.getNode(2).position.y > 0.0, "Cached support crossed the floor");
+        for (ElasticEngine::NodeId id = 3; id < engine.getNodes().size(); ++id)
+        {
+            const auto& node = engine.getNode(id);
+            require(node.position.isFinite() && node.velocity.isFinite(), "Contact history became nonfinite");
+            require(node.position.y - engine.getNode(id - 1).position.y > 7.84,
+                "Persistent support accumulated excessive overlap");
+        }
+    }
+
+    // Deleting a loaded wall must remove its cached support as well as its geometry.
+    engine.removeBond(0);
+    for (int i = 0; i < 64; ++i)
+        engine.step(0.125, {0.0, -0.02});
+    require(engine.getNode(2).position.y < 0.0, "A removed wall retained cached contact forces");
+}
+
+void approachingMembraneGap()
+{
+    // Ending just short of a crossing must preserve the gap, before roundoff can erase the side.
+    for (double side : {-1.0, 1.0})
+    {
+        Engine engine;
+        auto a = engine.addNode({-40.0, 200.0}, {}, true);
+        auto b = engine.addNode({40.0, 200.0}, {}, true);
+        auto node = engine.addNode({0.0, 200.0 + side * 0.0101}, {0.0, -side * 0.16});
+        engine.addBoundary(a, b);
+        engine.step(0.0625);
+        require(side * (engine.getNode(node).position.y - 200.0) >= 0.0009,
+            "An approaching membrane contact lost its numerical safety gap");
+    }
+}
 }
 
 void runNodeContactTests()
@@ -180,5 +233,7 @@ void runNodeContactTests()
     restingAndSeparatingNodes();
     overlapRecovery();
     recoveryRespectsMembranes();
+    restingContactHistory();
+    approachingMembraneGap();
     std::cout << "PASS node clearance, bonded neighbours, continuous contact and fixed supports\n";
 }

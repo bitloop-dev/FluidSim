@@ -50,6 +50,8 @@ public:
     // The caller supplies an existing, active node. Edit topology between steps.
     void removeNode(NodeId id)
     {
+        collisions.clearHistory();
+
         // Remove references before allowing this slot to be reused.
         std::erase_if(bonds, [id](const ElasticBond& bond)
         {
@@ -80,6 +82,8 @@ public:
     // Bond indices are temporary: removal, zero stiffness or tensile fracture can change them.
     void removeBond(std::size_t index)
     {
+        collisions.clearHistory();
+
         if (index != bonds.size() - 1)
             bonds[index] = bonds.back();
 
@@ -175,7 +179,7 @@ struct ElasticEngine_Scene : public Scene<ElasticEngine_Scene>
     struct Config
     {
         ElasticScenario scenario = ElasticScenario::CupDrop;
-        double breaking_strain = 0.02; // Material lattice; the projectile and cup walls stay unbreakable.
+        double breaking_strain = 0.3; // Material lattice; the projectile and cup walls stay unbreakable.
         double minimum_node_distance = 8.0;
     };
 

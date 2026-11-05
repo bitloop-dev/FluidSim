@@ -43,11 +43,9 @@ class ElasticCollisions
         NodeId b;
         double coordinate; // -0.5 at a, +0.5 at b; centered to preserve endpoint symmetry.
         bl::DVec2 normal;
-        double speed_limit;
-        double speed_tolerance;
-        double response_scale = 0.0;
-        double closing = 0.0;
-        double speed_change = 0.0;
+        double clearance;
+        double mass = 0.0;
+        double impulse = 0.0;
     };
 
     std::vector<Segment> segments;
@@ -56,24 +54,33 @@ class ElasticCollisions
     std::vector<NodeId> visited;
     std::vector<bool> connected;
     std::vector<Contact> contacts;
-    std::vector<bl::DVec2> original_velocities;
+    std::vector<Contact> previous_contacts;
+    std::vector<Contact> barriers;
     std::vector<ElasticVectorSum> velocity_changes;
     std::vector<ElasticSum> node_weights;
     std::vector<NodeId> contact_nodes;
+    std::vector<bl::DVec2> original_velocities;
     bl::DVec2 frame_velocity{};
     double step_dt = 1.0;
+    double previous_dt = 0.0;
     double minimum_node_distance = 0.0;
+    bool reverse_order = false;
     ElasticCollisionStats stats;
 
     void buildGrid(const std::vector<ElasticNode>& nodes, const std::vector<ElasticBond>& bonds);
-    void findContacts(const std::vector<ElasticNode>& nodes);
-    void resolveContacts(std::vector<ElasticNode>& nodes);
+    void findContacts(const std::vector<ElasticNode>& nodes, std::vector<Contact>& result, bool safety);
+    void prepareContacts(std::vector<ElasticNode>& nodes);
+    void solveContacts(std::vector<ElasticNode>& nodes, bool use_bias);
+    bool protectCrossings(std::vector<ElasticNode>& nodes, const std::vector<ElasticBond>& bonds);
+    static double contactMass(const Contact& contact, const std::vector<ElasticNode>& nodes);
+    static void applyImpulse(const Contact& contact, std::vector<ElasticNode>& nodes, double impulse);
 
 public:
-    // Small node-spacing overlaps recover gradually; intersecting membranes are not supported.
+    // Contact softness allows small spacing errors; intersecting initial membranes are unsupported.
     void setMinimumNodeDistance(double distance)
     {
         minimum_node_distance = distance;
+        clearHistory();
     }
 
     double getMinimumNodeDistance() const
@@ -83,6 +90,16 @@ public:
 
     // False restores input velocities; the caller must not commit an unchecked move.
     bool resolve(std::vector<ElasticNode>& nodes, const std::vector<ElasticBond>& bonds, double dt = 1.0);
+
+    // Run after checked movement, before spring forces for the next step.
+    void relax(std::vector<ElasticNode>& nodes);
+
+    void clearHistory()
+    {
+        contacts.clear();
+        previous_contacts.clear();
+        previous_dt = 0.0;
+    }
 
     const ElasticCollisionStats& getStats() const
     {

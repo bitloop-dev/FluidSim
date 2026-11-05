@@ -215,6 +215,11 @@ int main(int argc, char** argv)
     try
     {
         runNodeContactTests();
+        if (argc == 2 && std::string_view(argv[1]) == "--symmetry")
+        {
+            runSymmetryTests();
+            return 0;
+        }
         if (argc >= 2 && std::string_view(argv[1]) == "--current-scene")
         {
             runCurrentSceneTests(argc >= 3 ? std::stoi(argv[2]) : 400);
