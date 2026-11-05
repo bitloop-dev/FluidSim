@@ -2,6 +2,7 @@
 #include "scenarios/CrashingWave.h"
 #include "scenarios/SplashCubes.h"
 #include "scenarios/HoneyTap.h"
+#include "scenarios/ElasticTest.h"
 
 SIM_BEG;
 
@@ -11,7 +12,7 @@ void FluidSim_Project::UI::sidebar()
 {
     bl_scoped(viewport_count, scenario);
 
-    ImGui::Combo("Scenario (next start)", &scenario, "Splash Cubes\0Crashing Wave\0Honey Tap\0");
+    ImGui::Combo("Scenario (next start)", &scenario, "Splash Cubes\0Crashing Wave\0Honey Tap\0Elastic Test\0");
 
     ImGui::SliderInt("Viewport Count", &viewport_count, 1, 8);
 
@@ -52,6 +53,8 @@ void FluidSim_Project::UI::sidebar()
                 plot_scene(*wave, colour_index);
             else if (const auto* tap = dynamic_cast<const HoneyTap*>(scene))
                 plot_scene(*tap, colour_index);
+            else if (const auto* elastic = dynamic_cast<const ElasticTest*>(scene))
+                plot_scene(*elastic, colour_index);
 
             ++colour_index;
         }
@@ -79,6 +82,8 @@ void FluidSim_Project::restartAllSimulations()
             wave->restartSimulation();
         else if (auto* tap = dynamic_cast<HoneyTap*>(scene))
             tap->restartSimulation();
+        else if (auto* elastic = dynamic_cast<ElasticTest*>(scene))
+            elastic->restartSimulation();
     }
 }
 
@@ -119,8 +124,10 @@ void FluidSim_Project::projectPrepare(Layout& layout)
             add_scene(create<SplashCubes>(id));
         else if (scenario == 1)
             add_scene(create<CrashingWave>(id));
-        else
+        else if (scenario == 2)
             add_scene(create<HoneyTap>(id));
+        else
+            add_scene(create<ElasticTest>(id));
     }
 }
 

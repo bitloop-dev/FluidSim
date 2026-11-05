@@ -8,6 +8,8 @@ CrashingWave and SplashCubes use blue water (H2O), red glycerol (C3H8O3), dark h
 
 SplashCubes starts with two stationary liquid squares: glycerol on the left and water on the right, each side 30% of the shorter domain dimension with a 6% gap. The pair is horizontally centred; its top is at 90% of `(height - side)`, preserving the current lower placement. Exact rectangle/cell overlap supplies partial edge cells. Both scenarios retain the 1024x720 grid and gravity 500; SplashCubes uses surface tension 5000 and CrashingWave 20000. The closed bottom wall supplies the ground; ordinary fluid transport/projection produces the fall, splash and miscible-liquid mixing.
 
+ElasticTest is a gas-only preparation scene on a 512x420 grid. It has its own hydrogen/helium catalogue and reuses `scenarios/PerlinAtmosphere.h` for the diagnostic pattern. Both gases have density .1; initial velocity, gravity, viscosity and surface tension are zero. No liquid ingredients, elastic structures or FluidGrid/ElasticEngine coupling are configured.
+
 ## Chemical definitions and modelling assumptions
 
 `Element` now means a chemical building block: name, symbol and atomic mass. `Substance` means a transported ingredient: name, diagnostic colour and a list of `{ElementId, count}` entries giving its elemental composition. `SubstanceCatalogue` owns both tables, with `addElement`, `getElement`, `elementCount`, substance `add`/indexing and `molarMass(SubstanceId)` in g/mol. IDs are local to that catalogue. An empty composition explicitly means unspecified chemistry, retained for abstract test materials and historical snapshots. A formula describes elemental inventory, not bonds, reactivity or a unique isomer.
